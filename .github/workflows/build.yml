@@ -14,4 +14,30 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - run: dotnet build -c Release
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Test
+        run: |
+          if (Get-ChildItem -Recurse -Filter *.Tests.csproj) {
+            dotnet test -c Release --logger "console;verbosity=normal"
+          } else {
+            Write-Host "no test projects yet - skipping"
+          }
+
+      - name: Publish
+        run: |
+          dotnet publish -c Release -r win-x64   --self-contained true  -p:PublishSingleFile=true -o publish/win-x64
+          dotnet publish -c Release -r win-arm64 --self-contained true  -p:PublishSingleFile=true -o publish/win-arm64
+          dotnet publish -c Release -r win-x64   --self-contained false -p:PublishSingleFile=true -o publish/win-x64-framework-dependent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScweenSpit-${{ github.sha }}
+          path: |
+            publish/win-x64/ScweenSpit.exe
+            publish/win-arm64/ScweenSpit.exe
+            publish/win-x64-framework-dependent/ScweenSpit.exe
+          if-no-files-found: error
+          retention-days: 30

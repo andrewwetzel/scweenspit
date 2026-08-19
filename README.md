@@ -4,19 +4,27 @@ A tray utility that splits each monitor into virtual sub-screens and keeps windo
 them. Maximizing a window, or going borderless-fullscreen (Chrome F11, Chrome PWAs,
 YouTube, VLC), fills only the sub-screen the window is in instead of the whole display.
 
+## Get a binary
+
+Every push to `main` builds on `windows-latest` and attaches the executables to the run as
+artifacts; tagging `v*` publishes them to a GitHub Release. Three flavours:
+
+| Artifact | Size | Requires |
+| --- | --- | --- |
+| `win-x64` self-contained | ~145 MB | nothing |
+| `win-arm64` self-contained | ~158 MB | nothing (Windows on ARM) |
+| `win-x64-framework-dependent` | ~185 KB | .NET 8 Desktop Runtime |
+
 ## Build
 
-Requires the .NET 8 SDK on Windows.
+The .NET 8 SDK is all you need — and thanks to `EnableWindowsTargeting`, the project compiles
+(and cross-publishes runnable Windows binaries) from Linux and macOS too. Only *running* it
+needs Windows.
 
 ```
-dotnet build -c Release
-dotnet run  -c Release
-```
-
-Single file, no install:
-
-```
-dotnet publish -c Release -r win-x64
+dotnet build -c Release          # typechecks anywhere
+./scripts/publish.sh             # all three Windows binaries, from any OS
+dotnet run -c Release            # Windows only
 ```
 
 ## Use

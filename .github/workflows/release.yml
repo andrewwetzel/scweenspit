@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish
+        run: |
+          dotnet publish -c Release -r win-x64   --self-contained true  -p:PublishSingleFile=true -o publish/x64
+          dotnet publish -c Release -r win-arm64 --self-contained true  -p:PublishSingleFile=true -o publish/arm64
+          dotnet publish -c Release -r win-x64   --self-contained false -p:PublishSingleFile=true -o publish/fd
+          Copy-Item publish/x64/ScweenSpit.exe   ScweenSpit-${env:TAG}-win-x64.exe
+          Copy-Item publish/arm64/ScweenSpit.exe ScweenSpit-${env:TAG}-win-arm64.exe
+          Copy-Item publish/fd/ScweenSpit.exe    ScweenSpit-${env:TAG}-win-x64-framework-dependent.exe
+
+      - name: Create release
+        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes ScweenSpit-*.exe
