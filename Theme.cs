@@ -70,10 +70,19 @@ internal static class Theme
         BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 2, 0, 10),
     };
 
-    /// <summary>Asks DWM for a dark title bar so the frame matches the content.</summary>
+    /// <summary>
+    /// Asks DWM for a dark title bar so the frame matches the content. The attribute number changed
+    /// during Windows 10: builds before 18985 use 19, later ones 20. Getting it wrong leaves a white
+    /// caption bar on a near-black window, silently.
+    /// </summary>
     public static void DarkTitleBar(IntPtr handle)
     {
+        int attribute = Environment.OSVersion.Version.Build >= 18985
+            ? Native.DWMWA_USE_IMMERSIVE_DARK_MODE
+            : Native.DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1;
+
         int on = 1;
-        Native.DwmSetWindowAttribute(handle, Native.DWMWA_USE_IMMERSIVE_DARK_MODE, ref on, sizeof(int));
+        int hr = Native.DwmSetWindowAttribute(handle, attribute, ref on, sizeof(int));
+        if (hr != 0) Log.Write($"dark title bar unavailable (attr {attribute}, hr 0x{hr:X})");
     }
 }

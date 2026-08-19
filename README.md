@@ -221,8 +221,9 @@ In rough order of likelihood:
    outlives the executable. Set it to `true`, or just delete the file to start fresh.
 2. **Check the layout isn't "Full — leave this display alone".** A monitor whose layout is a single
    full-size zone is deliberately opted out.
-3. **Check the tray tooltip.** Hover the icon: it reads either *clamping, N zones* or *clamping OFF*.
-   That is the one status channel Focus Assist cannot suppress.
+3. **Check the tray tooltip.** Hover the icon: it reads *clamping, N zones*, *clamping off, N zones*,
+   or *hooks DOWN*. That is the one status channel Focus Assist cannot suppress, and it distinguishes
+   "switched off" from "the hooks failed to install".
 4. **Check for a second copy already running.** A single-instance mutex makes a second launch exit
    immediately and silently — the icon you can see may belong to an older build.
 5. **Read the log.** `%APPDATA%\ScweenSpit\scweenspit.log`, or Diagnostics → Open log.

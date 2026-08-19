@@ -94,6 +94,9 @@ public sealed class WinEventHookService : IDisposable
 
     public void Stop()
     {
+        if (!Running) return;
+
+        CancelDrag();
         if (hookLocation != IntPtr.Zero) { UnhookWinEvent(hookLocation); hookLocation = IntPtr.Zero; }
         if (hookMoveEnd  != IntPtr.Zero) { UnhookWinEvent(hookMoveEnd);  hookMoveEnd  = IntPtr.Zero; }
         if (pin.IsAllocated) pin.Free();
@@ -125,9 +128,6 @@ public sealed class WinEventHookService : IDisposable
         if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
         if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
 
-        // Leave a window alone while the user is hand-placing it.
-        if (hWnd == dragWindow) return;
-
         if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
         targetsSeen++;
 
@@ -137,9 +137,18 @@ public sealed class WinEventHookService : IDisposable
             if (!ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
             if (!ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
             {
-                lastNormal[hWnd] = win;          // remember where it lived before it went big
+                // Recorded even mid-drag and even with clamping off: this is the rectangle that
+                // decides which zone a later maximize lands in, and letting it go stale sends the
+                // window back to whichever zone owns the middle of the screen.
+                lastNormal[hWnd] = win;
                 return;
             }
+
+            // The user is hand-placing it; do not fight them for it.
+            if (hWnd == dragWindow) return;
+
+            // Hooks may be up purely to serve drag-to-zone.
+            if (!zones.Config.AutoClamp) return;
 
             string owner = OwnerProcess(hWnd), cls = ClassNameOf(hWnd);
             if (zones.Config.IsExcluded(owner, cls))
@@ -177,6 +186,12 @@ public sealed class WinEventHookService : IDisposable
         if (!IsClampTarget(hWnd)) return;
         if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) return;
 
+        // Ask the window itself what is under the cursor: a sizing border means the user is
+        // resizing, and snapping that to a zone on mouse-up would destroy the resize. Testing
+        // "did the size change?" instead would break maximized and cross-DPI drags, which change
+        // size legitimately.
+        if (GetCursorPos(out var start) && IsOnSizingBorder(hWnd, start)) return;
+
         dragWindow = hWnd;
         anchorZone = -1;
         dragDevice = "";
@@ -193,45 +208,71 @@ public sealed class WinEventHookService : IDisposable
     {
         if (dragWindow == IntPtr.Zero || Overlay is null) { dragTick.Stop(); return; }
 
-        // The modifier is a live gate: release it mid-drag and the overlay gets out of the way.
-        if (!ModifierHeld(zones.Config.DragModifier))
-        {
-            if (Overlay.Visible && Overlay.Mode == OverlayMode.Drag) Overlay.Hide();
-            dragTarget = null;
-            anchorZone = -1;
-            return;
-        }
+        // A process that dies inside its own move loop never sends MOVESIZEEND, which would leave
+        // this timer running forever, re-showing a full-screen overlay on every modifier press.
+        if (!IsWindow(dragWindow) || !zones.Config.DragToZone) { CancelDrag(); return; }
 
-        if (!GetCursorPos(out var cursor)) return;
-        if (!ZoneManager.TryGetMonitorAt(cursor, out var geo)) return;
-        if (zones.IsOptedOut(geo)) return;
+        // Never fight a deliberately opened overlay.
+        if (Overlay.Visible && Overlay.Mode == OverlayMode.Edit) return;
+
+        // The modifier is a live gate: release it mid-drag and the overlay gets out of the way.
+        if (!ModifierHeld(zones.Config.DragModifier)) { HideDragOverlay(); ClearDragTarget(); return; }
+
+        if (!GetCursorPos(out var cursor)) { ClearDragTarget(); return; }
+        if (!ZoneManager.TryGetMonitorAt(cursor, out var geo)) { ClearDragTarget(); return; }
+
+        // A monitor opted out of zoning must not inherit the last target from another one.
+        if (zones.IsOptedOut(geo)) { ClearDragTarget(); return; }
 
         var rects = zones.ZonesFor(geo);
         int hit = ZoneManager.ZoneIndexAt(rects, cursor);
-        if (hit < 0) return;
+        if (hit < 0) { ClearDragTarget(); return; }
 
         if (!Overlay.Visible || Overlay.Mode != OverlayMode.Drag) Overlay.Show(zones, OverlayMode.Drag);
 
         if (anchorZone < 0 || dragDevice != geo.Device) { anchorZone = hit; dragDevice = geo.Device; }
 
         // Holding the span modifier grows the target across every zone between anchor and cursor.
-        bool span = ModifierHeld(zones.Config.SpanModifier) && anchorZone < rects.Count;
+        bool span = SpanHeld(zones.Config.SpanModifier) && anchorZone < rects.Count;
         dragTarget = span ? ZoneManager.Union(rects[anchorZone], rects[hit]) : rects[hit];
         if (!span) anchorZone = hit;
 
         Overlay.Highlight(geo.Device, dragTarget);
     }
 
-    private void DragEnd(IntPtr hWnd)
+    private void ClearDragTarget()
+    {
+        dragTarget = null;
+        anchorZone = -1;
+        Overlay?.Highlight("", null);   // clears every monitor; Hide() would tear down all modes
+    }
+
+    /// <summary>Hides the overlay only if it is ours — a pinned Win+Alt+Z overlay must survive.</summary>
+    private void HideDragOverlay()
+    {
+        if (Overlay is { Visible: true, Mode: OverlayMode.Drag }) Overlay.Hide();
+    }
+
+    private void CancelDrag()
     {
         dragTick.Stop();
-        var target = dragTarget;
-        var dragged = dragWindow;
-
         dragWindow = IntPtr.Zero;
         dragTarget = null;
         anchorZone = -1;
-        Overlay?.Hide();
+        dragDevice = "";
+        HideDragOverlay();
+    }
+
+    private void DragEnd(IntPtr hWnd)
+    {
+        var target = dragTarget;
+        var dragged = dragWindow;
+
+        dragTick.Stop();
+        dragWindow = IntPtr.Zero;
+        dragTarget = null;
+        anchorZone = -1;
+        HideDragOverlay();
 
         if (dragged == IntPtr.Zero || dragged != hWnd || target is null) return;
         if (!ModifierHeld(zones.Config.DragModifier)) return;
@@ -245,11 +286,19 @@ public sealed class WinEventHookService : IDisposable
         Apply(hWnd, target.Value);
     }
 
+    /// <summary>A gate: "None" means no key is required, so it is always satisfied.</summary>
     private static bool ModifierHeld(string name)
     {
         var vk = SplitConfig.ModifierKey(name);
         return vk is null || IsKeyDown(vk.Value);
     }
+
+    /// <summary>
+    /// An opt-in: "None" means never, not always. Spanning every drag because the span modifier
+    /// reads as "off" would be the exact opposite of what the setting says.
+    /// </summary>
+    private static bool SpanHeld(string name) =>
+        SplitConfig.ModifierKey(name) is { } vk && IsKeyDown(vk);
 
     /// <summary>
     /// Which rectangle should decide the zone: the last normal position if we saw one, else the

@@ -157,7 +157,12 @@ public sealed class SplitConfig
         try
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-            File.WriteAllText(Path, JsonSerializer.Serialize(this, JsonOpts));
+
+            // Write then swap. Saving is now triggered by things like a spinner's auto-repeat, and
+            // a half-written config is worse than a stale one.
+            var staging = Path + ".tmp";
+            File.WriteAllText(staging, JsonSerializer.Serialize(this, JsonOpts));
+            File.Move(staging, Path, overwrite: true);
         }
         catch (Exception ex)
         {
@@ -187,6 +192,7 @@ public sealed class SplitConfig
                 z.T = Math.Clamp(z.T, 0, 1); z.B = Math.Clamp(z.B, 0, 1);
             }
             layout.Zones.RemoveAll(z => z.R - z.L <= 0.01 || z.B - z.T <= 0.01);
+            ZoneEdges.Canonicalise(layout.Zones);
 
             layout.Margins ??= new Margins();
             layout.Margins.Top = Math.Max(0, layout.Margins.Top);
@@ -248,7 +254,8 @@ public sealed class SplitConfig
         DebounceMs = o.DebounceMs;
         Padding = o.Padding;
         SuppressWindowsSnap = o.SuppressWindowsSnap;
-        SnapRestore = o.SnapRestore;
+        // SnapRestore is deliberately NOT copied: it records what this process changed on the
+        // system, and the disk copy may be older than what we are currently holding.
         DragToZone = o.DragToZone;
         DragModifier = o.DragModifier;
         SpanModifier = o.SpanModifier;

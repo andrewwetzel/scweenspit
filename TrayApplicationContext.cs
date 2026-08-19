@@ -57,7 +57,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) OpenSettings(); };
 
         ApplySnapSuppression();
-        if (config.AutoClamp) hook.Start();
+        if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
         UpdateTrayText();
         LogStartup();
@@ -75,7 +75,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         items.Add(new ToolStripMenuItem(overlay.Visible ? "Hide zones" : "Show zones", null, (_, _) => overlay.Toggle(zones)));
         items.Add(new ToolStripMenuItem("Auto-clamp", null, (_, _) => { config.AutoClamp = !config.AutoClamp; config.Save(); ApplyChanges(); })
         {
-            Checked = hook.Running,
+            Checked = config.AutoClamp && hook.Running,
         });
         items.Add(new ToolStripMenuItem("Exclude active window's app", null, (_, _) => ExcludeActiveApp()));
         items.Add(new ToolStripSeparator());
@@ -84,7 +84,10 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OpenSettings()
     {
-        settings ??= new SettingsForm(config, zones, overlay, ApplyChanges, ReloadConfig, () => hook.Running);
+        // An external WM_CLOSE (Task Manager "End task", taskbar Close) reports a CloseReason that
+        // OnFormClosing does not cancel, so the instance can genuinely be disposed underneath us.
+        if (settings is null || settings.IsDisposed)
+            settings = new SettingsForm(config, zones, overlay, ApplyChanges, ReloadConfig, () => hook.Running);
         settings.Reveal();
     }
 
@@ -94,7 +97,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void ApplyChanges()
     {
         ApplySnapSuppression();
-        if (config.AutoClamp) hook.Start(); else hook.Stop();
+
+        // Drag-to-zone rides the same hooks as clamping, so the hooks must stay up for either.
+        if (config.AutoClamp || config.DragToZone) hook.Start(); else hook.Stop();
         UpdateTrayText();
     }
 
@@ -102,13 +107,23 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void UpdateTrayText()
     {
         int zoneCount = ZoneManager.AllMonitors().Sum(g => zones.ZonesFor(g).Count);
-        var text = hook.Running ? $"ScweenSpit — clamping, {zoneCount} zones" : "ScweenSpit — clamping OFF";
+
+        // hook.Running no longer means "clamping": the hooks also serve drag-to-zone. Report the
+        // preference, but let a failed Start() override it rather than lying about being on.
+        var text = !hook.Running ? "ScweenSpit — hooks DOWN"
+                 : config.AutoClamp ? $"ScweenSpit — clamping, {zoneCount} zones"
+                 : $"ScweenSpit — clamping off, {zoneCount} zones";
+
         tray.Text = text.Length > 63 ? text[..63] : text;   // NotifyIcon.Text is capped at 63 chars
     }
 
     private void ReloadConfig()
     {
+        // The live backup outranks whatever is on disk: this process is holding the suppression,
+        // and the on-disk value may predate it. Losing it would strand the user's real settings.
+        var liveSnapRestore = config.SnapRestore;
         config.CopyFrom(SplitConfig.Load());
+        config.SnapRestore ??= liveSnapRestore;
         ApplyChanges();
         overlay.Flash(zones);
         Notify("Config reloaded");
@@ -122,12 +137,20 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (config.SuppressWindowsSnap)
         {
-            config.SnapRestore ??= WindowsSnap.Suppress();
+            if (config.SnapRestore is null)
+            {
+                // Persist immediately. If this is written only by a later Save(), a kill in between
+                // leaves the file saying "nothing to restore" while snap is actually off, and the
+                // next launch adopts the already-zeroed values as the originals - permanently.
+                config.SnapRestore = WindowsSnap.Suppress();
+                config.Save();
+            }
         }
         else if (config.SnapRestore is { } saved)
         {
             WindowsSnap.Restore(saved);
             config.SnapRestore = null;
+            config.Save();
         }
     }
 

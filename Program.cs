@@ -21,6 +21,10 @@ internal static class Program
             return;
         }
 
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Log.Write($"UI thread exception: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Write($"unhandled: {e.ExceptionObject}");
+
         ApplicationConfiguration.Initialize();
 
         try

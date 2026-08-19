@@ -33,6 +33,10 @@ public sealed class SettingsForm : Form
         this.hooksUp = hooksUp;
 
         Text = "ScweenSpit";
+        // Laid out in raw pixels while Theme sizes fonts in points: without this the text grows at
+        // high DPI but the window does not, and button captions clip.
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(820, 600);
         Size = new Size(880, 640);
@@ -203,7 +207,8 @@ public sealed class SettingsForm : Form
             {
                 bool active = SameZones(current, make());
                 var b = Theme.Action(name, active);
-                b.Width = 130;
+                b.AutoSize = true;
+                b.MinimumSize = new Size(130, 32);
                 b.Click += (_, _) =>
                 {
                     config.SetZones(geo.Device, make());
@@ -215,10 +220,6 @@ public sealed class SettingsForm : Form
             }
             page.Controls.Add(presets);
 
-            var edit = Theme.Action("Drag dividers on screen…");
-            edit.Width = 200;
-            edit.Click += (_, _) => { Hide(); overlay.Show(zones, OverlayMode.Edit); };
-            page.Controls.Add(edit);
 
             page.Controls.Add(new Label
             {
@@ -261,10 +262,19 @@ public sealed class SettingsForm : Form
             page.Controls.Add(strip);
         }
 
+        var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560, Margin = new Padding(0, 18, 0, 0) };
+
+        var edit = Theme.Action("Drag dividers on screen…", primary: true);
+        edit.AutoSize = true;
+        edit.Click += (_, _) => OpenZoneEditor();
+        buttons.Controls.Add(edit);
+
         var show = Theme.Action("Show all zones (Win+Alt+Z)");
-        show.Width = 220;
+        show.AutoSize = true;
         show.Click += (_, _) => overlay.Flash(zones, 2500);
-        page.Controls.Add(show);
+        buttons.Controls.Add(show);
+
+        page.Controls.Add(buttons);
     }
 
     private void ShowTaskbar()
@@ -326,6 +336,26 @@ public sealed class SettingsForm : Form
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
 
         ShowTaskbar();
+    }
+
+    /// <summary>
+    /// Hands the screen over to the zone editor and takes it back afterwards. Without the return
+    /// path the settings window is hidden with no taskbar button, so finishing the edit leaves the
+    /// user staring at a bare desktop.
+    /// </summary>
+    private void OpenZoneEditor()
+    {
+        Hide();
+        overlay.Show(zones, OverlayMode.Edit);
+
+        Action? back = null;
+        back = () =>
+        {
+            overlay.Closed -= back!;
+            Reveal();
+            ShowLayouts();   // reflect whatever was just dragged
+        };
+        overlay.Closed += back;
     }
 
     private static bool SameZones(List<FracRect> a, List<FracRect> b) =>

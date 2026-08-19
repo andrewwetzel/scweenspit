@@ -37,6 +37,30 @@ public static class Native
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW   = 0x0040;
     public const uint SWP_NOZORDER     = 0x0004;
+    public const uint SWP_NOSIZE       = 0x0001;
+    public const uint SWP_NOMOVE       = 0x0002;
+
+    // ---- hit testing (telling a resize from a move) ------------------------
+    public const uint WM_NCHITTEST = 0x0084;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+    public const int HTSIZE = 4, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
+                     HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
+                                                   uint flags, uint timeoutMs, out IntPtr result);
+
+    /// <summary>True when the point is on a sizing border rather than the body of the window.</summary>
+    public static bool IsOnSizingBorder(IntPtr hWnd, POINT screen)
+    {
+        var lParam = (IntPtr)((screen.Y << 16) | (screen.X & 0xFFFF));
+        if (SendMessageTimeout(hWnd, WM_NCHITTEST, IntPtr.Zero, lParam, SMTO_ABORTIFHUNG, 200, out var hit) == IntPtr.Zero)
+            return false;   // hung or unresponsive: assume a move, the modifier still gates us
+
+        int code = hit.ToInt32();
+        return code is HTSIZE or HTLEFT or HTRIGHT or HTTOP or HTTOPLEFT
+                    or HTTOPRIGHT or HTBOTTOM or HTBOTTOMLEFT or HTBOTTOMRIGHT;
+    }
 
     // ---- monitors ----------------------------------------------------------
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
@@ -65,6 +89,7 @@ public static class Native
     // ---- DWM ---------------------------------------------------------------
     public const int DWMWA_CLOAKED = 14;
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1 = 19;
 
     // ---- DPI ---------------------------------------------------------------
     public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);

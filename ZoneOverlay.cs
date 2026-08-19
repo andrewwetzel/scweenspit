@@ -30,6 +30,9 @@ public sealed class ZoneOverlay : IDisposable
     /// <summary>Raised when the user finishes dragging an outer edge: (device, new margins).</summary>
     public event Action<string, Margins>? MarginsEdited;
 
+    /// <summary>Raised when a visible overlay is taken down, so callers can restore their own UI.</summary>
+    public event Action? Closed;
+
     public ZoneOverlay() => autoHide.Tick += (_, _) => { autoHide.Stop(); Hide(); };
 
     public bool Visible => forms.Count > 0;
@@ -60,11 +63,17 @@ public sealed class ZoneOverlay : IDisposable
 
             var form = new OverlayForm(geo, zones.EffectiveWork(geo), rects,
                                        zones.Config.ZonesFor(geo.Device),
-                                       zones.Config.LayoutFor(geo.Device).Margins.Copy(), mode);
+                                       zones.Config.LayoutFor(geo.Device).Margins.Copy(),
+                                       zones.Config.Padding, mode);
             form.Committed += (device, edited) => ZonesEdited?.Invoke(device, edited);
             form.MarginsCommitted += (device, m) => MarginsEdited?.Invoke(device, m);
             form.Dismissed += Hide;
             forms.Add(form);
+
+            // Give the window its rectangle BEFORE the handle exists, so it is created on the
+            // target monitor. Created at the default position it would be born on the primary
+            // display and then cross a DPI boundary, which makes WinForms rescale it behind us.
+            form.Bounds = new Rectangle(geo.Work.Left, geo.Work.Top, geo.Work.Width, geo.Work.Height);
             form.Show();
         }
 
@@ -81,8 +90,12 @@ public sealed class ZoneOverlay : IDisposable
     public void Hide()
     {
         autoHide.Stop();
+        bool wasVisible = forms.Count > 0;
+
         foreach (var f in forms) { f.Close(); f.Dispose(); }
         forms.Clear();
+
+        if (wasVisible) Closed?.Invoke();
     }
 
     public void Dispose() { Hide(); autoHide.Dispose(); }
@@ -106,6 +119,7 @@ public sealed class ZoneOverlay : IDisposable
         private readonly List<RECT> pixels;
         private readonly List<FracRect> fractions;
         private readonly Margins margins;
+        private readonly int padding;
         private readonly OverlayMode mode;
 
         private RECT? highlight;
@@ -123,12 +137,13 @@ public sealed class ZoneOverlay : IDisposable
         public event Action? Dismissed;
 
         public OverlayForm(MonitorGeometry geo, RECT inner, List<RECT> pixels,
-                           List<FracRect> fractions, Margins margins, OverlayMode mode)
+                           List<FracRect> fractions, Margins margins, int padding, OverlayMode mode)
         {
             this.geo = geo;
             this.pixels = pixels;
             this.fractions = ZoneEdges.Clone(fractions);
             this.margins = margins;
+            this.padding = padding;
             this.mode = mode;
             _ = inner;   // derived live from margins; the parameter documents the caller's intent
 
@@ -160,10 +175,21 @@ public sealed class ZoneOverlay : IDisposable
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            PlaceNatively();
+        }
 
-            // WinForms would rescale Bounds by this form's DPI; place it natively instead.
+        /// <summary>WinForms would rescale Bounds by this form's DPI; place it in raw pixels.</summary>
+        private void PlaceNatively() =>
             SetWindowPos(Handle, HWND_TOPMOST, geo.Work.Left, geo.Work.Top, geo.Work.Width, geo.Work.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            // Our rectangle is already in physical pixels for this exact monitor. Letting WinForms
+            // scale it would move and resize the overlay out from under the zone geometry.
+            e.Cancel = true;
+            base.OnDpiChanged(e);
+            PlaceNatively();
         }
 
         public void SetHighlight(RECT? target)
@@ -227,7 +253,9 @@ public sealed class ZoneOverlay : IDisposable
 
             // NaN never compares equal to itself, so "no edge under the cursor" has to be tested
             // explicitly - otherwise every mouse move repaints the whole overlay.
-            bool sameEdge = (double.IsNaN(near) && double.IsNaN(hoverEdge)) || ZoneEdges.Near(near, hoverEdge);
+            bool sameEdge = double.IsNaN(near)
+                ? double.IsNaN(hoverEdge)
+                : vertical == hoverVertical && ZoneEdges.Near(near, hoverEdge);
             if (grip != hoverGrip || !sameEdge)
             {
                 hoverGrip = grip;
@@ -328,7 +356,7 @@ public sealed class ZoneOverlay : IDisposable
 
             // In edit mode we draw the live fractions; otherwise the already-computed pixel zones.
             var boxes = mode == OverlayMode.Edit
-                ? fractions.Select(LocalRect).ToList()
+                ? fractions.Select(LocalRect).Select(PadPreview).ToList()
                 : pixels.Select(z => new Rectangle(z.Left - geo.Work.Left, z.Top - geo.Work.Top, z.Width, z.Height)).ToList();
 
             for (int i = 0; i < boxes.Count; i++)
@@ -355,6 +383,12 @@ public sealed class ZoneOverlay : IDisposable
             if (mode == OverlayMode.Edit) PaintHandles(g);
             PaintHeader(g, centred);
         }
+
+        /// <summary>Applies the configured gap, so the editor previews what you will actually get.</summary>
+        private Rectangle PadPreview(Rectangle r) =>
+            padding > 0 && r.Width > 2 * padding && r.Height > 2 * padding
+                ? Rectangle.Inflate(r, -padding, -padding)
+                : r;
 
         /// <summary>Hatches the space the margins keep clear, so reserved area is visibly reserved.</summary>
         private void PaintReserved(Graphics g, Font caption, StringFormat centred)
