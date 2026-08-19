@@ -28,24 +28,36 @@ dotnet run -c Release            # Windows only
 
 ## Use
 
-The tray menu (left-click or right-click) has:
+Left-click the tray icon to open the settings window. It has four pages — General, Layouts,
+Exclusions, Diagnostics — and **closing it hides it back to the tray** rather than quitting; Exit
+lives in the tray's right-click menu.
 
-- **Auto-clamp** — master on/off. Off truly unhooks; nothing is intercepted.
-- **Show zones** — draws the current layout over every monitor: each zone outlined, numbered
-  and captioned with its pixel size. Click-through, so you can leave it up while you work.
-- **Layout ▸ *monitor* ▸ preset** — per-monitor layouts, each independent
-  (Full, 70/30, 30/70, 60/40, 50/50, Thirds, Top/Bottom, Quadrants).
-  The list is rebuilt each time the menu opens, so hot-plugged displays show up.
-- **Suppress Windows snap** — see below.
-- **Start with Windows**
-- **Exclude active window's app** — toggles whatever is in front in and out of the exclusion list.
-- **Reload config** / **Open config file** / **Open log file**
-- **Exit**
+### Getting a window into a zone
+
+Three ways, in rough order of how often you'll reach for them:
+
+- **Drag it there.** Hold **Shift** while dragging a window and the zone overlay appears with the
+  target zone lit up; drop to snap. Hold **Ctrl** as well to **span** — the target grows to cover
+  every zone between where you started and where the cursor is now, so two columns become one wide
+  slot. Both modifiers are configurable, and setting the drag modifier to *None* makes every drag
+  snap.
+- **Maximize it.** A window that maximizes or goes borderless-fullscreen gets clamped into whichever
+  zone it was already living in.
+- **Hotkeys.**
 
 | Hotkey | Action |
 | --- | --- |
 | `Win+Alt+Left` / `Win+Alt+Right` | cycle the focused window through its monitor's zones |
 | `Win+Alt+Z` | show/hide the zone overlay |
+
+### Adjusting the zones
+
+**Layouts → Drag dividers on screen…** puts the overlay into edit mode: every divider between zones
+becomes a draggable handle, the layout reflows live as you drag, and it's saved when you let go.
+`Esc` or a click on empty space finishes. Zones that share an edge move together, so a 70/30 split
+stays a clean split — no gaps, no overlaps — and nothing can be squeezed below 5% of the display.
+
+Presets are still there (70/30, thirds, quadrants and so on) if you'd rather not fiddle.
 
 ## Keeping Windows out of the way
 
@@ -79,6 +91,9 @@ window will fight, and the loser retries.
   "DebounceMs": 400,
   "Padding": 0,
   "SuppressWindowsSnap": false,
+  "DragToZone": true,
+  "DragModifier": "Shift",
+  "SpanModifier": "Control",
   "Exclude": ["vlc", "mpv.exe", "UnityWndClass"],
   "Monitors": {
     "*": {
@@ -119,7 +134,9 @@ costs you a hand-tuned layout.
 | `ZoneManager.cs` | monitor geometry, split math, the clamp |
 | `WinEventHookService.cs` | WinEvent hooks, window filtering, reentrancy guard |
 | `TrayApplicationContext.cs` | tray icon, menu, hotkey window |
-| `ZoneOverlay.cs` | the click-through zone visualiser |
+| `ZoneOverlay.cs` | the zone visualiser: display, drag-target and edit modes |
+| `ZoneEdges.cs` | shared-edge algebra that keeps an edited layout tiling |
+| `SettingsForm.cs` / `Theme.cs` | the settings window and its dark palette |
 | `WindowsSnap.cs` | suppressing Windows' own snap behaviour |
 | `Startup.cs` | run-at-login registry entry |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
@@ -160,3 +177,21 @@ A `[beat]` line every five seconds carries the counters that localise a fault:
 `events=0` means the hook never fired. `targets=0` with events flowing means every window was
 filtered out. `fullscreen=0` means nothing was recognised as maximized or borderless. `clamps=0`
 with `fullscreen>0` means the move itself was refused.
+
+## If nothing seems to happen
+
+In rough order of likelihood:
+
+1. **Check `AutoClamp` in the config.** `%APPDATA%\ScweenSpit\config.json` — if it says
+   `"AutoClamp": false`, clamping is switched off and stays off across upgrades, because the config
+   outlives the executable. Set it to `true`, or just delete the file to start fresh.
+2. **Check the layout isn't "Full — leave this display alone".** A monitor whose layout is a single
+   full-size zone is deliberately opted out.
+3. **Check the tray tooltip.** Hover the icon: it reads either *clamping, N zones* or *clamping OFF*.
+   That is the one status channel Focus Assist cannot suppress.
+4. **Check for a second copy already running.** A single-instance mutex makes a second launch exit
+   immediately and silently — the icon you can see may belong to an older build.
+5. **Read the log.** `%APPDATA%\ScweenSpit\scweenspit.log`, or Diagnostics → Open log.
+
+Note that an unelevated ScweenSpit cannot move windows owned by an elevated process — Windows
+blocks it (UIPI). The log says so explicitly when it happens.

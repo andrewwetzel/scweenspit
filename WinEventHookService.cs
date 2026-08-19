@@ -36,6 +36,17 @@ public sealed class WinEventHookService : IDisposable
     // never changes for a given hwnd, so it is worth remembering.
     private readonly ConcurrentDictionary<IntPtr, string> owners = new();
 
+    // ---- drag-to-zone session ----------------------------------------------
+    private readonly System.Windows.Forms.Timer dragTick = new() { Interval = 40 };
+    private IntPtr dragWindow;
+    private RECT dragStartRect;
+    private int anchorZone = -1;
+    private string dragDevice = "";
+    private RECT? dragTarget;
+
+    /// <summary>Overlay used to show where a dragged window would land. Optional.</summary>
+    public ZoneOverlay? Overlay { get; set; }
+
     // Apps like Chrome re-assert their fullscreen size once, just after we shrink them —
     // inside the debounce window, where we are deaf. One bounded re-check settles it.
     private readonly System.Windows.Forms.Timer verify = new();
@@ -57,6 +68,7 @@ public sealed class WinEventHookService : IDisposable
     {
         this.zones = zones;
         verify.Tick += (_, _) => { verify.Stop(); ReVerify(); };
+        dragTick.Tick += (_, _) => DragUpdate();
     }
 
     public bool Running => hookLocation != IntPtr.Zero || hookMoveEnd != IntPtr.Zero;
@@ -69,7 +81,8 @@ public sealed class WinEventHookService : IDisposable
         pin = GCHandle.Alloc(callback);
 
         const uint flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
-        hookMoveEnd   = SetWinEventHook(EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND,
+        // MOVESIZESTART and MOVESIZEEND are adjacent, so one hook covers the whole drag.
+        hookMoveEnd   = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND,
                                         IntPtr.Zero, callback, 0, 0, flags);
         hookLocation  = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
                                         IntPtr.Zero, callback, 0, 0, flags);
@@ -95,6 +108,7 @@ public sealed class WinEventHookService : IDisposable
     {
         Stop();
         verify.Dispose();
+        dragTick.Dispose();
     }
 
     // ---- the callback ------------------------------------------------------
@@ -107,6 +121,12 @@ public sealed class WinEventHookService : IDisposable
 
         eventsSeen++;
         Heartbeat();
+
+        if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
+        if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
+
+        // Leave a window alone while the user is hand-placing it.
+        if (hWnd == dragWindow) return;
 
         if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
         targetsSeen++;
@@ -147,6 +167,88 @@ public sealed class WinEventHookService : IDisposable
             // An exception escaping into unmanaged hook dispatch kills the process.
             Log.Write($"callback error: {ex}");
         }
+    }
+
+    // ---- drag to zone ------------------------------------------------------
+
+    private void DragBegin(IntPtr hWnd)
+    {
+        if (!zones.Config.DragToZone || Overlay is null) return;
+        if (!IsClampTarget(hWnd)) return;
+        if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) return;
+
+        dragWindow = hWnd;
+        anchorZone = -1;
+        dragDevice = "";
+        dragTarget = null;
+        GetWindowRect(hWnd, out dragStartRect);
+        dragTick.Start();
+    }
+
+    /// <summary>
+    /// Polled rather than event-driven: the cursor moves far more smoothly than LOCATIONCHANGE
+    /// arrives, and the highlight has to follow the cursor rather than the window.
+    /// </summary>
+    private void DragUpdate()
+    {
+        if (dragWindow == IntPtr.Zero || Overlay is null) { dragTick.Stop(); return; }
+
+        // The modifier is a live gate: release it mid-drag and the overlay gets out of the way.
+        if (!ModifierHeld(zones.Config.DragModifier))
+        {
+            if (Overlay.Visible && Overlay.Mode == OverlayMode.Drag) Overlay.Hide();
+            dragTarget = null;
+            anchorZone = -1;
+            return;
+        }
+
+        if (!GetCursorPos(out var cursor)) return;
+        if (!ZoneManager.TryGetMonitorAt(cursor, out var geo)) return;
+        if (zones.IsOptedOut(geo)) return;
+
+        var rects = zones.ZonesFor(geo);
+        int hit = ZoneManager.ZoneIndexAt(rects, cursor);
+        if (hit < 0) return;
+
+        if (!Overlay.Visible || Overlay.Mode != OverlayMode.Drag) Overlay.Show(zones, OverlayMode.Drag);
+
+        if (anchorZone < 0 || dragDevice != geo.Device) { anchorZone = hit; dragDevice = geo.Device; }
+
+        // Holding the span modifier grows the target across every zone between anchor and cursor.
+        bool span = ModifierHeld(zones.Config.SpanModifier) && anchorZone < rects.Count;
+        dragTarget = span ? ZoneManager.Union(rects[anchorZone], rects[hit]) : rects[hit];
+        if (!span) anchorZone = hit;
+
+        Overlay.Highlight(geo.Device, dragTarget);
+    }
+
+    private void DragEnd(IntPtr hWnd)
+    {
+        dragTick.Stop();
+        var target = dragTarget;
+        var dragged = dragWindow;
+
+        dragWindow = IntPtr.Zero;
+        dragTarget = null;
+        anchorZone = -1;
+        Overlay?.Hide();
+
+        if (dragged == IntPtr.Zero || dragged != hWnd || target is null) return;
+        if (!ModifierHeld(zones.Config.DragModifier)) return;
+
+        // A resize is not a move: only snap when the window actually travelled.
+        if (GetWindowRect(hWnd, out var now) && now.Left == dragStartRect.Left && now.Top == dragStartRect.Top
+            && now.Width == dragStartRect.Width && now.Height == dragStartRect.Height)
+            return;
+
+        Log.Write($"drag-to-zone: 0x{hWnd:X} -> {target.Value}");
+        Apply(hWnd, target.Value);
+    }
+
+    private static bool ModifierHeld(string name)
+    {
+        var vk = SplitConfig.ModifierKey(name);
+        return vk is null || IsKeyDown(vk.Value);
     }
 
     /// <summary>

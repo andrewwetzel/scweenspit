@@ -7,6 +7,7 @@ namespace ScweenSpit;
 public static class Native
 {
     // ---- events / hooks ----------------------------------------------------
+    public const uint EVENT_SYSTEM_MOVESIZESTART    = 0x000A;
     public const uint EVENT_SYSTEM_MOVESIZEEND      = 0x000B;
     public const uint EVENT_OBJECT_LOCATIONCHANGE   = 0x800B;
     public const uint WINEVENT_OUTOFCONTEXT         = 0x0000;
@@ -48,6 +49,9 @@ public static class Native
     public const uint VK_LEFT  = 0x25;
     public const uint VK_RIGHT = 0x27;
     public const uint VK_Z     = 0x5A;
+    public const int  VK_SHIFT   = 0x10;
+    public const int  VK_CONTROL = 0x11;
+    public const int  VK_MENU    = 0x12;   // Alt
 
     // ---- system parameters (Windows' own snap behaviour) --------------------
     public const uint SPI_GETWINARRANGING = 0x0082;
@@ -60,6 +64,7 @@ public static class Native
 
     // ---- DWM ---------------------------------------------------------------
     public const int DWMWA_CLOAKED = 14;
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 
     // ---- DPI ---------------------------------------------------------------
     public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
@@ -144,6 +149,27 @@ public static class Native
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+    private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    public static void SetWindowLongPtr(IntPtr hWnd, int nIndex, long value)
+    {
+        if (IntPtr.Size == 8) SetWindowLongPtr64(hWnd, nIndex, new IntPtr(value));
+        else SetWindowLong32(hWnd, nIndex, (int)value);
+    }
+
+    /// <summary>True while the key is physically down right now.</summary>
+    public static bool IsKeyDown(int vKey) => (GetAsyncKeyState(vKey) & 0x8000) != 0;
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW", SetLastError = true)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
@@ -158,6 +184,9 @@ public static class Native
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
     /// <summary>Reading form: pvParam is a pointer to the value.</summary>
     [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]

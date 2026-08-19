@@ -100,6 +100,29 @@ public sealed class ZoneManager(SplitConfig config)
                                && frac[0].R >= 0.999 && frac[0].B >= 0.999;
     }
 
+    /// <summary>Index of the zone containing a point, or -1.</summary>
+    public static int ZoneIndexAt(List<RECT> zones, POINT p)
+    {
+        for (int i = 0; i < zones.Count; i++)
+        {
+            var z = zones[i];
+            if (p.X >= z.Left && p.X < z.Right && p.Y >= z.Top && p.Y < z.Bottom) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>Smallest rectangle covering both zones — how a window spans several at once.</summary>
+    public static RECT Union(RECT a, RECT b) => new()
+    {
+        Left = Math.Min(a.Left, b.Left),
+        Top = Math.Min(a.Top, b.Top),
+        Right = Math.Max(a.Right, b.Right),
+        Bottom = Math.Max(a.Bottom, b.Bottom),
+    };
+
+    public static bool TryGetMonitorAt(POINT p, out MonitorGeometry geo) =>
+        TryGetMonitorInfo(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), out geo);
+
     /// <summary>Index of the zone holding the window's centre point; nearest zone centre otherwise.</summary>
     public static int PickZoneIndex(List<RECT> zones, RECT win)
     {

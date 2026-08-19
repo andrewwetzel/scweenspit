@@ -38,6 +38,15 @@ public sealed class SplitConfig
     /// it lets the next launch put them back even if this one is killed rather than closed.</summary>
     public int[]? SnapRestore { get; set; }
 
+    /// <summary>Snap a window into a zone when you drop it there while dragging.</summary>
+    public bool DragToZone { get; set; } = true;
+
+    /// <summary>Key that must be held for a drag to snap: Shift, Control, Alt, or None for always.</summary>
+    public string DragModifier { get; set; } = "Shift";
+
+    /// <summary>Key that, held during a drag, spans the window across every zone touched.</summary>
+    public string SpanModifier { get; set; } = "Control";
+
     /// <summary>Never touch windows of these processes or window classes. Matched case-insensitively,
     /// with or without a .exe suffix — e.g. "vlc", "mpv.exe", "UnityWndClass".</summary>
     public List<string> Exclude { get; set; } = new();
@@ -46,6 +55,17 @@ public sealed class SplitConfig
     public Dictionary<string, MonitorLayout> Monitors { get; set; } = new();
 
     public const string Fallback = "*";
+
+    /// <summary>Virtual-key for a modifier name, or null for "no modifier required".</summary>
+    public static int? ModifierKey(string name) => name?.Trim().ToLowerInvariant() switch
+    {
+        "shift" => Native.VK_SHIFT,
+        "control" or "ctrl" => Native.VK_CONTROL,
+        "alt" or "menu" => Native.VK_MENU,
+        _ => null,
+    };
+
+    public static readonly string[] ModifierNames = ["None", "Shift", "Control", "Alt"];
 
     /// <summary>True when this window belongs to something the user has opted out of.</summary>
     public bool IsExcluded(string process, string windowClass)
@@ -63,7 +83,7 @@ public sealed class SplitConfig
     // ---- presets used by the tray menu -------------------------------------
     public static readonly (string Name, Func<List<FracRect>> Make)[] Presets =
     {
-        ("Full (no split)", () => new() { new(0, 0, 1, 1) }),
+        ("Full — leave this display alone", () => new() { new(0, 0, 1, 1) }),
         ("70 / 30",         () => new() { new(0, 0, .70, 1), new(.70, 0, 1, 1) }),
         ("30 / 70",         () => new() { new(0, 0, .30, 1), new(.30, 0, 1, 1) }),
         ("60 / 40",         () => new() { new(0, 0, .60, 1), new(.60, 0, 1, 1) }),
@@ -165,6 +185,24 @@ public sealed class SplitConfig
         if (Monitors.TryGetValue(device, out var m) && m.Zones.Count > 0) return m.Zones;
         if (Monitors.TryGetValue(Fallback, out var f) && f.Zones.Count > 0) return f.Zones;
         return Default().Monitors[Fallback].Zones;
+    }
+
+    /// <summary>
+    /// Copies another config's values in place. Reloading by replacing the object would strand every
+    /// reference the UI and services already hold, so the instance itself is never swapped out.
+    /// </summary>
+    public void CopyFrom(SplitConfig o)
+    {
+        AutoClamp = o.AutoClamp;
+        DebounceMs = o.DebounceMs;
+        Padding = o.Padding;
+        SuppressWindowsSnap = o.SuppressWindowsSnap;
+        SnapRestore = o.SnapRestore;
+        DragToZone = o.DragToZone;
+        DragModifier = o.DragModifier;
+        SpanModifier = o.SpanModifier;
+        Exclude = o.Exclude;
+        Monitors = o.Monitors;
     }
 
     public void SetZones(string device, List<FracRect> zones)
