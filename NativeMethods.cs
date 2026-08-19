@@ -4,7 +4,7 @@ using System.Text;
 namespace ScweenSpit;
 
 /// <summary>All P/Invoke signatures, structs and constants. Nothing else lives here.</summary>
-internal static class Native
+public static class Native
 {
     // ---- events / hooks ----------------------------------------------------
     public const uint EVENT_SYSTEM_MOVESIZEEND      = 0x000B;
