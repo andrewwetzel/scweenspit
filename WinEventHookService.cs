@@ -225,8 +225,11 @@ public sealed class WinEventHookService : IDisposable
         if (zones.IsOptedOut(geo)) { ClearDragTarget(); return; }
 
         var rects = zones.ZonesFor(geo);
-        int hit = ZoneManager.ZoneIndexAt(rects, cursor);
-        if (hit < 0) { ClearDragTarget(); return; }
+        if (rects.Count == 0) { ClearDragTarget(); return; }
+
+        // Nearest rather than exact: with Padding on, the gutters between zones belong to no zone,
+        // and losing the target every time the cursor crosses one makes the gesture feel broken.
+        int hit = ZoneManager.ZoneAtOrNearest(rects, cursor);
 
         if (!Overlay.Visible || Overlay.Mode != OverlayMode.Drag) Overlay.Show(zones, OverlayMode.Drag);
 

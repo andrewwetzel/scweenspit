@@ -130,6 +130,16 @@ public sealed class ZoneManager(SplitConfig config)
         return -1;
     }
 
+    /// <summary>
+    /// The zone under a point, or the nearest one when the point falls in a gap — the gutter left
+    /// by Padding, or a reserved margin band. Dropping in a 16px gutter should still land somewhere.
+    /// </summary>
+    public static int ZoneAtOrNearest(List<RECT> zones, POINT p)
+    {
+        int hit = ZoneIndexAt(zones, p);
+        return hit >= 0 ? hit : PickZoneIndex(zones, new RECT { Left = p.X, Top = p.Y, Right = p.X, Bottom = p.Y });
+    }
+
     /// <summary>Smallest rectangle covering both zones — how a window spans several at once.</summary>
     public static RECT Union(RECT a, RECT b) => new()
     {
