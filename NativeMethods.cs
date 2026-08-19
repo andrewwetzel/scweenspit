@@ -57,7 +57,7 @@ public static class Native
         if (SendMessageTimeout(hWnd, WM_NCHITTEST, IntPtr.Zero, lParam, SMTO_ABORTIFHUNG, 200, out var hit) == IntPtr.Zero)
             return false;   // hung or unresponsive: assume a move, the modifier still gates us
 
-        int code = hit.ToInt32();
+        long code = hit.ToInt64();   // a foreign window's LRESULT need not fit in 32 bits
         return code is HTSIZE or HTLEFT or HTRIGHT or HTTOP or HTTOPLEFT
                     or HTTOPRIGHT or HTBOTTOM or HTBOTTOMLEFT or HTBOTTOMRIGHT;
     }
@@ -160,6 +160,7 @@ public static class Native
 
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
     public const uint GA_ROOT = 2;

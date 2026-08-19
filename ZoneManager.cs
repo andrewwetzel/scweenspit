@@ -92,14 +92,14 @@ public sealed class ZoneManager(SplitConfig config)
         var m = Config.LayoutFor(geo.Device).Margins;
         if (m is null || !m.Any) return geo.Work;
 
-        var r = new RECT
+        var fit = m.Fitted(geo.Work.Width, geo.Work.Height);
+        return new RECT
         {
-            Left = geo.Work.Left + m.Left,
-            Top = geo.Work.Top + m.Top,
-            Right = geo.Work.Right - m.Right,
-            Bottom = geo.Work.Bottom - m.Bottom,
+            Left = geo.Work.Left + fit.Left,
+            Top = geo.Work.Top + fit.Top,
+            Right = geo.Work.Right - fit.Right,
+            Bottom = geo.Work.Bottom - fit.Bottom,
         };
-        return r.Width < 200 || r.Height < 200 ? geo.Work : r;
     }
 
     private RECT Pad(RECT r)
@@ -115,8 +115,18 @@ public sealed class ZoneManager(SplitConfig config)
     public bool IsOptedOut(MonitorGeometry geo)
     {
         var frac = Config.ZonesFor(geo.Device);
-        return frac.Count == 1 && frac[0].L <= 0.001 && frac[0].T <= 0.001
-                               && frac[0].R >= 0.999 && frac[0].B >= 0.999;
+        bool wholeArea = frac.Count == 1 && frac[0].L <= 0.001 && frac[0].T <= 0.001
+                                         && frac[0].R >= 0.999 && frac[0].B >= 0.999;
+
+        // "One full-size zone" only means "leave it alone" if that zone really is the whole work
+        // area. With margins reserved there is still work to do, and claiming otherwise would let
+        // a maximize be restored and re-placed at the identical rect - silently losing the
+        // maximized state for no visible change.
+        var eff = EffectiveWork(geo);
+        bool untouched = eff.Left == geo.Work.Left && eff.Top == geo.Work.Top
+                      && eff.Right == geo.Work.Right && eff.Bottom == geo.Work.Bottom;
+
+        return wholeArea && untouched;
     }
 
     /// <summary>Index of the zone containing a point, or -1.</summary>

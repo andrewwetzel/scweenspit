@@ -14,6 +14,12 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ZoneManager zones;
     private readonly WinEventHookService hook;
     private readonly ZoneOverlay overlay = new();
+
+    // Sampling the foreground window when the menu item is clicked always returns our own window:
+    // NotifyIcon calls SetForegroundWindow on its hidden window before showing the menu. So track
+    // it continuously instead.
+    private readonly System.Windows.Forms.Timer foregroundWatch = new() { Interval = 400 };
+    private IntPtr lastForeground;
     private readonly SplitConfig config;
     private SettingsForm? settings;
 
@@ -27,6 +33,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             config.SetZones(device, edited);
             Log.Write($"zones resized on {device}: {edited.Count} zones");
+            hook.CancelPending();
             UpdateTrayText();
         };
 
@@ -55,6 +62,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         BuildMenu();
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) OpenSettings(); };
+
+        foregroundWatch.Tick += (_, _) => TrackForeground();
+        foregroundWatch.Start();
 
         ApplySnapSuppression();
         if (config.AutoClamp || config.DragToZone) hook.Start();
@@ -110,20 +120,33 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // hook.Running no longer means "clamping": the hooks also serve drag-to-zone. Report the
         // preference, but let a failed Start() override it rather than lying about being on.
-        var text = !hook.Running ? "ScweenSpit — hooks DOWN"
+        var text = !config.AutoClamp && !config.DragToZone ? $"ScweenSpit — hotkeys only, {zoneCount} zones"
+                 : !hook.Running ? "ScweenSpit — hooks DOWN"
                  : config.AutoClamp ? $"ScweenSpit — clamping, {zoneCount} zones"
-                 : $"ScweenSpit — clamping off, {zoneCount} zones";
+                 : $"ScweenSpit — drag-to-zone only, {zoneCount} zones";
 
         tray.Text = text.Length > 63 ? text[..63] : text;   // NotifyIcon.Text is capped at 63 chars
     }
 
     private void ReloadConfig()
     {
+        var loaded = SplitConfig.Load();
+        if (SplitConfig.LastLoadFailed)
+        {
+            // Replacing a working setup with defaults because of one typo - and handing Aero Snap
+            // back system-wide as a side effect - is far worse than doing nothing.
+            Notify("config.json could not be read. Keeping the running settings; a copy of the "
+                 + "broken file is at config.json.bad.");
+            return;
+        }
+
         // The live backup outranks whatever is on disk: this process is holding the suppression,
         // and the on-disk value may predate it. Losing it would strand the user's real settings.
         var liveSnapRestore = config.SnapRestore;
-        config.CopyFrom(SplitConfig.Load());
+        config.CopyFrom(loaded);
         config.SnapRestore ??= liveSnapRestore;
+
+        hook.CancelPending();   // any armed re-check holds pixel rects from the old layout
         ApplyChanges();
         overlay.Flash(zones);
         Notify("Config reloaded");
@@ -154,10 +177,22 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void TrackForeground()
+    {
+        var fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return;
+
+        GetWindowThreadProcessId(fg, out uint pid);
+        if (pid == Environment.ProcessId) return;          // our own tray/settings/overlay windows
+        if (!WinEventHookService.IsClampTarget(fg)) return;
+
+        lastForeground = fg;
+    }
+
     private void ExcludeActiveApp()
     {
-        var hWnd = GetForegroundWindow();
-        if (hWnd == IntPtr.Zero) { Notify("No active window."); return; }
+        var hWnd = lastForeground;
+        if (hWnd == IntPtr.Zero || !IsWindow(hWnd)) { Notify("No recent window to exclude."); return; }
 
         var name = WinEventHookService.OwnerProcessOf(hWnd);
         if (name is "?" or "ScweenSpit") { Notify($"Cannot exclude '{name}'."); return; }
@@ -221,6 +256,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (hWnd == IntPtr.Zero || !WinEventHookService.IsClampTarget(hWnd)) return;
         if (!GetWindowRect(hWnd, out var win) || !ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
 
+        // The preset's own label promises inaction; an explicit gesture should not override that.
+        if (zones.IsOptedOut(geo)) { Notify($"{geo.Device.TrimStart('\\', '.')} is set to be left alone."); return; }
+        if (config.IsExcluded(WinEventHookService.OwnerProcessOf(hWnd), Native.ClassNameOf(hWnd))) return;
+
         var rects = zones.ZonesFor(geo);
         if (rects.Count == 0) return;
 
@@ -253,6 +292,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeyNext);
             UnregisterHotKey(hotkeys.Handle, HotkeyZones);
 
+            foregroundWatch.Dispose();
             hook.Dispose();
             overlay.Dispose();
             settings?.Dispose();

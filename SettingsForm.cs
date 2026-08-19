@@ -114,7 +114,11 @@ public sealed class SettingsForm : Form
 
     private FlowLayoutPanel Page(string heading, string caption)
     {
-        content.Controls.Clear();
+        // Dispose rather than Clear: Clear only re-parents, and a NumericUpDown subscribes to
+        // SystemEvents.UserPreferenceChanged for as long as it has a handle - so every rebuild of
+        // the Layouts page would strand its spin boxes and their HWNDs for the life of the process.
+        while (content.Controls.Count > 0) content.Controls[0].Dispose();
+        excludeList = null;
         var page = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
@@ -317,11 +321,13 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Moving the taskbar restarts Windows Explorer, which briefly blanks the desktop and closes " +
-            "any open File Explorer windows. Per-display reserved space lives on the Layouts page."));
+            "any open File Explorer windows. Only the primary display's taskbar is moved; secondary " +
+            "displays keep their own. Per-display reserved space lives on the Layouts page."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)
     {
+        var before = Taskbar.Current();
         var answer = MessageBox.Show(
             $"Move the taskbar to the {edge.ToString().ToLowerInvariant()} edge?\n\n" +
             "This restarts Windows Explorer: the desktop will blank for a moment and open File " +
@@ -332,9 +338,19 @@ public sealed class SettingsForm : Form
         if (answer != DialogResult.OK) return;
 
         if (!Taskbar.Move(edge))
+        {
             MessageBox.Show("Could not write the taskbar setting — see the log.", "ScweenSpit",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        else if (Taskbar.Current() is { } now && now != edge)
+        {
+            // Say so rather than leaving a button that looks like it worked.
+            MessageBox.Show($"The setting was written, but the taskbar is still docked {now}. " +
+                            "Windows ignored it — this is expected on Windows 11.",
+                "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
 
+        _ = before;
         ShowTaskbar();
     }
 

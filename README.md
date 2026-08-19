@@ -87,9 +87,13 @@ Be aware of what that costs: there is no public API for moving the taskbar, so i
 `StuckRects3` blob and restarts Explorer — the desktop blanks for a moment and open File Explorer
 windows close. You're asked to confirm first.
 
+Only the **primary** display's taskbar is moved; secondary-display bars live in a separate
+undocumented blob and are deliberately left alone.
+
 **On Windows 11 this will not work.** Microsoft removed taskbar repositioning in build 22000; the
 setting is still written and Explorer still ignores it. The page says so up front rather than
-letting you find out by restarting your shell for nothing.
+letting you find out by restarting your shell for nothing — and if the bar does not move, it tells
+you that too instead of leaving a button that looks like it worked.
 
 ## Keeping Windows out of the way
 
@@ -155,8 +159,12 @@ Zones are numbered in reading order: top-to-bottom, then left-to-right.
 - `Exclude` lists processes (with or without `.exe`) or window classes to leave alone — games and
   video players are the usual candidates, since forcing them out of fullscreen is rarely wanted.
 
-An unreadable config is copied to `config.json.bad` before defaults replace it, so a typo never
-costs you a hand-tuned layout.
+An unreadable config is copied to `config.json.bad` and **left in place** — the running settings
+keep working and Reload tells you what happened, rather than one typo silently replacing every
+layout, margin and exclusion you had.
+
+Over-large margins are trimmed to leave 200px usable rather than being discarded, and each axis is
+fitted independently, so an absurd left margin cannot void a perfectly good top one.
 
 ## How it works
 
@@ -221,9 +229,9 @@ In rough order of likelihood:
    outlives the executable. Set it to `true`, or just delete the file to start fresh.
 2. **Check the layout isn't "Full — leave this display alone".** A monitor whose layout is a single
    full-size zone is deliberately opted out.
-3. **Check the tray tooltip.** Hover the icon: it reads *clamping, N zones*, *clamping off, N zones*,
-   or *hooks DOWN*. That is the one status channel Focus Assist cannot suppress, and it distinguishes
-   "switched off" from "the hooks failed to install".
+3. **Check the tray tooltip.** Hover the icon: it reads *clamping*, *drag-to-zone only*,
+   *hotkeys only*, or *hooks DOWN*. That is the one status channel Focus Assist cannot suppress, and
+   it distinguishes "you switched it off" from "the hooks failed to install".
 4. **Check for a second copy already running.** A single-instance mutex makes a second launch exit
    immediately and silently — the icon you can see may belong to an older build.
 5. **Read the log.** `%APPDATA%\ScweenSpit\scweenspit.log`, or Diagnostics → Open log.

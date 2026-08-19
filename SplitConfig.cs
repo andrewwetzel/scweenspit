@@ -23,8 +23,42 @@ public sealed class Margins
     public int Left { get; set; }
     public int Right { get; set; }
 
+    [JsonIgnore]
     public bool Any => Top != 0 || Bottom != 0 || Left != 0 || Right != 0;
+
     public Margins Copy() => new() { Top = Top, Bottom = Bottom, Left = Left, Right = Right };
+
+    /// <summary>Smallest usable strip a display may be reduced to, in pixels.</summary>
+    public const int MinUsable = 200;
+
+    /// <summary>
+    /// The margins actually applied, trimmed to leave <see cref="MinUsable"/> in each axis.
+    /// Trimming the facing pair proportionally beats discarding all four: one over-large value
+    /// should not silently void a perfectly good margin on the other axis.
+    /// </summary>
+    public Margins Fitted(int width, int height)
+    {
+        var (l, r) = FitPair(Left, Right, width);
+        var (t, b) = FitPair(Top, Bottom, height);
+        return new Margins { Left = l, Right = r, Top = t, Bottom = b };
+    }
+
+    private static (int Near, int Far) FitPair(int near, int far, int extent)
+    {
+        near = Math.Max(0, near);
+        far = Math.Max(0, far);
+
+        int budget = extent - MinUsable;
+        if (budget <= 0) return (0, 0);
+
+        int total = near + far;
+        if (total <= budget) return (near, far);
+
+        // Proportional, floored at zero: subtracting the overflow from one side alone drives the
+        // other negative whenever it exceeds the budget by itself, putting zones off the monitor.
+        int scaled = (int)Math.Floor(near * (double)budget / total);
+        return (Math.Clamp(scaled, 0, budget), budget - Math.Clamp(scaled, 0, budget));
+    }
 }
 
 public sealed class MonitorLayout
@@ -123,20 +157,34 @@ public sealed class SplitConfig
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     };
 
+    /// <summary>True when the last <see cref="Load"/> could not read an existing config file.</summary>
+    public static bool LastLoadFailed { get; private set; }
+
     public static SplitConfig Load()
     {
+        LastLoadFailed = false;
         try
         {
             if (File.Exists(Path))
             {
                 var cfg = JsonSerializer.Deserialize<SplitConfig>(File.ReadAllText(Path), JsonOpts);
                 if (cfg is not null) return cfg.Normalized();
+                LastLoadFailed = true;
+            }
+            else
+            {
+                // First run only. The file has to exist for "Open config file" to have something
+                // to open, so this seed is deliberate - unlike the unreadable case below.
+                var seed = Default();
+                seed.Save();
+                return seed;
             }
         }
         catch (Exception ex)
         {
             // A corrupt config must never stop the app — but it must not be destroyed either;
             // it is hand-edited, so keep a copy before defaults overwrite it.
+            LastLoadFailed = true;
             Log.Write($"config load failed: {ex.Message}");
             try
             {
@@ -147,9 +195,9 @@ public sealed class SplitConfig
             catch (Exception copyEx) { Log.Write($"could not preserve bad config: {copyEx.Message}"); }
         }
 
-        var fresh = Default();
-        fresh.Save();
-        return fresh;
+        // Deliberately NOT saved: overwriting an unreadable config destroys a hand-edited file the
+        // user can still fix. They get working defaults for this session and keep their file.
+        return Default();
     }
 
     public void Save()
@@ -201,11 +249,19 @@ public sealed class SplitConfig
             layout.Margins.Right = Math.Max(0, layout.Margins.Right);
         }
 
-        foreach (var key in Monitors.Where(kv => kv.Value.Zones.Count == 0).Select(kv => kv.Key).ToList())
-            Monitors.Remove(key);
-
-        if (!Monitors.ContainsKey(Fallback))
+        if (!Monitors.ContainsKey(Fallback) || Monitors[Fallback].Zones.Count == 0)
             Monitors[Fallback] = Default().Monitors[Fallback];
+
+        // An entry with margins but no zones is a legitimate hand-edit ("reserve space here, keep
+        // the shared layout"). Give it the shared zones - cloned, or editing this display would
+        // move every other one - rather than deleting the user's margins.
+        foreach (var entry in Monitors.Values)
+            if (entry.Zones.Count == 0 && entry.Margins.Any)
+                entry.Zones = Monitors[Fallback].Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B)).ToList();
+
+        foreach (var key in Monitors.Where(kv => kv.Value.Zones.Count == 0 && kv.Key != Fallback)
+                                    .Select(kv => kv.Key).ToList())
+            Monitors.Remove(key);
 
         return this;
     }

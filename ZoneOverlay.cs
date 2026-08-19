@@ -113,8 +113,6 @@ public sealed class ZoneOverlay : IDisposable
 
         private enum Grip { None, Divider, MarginLeft, MarginRight, MarginTop, MarginBottom }
 
-        private const int MinUsable = 200;
-
         private readonly MonitorGeometry geo;
         private readonly List<RECT> pixels;
         private readonly List<FracRect> fractions;
@@ -142,7 +140,9 @@ public sealed class ZoneOverlay : IDisposable
             this.geo = geo;
             this.pixels = pixels;
             this.fractions = ZoneEdges.Clone(fractions);
-            this.margins = margins;
+            // Fit once, here, against the same rule ZoneManager uses. Holding raw values would let
+            // the editor show and commit margins the zone math then silently trims.
+            this.margins = margins.Fitted(geo.Work.Width, geo.Work.Height);
             this.padding = padding;
             this.mode = mode;
             _ = inner;   // derived live from margins; the parameter documents the caller's intent
@@ -204,10 +204,10 @@ public sealed class ZoneOverlay : IDisposable
         /// <summary>The laid-out area in form-local coordinates, live as the margins are dragged.</summary>
         private Rectangle Inner()
         {
-            var r = new Rectangle(margins.Left, margins.Top,
-                                  Width - margins.Left - margins.Right,
-                                  Height - margins.Top - margins.Bottom);
-            return r.Width < MinUsable || r.Height < MinUsable ? new Rectangle(0, 0, Width, Height) : r;
+            var fit = margins.Fitted(Width, Height);
+            return new Rectangle(fit.Left, fit.Top,
+                                 Math.Max(1, Width - fit.Left - fit.Right),
+                                 Math.Max(1, Height - fit.Top - fit.Bottom));
         }
 
         private int XOf(double frac) { var i = Inner(); return i.X + (int)Math.Round(frac * i.Width); }
@@ -277,13 +277,13 @@ public sealed class ZoneOverlay : IDisposable
             switch (grip)
             {
                 case Grip.MarginLeft:
-                    margins.Left = Math.Clamp(x, 0, Math.Max(0, Width - margins.Right - MinUsable)); break;
+                    margins.Left = Math.Clamp(x, 0, Math.Max(0, Width - margins.Right - Margins.MinUsable)); break;
                 case Grip.MarginRight:
-                    margins.Right = Math.Clamp(Width - x, 0, Math.Max(0, Width - margins.Left - MinUsable)); break;
+                    margins.Right = Math.Clamp(Width - x, 0, Math.Max(0, Width - margins.Left - Margins.MinUsable)); break;
                 case Grip.MarginTop:
-                    margins.Top = Math.Clamp(y, 0, Math.Max(0, Height - margins.Bottom - MinUsable)); break;
+                    margins.Top = Math.Clamp(y, 0, Math.Max(0, Height - margins.Bottom - Margins.MinUsable)); break;
                 case Grip.MarginBottom:
-                    margins.Bottom = Math.Clamp(Height - y, 0, Math.Max(0, Height - margins.Top - MinUsable)); break;
+                    margins.Bottom = Math.Clamp(Height - y, 0, Math.Max(0, Height - margins.Top - Margins.MinUsable)); break;
             }
         }
 

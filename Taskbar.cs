@@ -12,6 +12,9 @@ public enum TaskbarEdge { Left = 0, Top = 1, Right = 2, Bottom = 3 }
 /// into Explorer's own StuckRects3 blob and Explorer is restarted to pick it up. On Windows 11
 /// Microsoft removed taskbar repositioning entirely, and Explorer simply ignores the value — see
 /// <see cref="CanMove"/>.
+///
+/// Only the PRIMARY display's taskbar is affected. Secondary-display bars live under MMStuckRects3,
+/// keyed per monitor in an undocumented blob, and are deliberately left alone.
 /// </summary>
 public static class Taskbar
 {
@@ -48,7 +51,10 @@ public static class Taskbar
                 return false;
             }
 
-            if (blob[EdgeOffset] == (byte)edge)
+            // Compare against where the taskbar ACTUALLY is, not against the byte we last wrote.
+            // On Windows 11 the write is ignored, so the stored byte says "done" while the bar has
+            // not moved - which made every press after the first a silent no-op.
+            if (Current() == edge)
             {
                 Log.Write($"taskbar already docked {edge}");
                 return true;

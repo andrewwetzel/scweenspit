@@ -54,6 +54,12 @@ public static class ZoneEdges
             // ...nor one whose near side is this edge.
             if (Near(lo, edge)) max = Math.Min(max, hi - MinExtent);
         }
+
+        // Zones narrower than MinExtent (a hand-written many-column layout, or plain floating point
+        // at exactly 20 equal columns) make the bounds cross. Pin to the edge itself: the divider
+        // simply will not move. Using the midpoint instead can land outside [0,1] and get committed.
+        if (min > max) min = max = edge;
+
         return (min, max);
     }
 

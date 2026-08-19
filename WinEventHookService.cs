@@ -40,6 +40,13 @@ public sealed class WinEventHookService : IDisposable
     private readonly System.Windows.Forms.Timer dragTick = new() { Interval = 40 };
     private IntPtr dragWindow;
     private RECT dragStartRect;
+    private bool dragSawFullscreen;
+    private bool pinnedOverlay;
+
+    // Re-evaluation after a drag that did not snap: a window Aero-snapped to maximized *inside* the
+    // move loop is swallowed by the drag guard and would otherwise never be looked at again.
+    private readonly System.Windows.Forms.Timer postDrag = new() { Interval = 200 };
+    private IntPtr postDragWindow;
     private int anchorZone = -1;
     private string dragDevice = "";
     private RECT? dragTarget;
@@ -69,9 +76,13 @@ public sealed class WinEventHookService : IDisposable
         this.zones = zones;
         verify.Tick += (_, _) => { verify.Stop(); ReVerify(); };
         dragTick.Tick += (_, _) => DragUpdate();
+        postDrag.Tick += (_, _) => { postDrag.Stop(); ReconcileAfterDrag(); };
     }
 
     public bool Running => hookLocation != IntPtr.Zero || hookMoveEnd != IntPtr.Zero;
+
+    /// <summary>Both hooks installed. A half-installed pair still reports Running, but is not well.</summary>
+    public bool Healthy => hookLocation != IntPtr.Zero && hookMoveEnd != IntPtr.Zero;
 
     public void Start()
     {
@@ -94,6 +105,8 @@ public sealed class WinEventHookService : IDisposable
 
     public void Stop()
     {
+        // Above the guard: the hotkey path arms the verify timer while the hooks are down.
+        CancelPending();
         if (!Running) return;
 
         CancelDrag();
@@ -112,6 +125,7 @@ public sealed class WinEventHookService : IDisposable
         Stop();
         verify.Dispose();
         dragTick.Dispose();
+        postDrag.Dispose();
     }
 
     // ---- the callback ------------------------------------------------------
@@ -125,63 +139,81 @@ public sealed class WinEventHookService : IDisposable
         eventsSeen++;
         Heartbeat();
 
-        if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
-        if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
-
-        if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
-        targetsSeen++;
-
         try
         {
-            if (!GetWindowRect(hWnd, out var win)) return;
-            if (!ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
-            if (!ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
-            {
-                // Recorded even mid-drag and even with clamping off: this is the rectangle that
-                // decides which zone a later maximize lands in, and letting it go stale sends the
-                // window back to whichever zone owns the middle of the screen.
-                lastNormal[hWnd] = win;
-                return;
-            }
+            if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
+            if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
 
-            // The user is hand-placing it; do not fight them for it.
-            if (hWnd == dragWindow) return;
-
-            // Hooks may be up purely to serve drag-to-zone.
-            if (!zones.Config.AutoClamp) return;
-
-            // Both of these are terminal states: the window stays fullscreen, so an unthrottled
-            // line here repeats for the life of the window.
-            if (zones.IsOptedOut(geo))
-            {
-                Log.WriteOnce($"optedout:{geo.Device}", $"{geo.Device} is opted out; leaving windows alone");
-                return;
-            }
-
-            string owner = OwnerProcess(hWnd), cls = ClassNameOf(hWnd);
-            if (zones.Config.IsExcluded(owner, cls))
-            {
-                Log.WriteOnce($"excluded:{hWnd}", $"excluded: {owner} / {cls}");
-                return;
-            }
-
-            fullscreenSeen++;
-            Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} proc={owner} class={cls} rect={win} " +
-                      $"monitor={geo.Device} bounds={geo.Bounds} work={geo.Work} " +
-                      $"maximized={ZoneManager.IsMaximized(hWnd)} style=0x{GetWindowLongPtr(hWnd, GWL_STYLE):X}");
-
-            var zoneRects = zones.ZonesFor(geo);
-            if (zoneRects.Count == 0) { Log.Write($"no zones for {geo.Device}"); return; }
-
-            int index = ZoneManager.PickZoneIndex(zoneRects, ReferenceRect(hWnd, win));
-            Log.Write($"  -> zone {index} of {zoneRects.Count}: {zoneRects[index]}");
-            Apply(hWnd, zoneRects[index]);
+            if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
+            targetsSeen++;
+            Reconcile(hWnd);
         }
         catch (Exception ex)
         {
             // An exception escaping into unmanaged hook dispatch kills the process.
             Log.Write($"callback error: {ex}");
         }
+    }
+
+    /// <summary>Decides what, if anything, to do about one window's current state.</summary>
+    private void Reconcile(IntPtr hWnd)
+    {
+        if (!GetWindowRect(hWnd, out var win)) return;
+        if (!ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
+
+        if (!ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
+        {
+            // Recorded even mid-drag and even with clamping off: this is the rectangle that decides
+            // which zone a later maximize lands in, and letting it go stale sends the window back
+            // to whichever zone owns the middle of the screen.
+            lastNormal[hWnd] = win;
+            return;
+        }
+
+        // The user is hand-placing it; do not fight them for it. Remember that we looked away, so
+        // the end of the drag can take a second look.
+        if (hWnd == dragWindow) { dragSawFullscreen = true; return; }
+
+        // Hooks may be up purely to serve drag-to-zone.
+        if (!zones.Config.AutoClamp) return;
+
+        // Both of these are terminal states: the window stays fullscreen, so an unthrottled line
+        // here repeats for the life of the window.
+        if (zones.IsOptedOut(geo))
+        {
+            Log.WriteOnce($"optedout:{geo.Device}", $"{geo.Device} is opted out; leaving windows alone");
+            return;
+        }
+
+        string owner = OwnerProcess(hWnd), cls = ClassNameOf(hWnd);
+        if (zones.Config.IsExcluded(owner, cls))
+        {
+            Log.WriteOnce($"excluded:{hWnd}", $"excluded: {owner} / {cls}");
+            return;
+        }
+
+        fullscreenSeen++;
+        Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} proc={owner} class={cls} rect={win} " +
+                  $"monitor={geo.Device} bounds={geo.Bounds} work={geo.Work} " +
+                  $"maximized={ZoneManager.IsMaximized(hWnd)} style=0x{GetWindowLongPtr(hWnd, GWL_STYLE):X}");
+
+        var zoneRects = zones.ZonesFor(geo);
+        if (zoneRects.Count == 0) { Log.Write($"no zones for {geo.Device}"); return; }
+
+        int index = ZoneManager.PickZoneIndex(zoneRects, ReferenceRect(hWnd, win));
+        Log.Write($"  -> zone {index} of {zoneRects.Count}: {zoneRects[index]}");
+        Apply(hWnd, zoneRects[index]);
+    }
+
+    /// <summary>Second look at a window whose fullscreen transition happened during its own drag.</summary>
+    private void ReconcileAfterDrag()
+    {
+        var hWnd = postDragWindow;
+        postDragWindow = IntPtr.Zero;
+
+        if (hWnd == IntPtr.Zero || !IsClampTarget(hWnd)) return;
+        try { Reconcile(hWnd); }
+        catch (Exception ex) { Log.Write($"post-drag reconcile failed: {ex}"); }
     }
 
     // ---- drag to zone ------------------------------------------------------
@@ -202,6 +234,11 @@ public sealed class WinEventHookService : IDisposable
         anchorZone = -1;
         dragDevice = "";
         dragTarget = null;
+        dragSawFullscreen = false;
+
+        // A deliberately pinned overlay must come back when the drag preview goes away.
+        pinnedOverlay = Overlay is { Visible: true, Mode: OverlayMode.Display };
+
         GetWindowRect(hWnd, out dragStartRect);
         dragTick.Start();
     }
@@ -256,10 +293,16 @@ public sealed class WinEventHookService : IDisposable
         Overlay?.Highlight("", null);   // clears every monitor; Hide() would tear down all modes
     }
 
-    /// <summary>Hides the overlay only if it is ours — a pinned Win+Alt+Z overlay must survive.</summary>
-    private void HideDragOverlay()
+    /// <summary>
+    /// Hides the overlay only if it is the drag preview, and puts back a pinned Win+Alt+Z overlay
+    /// that the preview replaced. Not restored on teardown: the hooks are going down with it.
+    /// </summary>
+    private void HideDragOverlay(bool restorePinned = true)
     {
-        if (Overlay is { Visible: true, Mode: OverlayMode.Drag }) Overlay.Hide();
+        if (Overlay is not { Visible: true, Mode: OverlayMode.Drag }) return;
+
+        Overlay.Hide();
+        if (restorePinned && pinnedOverlay) Overlay.Show(zones, OverlayMode.Display);
     }
 
     private void CancelDrag()
@@ -269,7 +312,11 @@ public sealed class WinEventHookService : IDisposable
         dragTarget = null;
         anchorZone = -1;
         dragDevice = "";
-        HideDragOverlay();
+        dragSawFullscreen = false;
+        pinnedOverlay = false;
+        postDrag.Stop();
+        postDragWindow = IntPtr.Zero;
+        HideDragOverlay(restorePinned: false);
     }
 
     private void DragEnd(IntPtr hWnd)
@@ -277,14 +324,22 @@ public sealed class WinEventHookService : IDisposable
         var target = dragTarget;
         var dragged = dragWindow;
 
+        bool sawFullscreen = dragSawFullscreen;
+
         dragTick.Stop();
         dragWindow = IntPtr.Zero;
         dragTarget = null;
         anchorZone = -1;
+        dragSawFullscreen = false;
         HideDragOverlay();
+        pinnedOverlay = false;
 
-        if (dragged == IntPtr.Zero || dragged != hWnd || target is null) return;
-        if (!ModifierHeld(zones.Config.DragModifier)) return;
+        if (dragged == IntPtr.Zero || dragged != hWnd || target is null)
+        {
+            ArmPostDrag(dragged, sawFullscreen);
+            return;
+        }
+        if (!ModifierHeld(zones.Config.DragModifier)) { ArmPostDrag(dragged, sawFullscreen); return; }
 
         // A resize is not a move: only snap when the window actually travelled.
         if (GetWindowRect(hWnd, out var now) && now.Left == dragStartRect.Left && now.Top == dragStartRect.Top
@@ -293,6 +348,20 @@ public sealed class WinEventHookService : IDisposable
 
         Log.Write($"drag-to-zone: 0x{hWnd:X} -> {target.Value}");
         Apply(hWnd, target.Value);
+    }
+
+    /// <summary>
+    /// Schedules a second look at a window that went fullscreen during its own drag — Aero-snapping
+    /// it to the top edge, for instance. The drag guard deliberately ignored that transition, and
+    /// no further event is guaranteed to arrive.
+    /// </summary>
+    private void ArmPostDrag(IntPtr hWnd, bool sawFullscreen)
+    {
+        if (!sawFullscreen || hWnd == IntPtr.Zero || !zones.Config.AutoClamp) return;
+
+        postDragWindow = hWnd;
+        postDrag.Stop();
+        postDrag.Start();
     }
 
     /// <summary>A gate: "None" means no key is required, so it is always satisfied.</summary>
@@ -325,6 +394,11 @@ public sealed class WinEventHookService : IDisposable
         Touch(hWnd);
         if (!ZoneManager.ClampToZone(hWnd, zone)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
         clamps++;
+
+        // The window now lives here and is no longer fullscreen, so this IS its last normal
+        // position. Without this the next maximize resolves against the pre-move rectangle and
+        // flies back to the zone it came from, permanently.
+        lastNormal[hWnd] = zone;
         Touch(hWnd); // restamp: the move itself is about to echo back as LOCATIONCHANGE
 
         verifyTarget = hWnd;
@@ -350,7 +424,7 @@ public sealed class WinEventHookService : IDisposable
 
         Log.Write($"re-verify {hWnd:X}: still fullscreen, re-clamping");
         Touch(hWnd);
-        ZoneManager.ClampToZone(hWnd, verifyZone);
+        if (ZoneManager.ClampToZone(hWnd, verifyZone)) lastNormal[hWnd] = verifyZone;
         Touch(hWnd);
     }
 
@@ -369,6 +443,18 @@ public sealed class WinEventHookService : IDisposable
 
     private string OwnerProcess(IntPtr hWnd) => owners.GetOrAdd(hWnd, OwnerProcessOf);
 
+    /// <summary>
+    /// Drops any scheduled follow-up work. The verify timer holds a single pixel rectangle, which a
+    /// config reload or an on-screen zone edit invalidates.
+    /// </summary>
+    public void CancelPending()
+    {
+        verify.Stop();
+        verifyTarget = IntPtr.Zero;
+        postDrag.Stop();
+        postDragWindow = IntPtr.Zero;
+    }
+
     /// <summary>Periodic one-liner: the fastest way to see which stage is starving.</summary>
     private void Heartbeat()
     {
@@ -376,7 +462,7 @@ public sealed class WinEventHookService : IDisposable
         if (now - lastBeat < 5_000) return;
         lastBeat = now;
         Log.Write($"[beat] events={eventsSeen} targets={targetsSeen} fullscreen={fullscreenSeen} clamps={clamps} " +
-                  $"hooks={(Running ? "up" : "DOWN")}");
+                  $"hooks={(Healthy ? "up" : Running ? "PARTIAL" : "DOWN")}");
     }
 
     // ---- reentrancy guard --------------------------------------------------
@@ -409,6 +495,11 @@ public sealed class WinEventHookService : IDisposable
     public static bool IsClampTarget(IntPtr hWnd)
     {
         if (!IsWindow(hWnd) || !IsWindowVisible(hWnd)) return false;
+
+        // A minimized window still reports visible, but its rectangle is the iconic (-32000,-32000)
+        // placeholder. Recording that as a last-known position resolves every later maximize to
+        // zone 0, and nothing ever heals it.
+        if (IsIconic(hWnd)) return false;
         if (GetAncestor(hWnd, GA_ROOT) != hWnd) return false;      // not a top-level window
 
         long style = GetWindowLongPtr(hWnd, GWL_STYLE);
