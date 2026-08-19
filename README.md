@@ -66,6 +66,31 @@ stays a clean split — no gaps, no overlaps — and nothing can be squeezed bel
 
 Presets are still there (70/30, thirds, quadrants and so on) if you'd rather not fiddle.
 
+### Reserving space at the screen edges
+
+Zones are laid out inside the Windows **work area**, so the taskbar is already excluded. When that
+isn't the whole story — an auto-hiding taskbar, a third-party dock, a bezel you want to stay clear
+of — each display takes its own **reserved margins** in pixels.
+
+Set them numerically under Layouts, or drag the **orange outer edges** in the zone editor: the
+reserved band is hatched, the zones reflow live into whatever is left, and margins that would leave
+under 200px of usable space are ignored rather than obeyed.
+
+Margins are per display and fork automatically, so adjusting one screen never moves the others.
+
+### Moving the taskbar itself
+
+The **Taskbar** page reports where the taskbar actually is (via the shell's `ABM_GETTASKBARPOS`) and
+can dock it to any edge.
+
+Be aware of what that costs: there is no public API for moving the taskbar, so it writes Explorer's
+`StuckRects3` blob and restarts Explorer — the desktop blanks for a moment and open File Explorer
+windows close. You're asked to confirm first.
+
+**On Windows 11 this will not work.** Microsoft removed taskbar repositioning in build 22000; the
+setting is still written and Explorer still ignores it. The page says so up front rather than
+letting you find out by restarting your shell for nothing.
+
 ## Keeping Windows out of the way
 
 Windows has its own opinions about window placement, and they compete with these zones. **Suppress
@@ -107,7 +132,8 @@ window will fight, and the loser retries.
       "Zones": [
         { "L": 0.0, "T": 0.0, "R": 0.70, "B": 1.0 },
         { "L": 0.70, "T": 0.0, "R": 1.0, "B": 1.0 }
-      ]
+      ],
+      "Margins": { "Top": 0, "Bottom": 0, "Left": 0, "Right": 0 }
     },
     "\\\\.\\DISPLAY2": {
       "Zones": [
@@ -146,6 +172,7 @@ costs you a hand-tuned layout.
 | `SettingsForm.cs` / `Theme.cs` | the settings window and its dark palette |
 | `WindowsSnap.cs` | suppressing Windows' own snap behaviour |
 | `Startup.cs` | run-at-login registry entry |
+| `Taskbar.cs` | reading and relocating the Windows taskbar |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
 
 Three details that this design lives or dies by:

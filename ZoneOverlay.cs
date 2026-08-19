@@ -27,6 +27,9 @@ public sealed class ZoneOverlay : IDisposable
     /// <summary>Raised when the user finishes dragging a divider: (device, new fractional zones).</summary>
     public event Action<string, List<FracRect>>? ZonesEdited;
 
+    /// <summary>Raised when the user finishes dragging an outer edge: (device, new margins).</summary>
+    public event Action<string, Margins>? MarginsEdited;
+
     public ZoneOverlay() => autoHide.Tick += (_, _) => { autoHide.Stop(); Hide(); };
 
     public bool Visible => forms.Count > 0;
@@ -55,8 +58,11 @@ public sealed class ZoneOverlay : IDisposable
             var rects = zones.ZonesFor(geo);
             if (rects.Count == 0) continue;
 
-            var form = new OverlayForm(geo, rects, zones.Config.ZonesFor(geo.Device), mode);
+            var form = new OverlayForm(geo, zones.EffectiveWork(geo), rects,
+                                       zones.Config.ZonesFor(geo.Device),
+                                       zones.Config.LayoutFor(geo.Device).Margins.Copy(), mode);
             form.Committed += (device, edited) => ZonesEdited?.Invoke(device, edited);
+            form.MarginsCommitted += (device, m) => MarginsEdited?.Invoke(device, m);
             form.Dismissed += Hide;
             forms.Add(form);
             form.Show();
@@ -92,28 +98,39 @@ public sealed class ZoneOverlay : IDisposable
         private static readonly Color ZoneEdge = Color.FromArgb(150, 190, 255);
         private static readonly Color HotFill = Color.FromArgb(90, 170, 255);
 
+        private enum Grip { None, Divider, MarginLeft, MarginRight, MarginTop, MarginBottom }
+
+        private const int MinUsable = 200;
+
         private readonly MonitorGeometry geo;
         private readonly List<RECT> pixels;
         private readonly List<FracRect> fractions;
+        private readonly Margins margins;
         private readonly OverlayMode mode;
 
         private RECT? highlight;
         private double? draggingEdge;
         private bool draggingVertical;
+        private Grip draggingGrip = Grip.None;
         private double hoverEdge = double.NaN;
         private bool hoverVertical;
-        private bool dirty;
+        private Grip hoverGrip = Grip.None;
+        private bool zonesDirty, marginsDirty;
 
         public string Device => geo.Device;
         public event Action<string, List<FracRect>>? Committed;
+        public event Action<string, Margins>? MarginsCommitted;
         public event Action? Dismissed;
 
-        public OverlayForm(MonitorGeometry geo, List<RECT> pixels, List<FracRect> fractions, OverlayMode mode)
+        public OverlayForm(MonitorGeometry geo, RECT inner, List<RECT> pixels,
+                           List<FracRect> fractions, Margins margins, OverlayMode mode)
         {
             this.geo = geo;
             this.pixels = pixels;
             this.fractions = ZoneEdges.Clone(fractions);
+            this.margins = margins;
             this.mode = mode;
+            _ = inner;   // derived live from margins; the parameter documents the caller's intent
 
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -158,10 +175,19 @@ public sealed class ZoneOverlay : IDisposable
 
         // ---- geometry helpers (fraction <-> local pixel) --------------------
 
-        private int XOf(double frac) => (int)Math.Round(frac * geo.Work.Width);
-        private int YOf(double frac) => (int)Math.Round(frac * geo.Work.Height);
-        private double FracX(int x) => Math.Clamp((double)x / Math.Max(1, geo.Work.Width), 0, 1);
-        private double FracY(int y) => Math.Clamp((double)y / Math.Max(1, geo.Work.Height), 0, 1);
+        /// <summary>The laid-out area in form-local coordinates, live as the margins are dragged.</summary>
+        private Rectangle Inner()
+        {
+            var r = new Rectangle(margins.Left, margins.Top,
+                                  Width - margins.Left - margins.Right,
+                                  Height - margins.Top - margins.Bottom);
+            return r.Width < MinUsable || r.Height < MinUsable ? new Rectangle(0, 0, Width, Height) : r;
+        }
+
+        private int XOf(double frac) { var i = Inner(); return i.X + (int)Math.Round(frac * i.Width); }
+        private int YOf(double frac) { var i = Inner(); return i.Y + (int)Math.Round(frac * i.Height); }
+        private double FracX(int x) { var i = Inner(); return Math.Clamp((double)(x - i.X) / Math.Max(1, i.Width), 0, 1); }
+        private double FracY(int y) { var i = Inner(); return Math.Clamp((double)(y - i.Y) / Math.Max(1, i.Height), 0, 1); }
 
         private Rectangle LocalRect(FracRect f) => new(
             XOf(f.L), YOf(f.T), Math.Max(1, XOf(f.R) - XOf(f.L)), Math.Max(1, YOf(f.B) - YOf(f.T)));
@@ -173,7 +199,7 @@ public sealed class ZoneOverlay : IDisposable
             base.OnMouseMove(e);
             if (mode != OverlayMode.Edit) return;
 
-            if (draggingEdge is { } edge)
+            if (draggingGrip == Grip.Divider && draggingEdge is { } edge)
             {
                 double want = draggingVertical ? FracX(e.X) : FracY(e.Y);
                 var (min, max) = ZoneEdges.Limits(fractions, edge, draggingVertical);
@@ -183,23 +209,53 @@ public sealed class ZoneOverlay : IDisposable
                 {
                     ZoneEdges.Move(fractions, edge, clamped, draggingVertical);
                     draggingEdge = clamped;
-                    dirty = true;
+                    zonesDirty = true;
                     Invalidate();
                 }
                 return;
             }
 
-            var (near, vertical) = EdgeUnder(e.X, e.Y);
+            if (draggingGrip != Grip.None)
+            {
+                DragMargin(draggingGrip, e.X, e.Y);
+                marginsDirty = true;
+                Invalidate();
+                return;
+            }
+
+            var (grip, near, vertical) = GripUnder(e.X, e.Y);
 
             // NaN never compares equal to itself, so "no edge under the cursor" has to be tested
-            // explicitly — otherwise every mouse move repaints the whole overlay.
-            bool unchanged = (double.IsNaN(near) && double.IsNaN(hoverEdge)) || ZoneEdges.Near(near, hoverEdge);
-            if (!unchanged)
+            // explicitly - otherwise every mouse move repaints the whole overlay.
+            bool sameEdge = (double.IsNaN(near) && double.IsNaN(hoverEdge)) || ZoneEdges.Near(near, hoverEdge);
+            if (grip != hoverGrip || !sameEdge)
             {
+                hoverGrip = grip;
                 hoverEdge = near;
                 hoverVertical = vertical;
-                Cursor = double.IsNaN(near) ? Cursors.Default : vertical ? Cursors.SizeWE : Cursors.SizeNS;
+                Cursor = grip switch
+                {
+                    Grip.None => Cursors.Default,
+                    Grip.MarginLeft or Grip.MarginRight => Cursors.SizeWE,
+                    Grip.MarginTop or Grip.MarginBottom => Cursors.SizeNS,
+                    _ => vertical ? Cursors.SizeWE : Cursors.SizeNS,
+                };
                 Invalidate();
+            }
+        }
+
+        private void DragMargin(Grip grip, int x, int y)
+        {
+            switch (grip)
+            {
+                case Grip.MarginLeft:
+                    margins.Left = Math.Clamp(x, 0, Math.Max(0, Width - margins.Right - MinUsable)); break;
+                case Grip.MarginRight:
+                    margins.Right = Math.Clamp(Width - x, 0, Math.Max(0, Width - margins.Left - MinUsable)); break;
+                case Grip.MarginTop:
+                    margins.Top = Math.Clamp(y, 0, Math.Max(0, Height - margins.Bottom - MinUsable)); break;
+                case Grip.MarginBottom:
+                    margins.Bottom = Math.Clamp(Height - y, 0, Math.Max(0, Height - margins.Top - MinUsable)); break;
             }
         }
 
@@ -208,24 +264,24 @@ public sealed class ZoneOverlay : IDisposable
             base.OnMouseDown(e);
             if (mode != OverlayMode.Edit) return;
 
-            var (near, vertical) = EdgeUnder(e.X, e.Y);
-            if (double.IsNaN(near)) { Dismissed?.Invoke(); return; }   // click away to finish
+            var (grip, near, vertical) = GripUnder(e.X, e.Y);
+            if (grip == Grip.None) { Dismissed?.Invoke(); return; }   // click away to finish
 
-            draggingEdge = near;
+            draggingGrip = grip;
+            draggingEdge = double.IsNaN(near) ? null : near;
             draggingVertical = vertical;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (mode != OverlayMode.Edit || draggingEdge is null) return;
+            if (mode != OverlayMode.Edit || draggingGrip == Grip.None) return;
 
+            draggingGrip = Grip.None;
             draggingEdge = null;
-            if (dirty)
-            {
-                dirty = false;
-                Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions));
-            }
+
+            if (zonesDirty) { zonesDirty = false; Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions)); }
+            if (marginsDirty) { marginsDirty = false; MarginsCommitted?.Invoke(geo.Device, margins.Copy()); }
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
@@ -234,16 +290,22 @@ public sealed class ZoneOverlay : IDisposable
             if (e.KeyCode is Keys.Escape or Keys.Enter) Dismissed?.Invoke();
         }
 
-        /// <summary>Nearest draggable divider to a point, or NaN when the point is not near one.</summary>
-        private (double Edge, bool Vertical) EdgeUnder(int x, int y)
+        /// <summary>Nearest draggable handle to a point. Outer margins win over inner dividers.</summary>
+        private (Grip Grip, double Edge, bool Vertical) GripUnder(int x, int y)
         {
+            var i = Inner();
+            if (Math.Abs(x - i.Left) <= GrabPixels) return (Grip.MarginLeft, double.NaN, true);
+            if (Math.Abs(x - i.Right) <= GrabPixels) return (Grip.MarginRight, double.NaN, true);
+            if (Math.Abs(y - i.Top) <= GrabPixels) return (Grip.MarginTop, double.NaN, false);
+            if (Math.Abs(y - i.Bottom) <= GrabPixels) return (Grip.MarginBottom, double.NaN, false);
+
             foreach (var v in ZoneEdges.Vertical(fractions))
-                if (Math.Abs(XOf(v) - x) <= GrabPixels) return (v, true);
+                if (Math.Abs(XOf(v) - x) <= GrabPixels) return (Grip.Divider, v, true);
 
             foreach (var h in ZoneEdges.Horizontal(fractions))
-                if (Math.Abs(YOf(h) - y) <= GrabPixels) return (h, false);
+                if (Math.Abs(YOf(h) - y) <= GrabPixels) return (Grip.Divider, h, false);
 
-            return (double.NaN, false);
+            return (Grip.None, double.NaN, false);
         }
 
         // ---- painting -------------------------------------------------------
@@ -261,6 +323,8 @@ public sealed class ZoneOverlay : IDisposable
             using var index = new Font(FontFamily.GenericSansSerif, 40f, FontStyle.Bold, GraphicsUnit.Pixel);
             using var caption = new Font(FontFamily.GenericSansSerif, 15f, FontStyle.Regular, GraphicsUnit.Pixel);
             using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
+            PaintReserved(g, caption, centred);
 
             // In edit mode we draw the live fractions; otherwise the already-computed pixel zones.
             var boxes = mode == OverlayMode.Edit
@@ -292,28 +356,59 @@ public sealed class ZoneOverlay : IDisposable
             PaintHeader(g, centred);
         }
 
+        /// <summary>Hatches the space the margins keep clear, so reserved area is visibly reserved.</summary>
+        private void PaintReserved(Graphics g, Font caption, StringFormat centred)
+        {
+            var i = Inner();
+            if (i.X == 0 && i.Y == 0 && i.Width == Width && i.Height == Height) return;
+
+            using var hatch = new HatchBrush(HatchStyle.WideDownwardDiagonal,
+                                             Color.FromArgb(70, 76, 92), Color.FromArgb(30, 33, 41));
+            foreach (var band in new[]
+            {
+                new Rectangle(0, 0, Width, i.Y),                                   // top
+                new Rectangle(0, i.Bottom, Width, Height - i.Bottom),              // bottom
+                new Rectangle(0, i.Y, i.X, i.Height),                              // left
+                new Rectangle(i.Right, i.Y, Width - i.Right, i.Height),            // right
+            })
+            {
+                if (band.Width > 0 && band.Height > 0) g.FillRectangle(hatch, band);
+            }
+
+            var label = $"reserved  {margins.Top}/{margins.Bottom}/{margins.Left}/{margins.Right}  (T/B/L/R)";
+            g.DrawString(label, caption, Brushes.White, new Rectangle(0, Math.Max(0, i.Y - 22), Width, 20), centred);
+        }
+
         private void PaintHandles(Graphics g)
         {
             using var grip = new Pen(Color.White, 3f) { DashStyle = DashStyle.Dot };
             using var live = new Pen(Color.FromArgb(120, 220, 255), 5f);
+            using var outer = new Pen(Color.FromArgb(255, 190, 110), 3f) { DashStyle = DashStyle.Dash };
+            using var outerLive = new Pen(Color.FromArgb(255, 210, 140), 5f);
 
             foreach (var v in ZoneEdges.Vertical(fractions))
             {
-                bool active = !double.IsNaN(hoverEdge) && hoverVertical && ZoneEdges.Near(v, hoverEdge);
-                g.DrawLine(active ? live : grip, XOf(v), 0, XOf(v), Height);
+                bool active = hoverGrip == Grip.Divider && hoverVertical && ZoneEdges.Near(v, hoverEdge);
+                g.DrawLine(active ? live : grip, XOf(v), Inner().Y, XOf(v), Inner().Bottom);
             }
             foreach (var h in ZoneEdges.Horizontal(fractions))
             {
-                bool active = !double.IsNaN(hoverEdge) && !hoverVertical && ZoneEdges.Near(h, hoverEdge);
-                g.DrawLine(active ? live : grip, 0, YOf(h), Width, YOf(h));
+                bool active = hoverGrip == Grip.Divider && !hoverVertical && ZoneEdges.Near(h, hoverEdge);
+                g.DrawLine(active ? live : grip, Inner().X, YOf(h), Inner().Right, YOf(h));
             }
+
+            var i = Inner();
+            g.DrawLine(hoverGrip == Grip.MarginLeft ? outerLive : outer, i.Left, 0, i.Left, Height);
+            g.DrawLine(hoverGrip == Grip.MarginRight ? outerLive : outer, i.Right, 0, i.Right, Height);
+            g.DrawLine(hoverGrip == Grip.MarginTop ? outerLive : outer, 0, i.Top, Width, i.Top);
+            g.DrawLine(hoverGrip == Grip.MarginBottom ? outerLive : outer, 0, i.Bottom, Width, i.Bottom);
         }
 
         private void PaintHeader(Graphics g, StringFormat centred)
         {
             string text = mode switch
             {
-                OverlayMode.Edit => $"{Device.TrimStart('\\', '.')}  —  drag a divider to resize · Esc when done",
+                OverlayMode.Edit => $"{Device.TrimStart('\\', '.')}  —  drag a divider to resize, an orange edge to reserve space · Esc when done",
                 OverlayMode.Drag => $"{Device.TrimStart('\\', '.')}  —  drop to snap",
                 _ => $"{Device.TrimStart('\\', '.')}  —  {pixels.Count} zones",
             };

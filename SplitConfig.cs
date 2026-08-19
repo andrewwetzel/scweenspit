@@ -15,9 +15,28 @@ public sealed class FracRect
     public FracRect(double l, double t, double r, double b) { L = l; T = t; R = r; B = b; }
 }
 
+/// <summary>Space reserved at the edges of a display, in physical pixels.</summary>
+public sealed class Margins
+{
+    public int Top { get; set; }
+    public int Bottom { get; set; }
+    public int Left { get; set; }
+    public int Right { get; set; }
+
+    public bool Any => Top != 0 || Bottom != 0 || Left != 0 || Right != 0;
+    public Margins Copy() => new() { Top = Top, Bottom = Bottom, Left = Left, Right = Right };
+}
+
 public sealed class MonitorLayout
 {
     public List<FracRect> Zones { get; set; } = new();
+
+    /// <summary>
+    /// Extra space kept clear at the edges, on top of what Windows already reports as the work
+    /// area. Use it to dodge an auto-hiding or third-party taskbar, or to reclaim space Windows
+    /// reserves but you do not actually need.
+    /// </summary>
+    public Margins Margins { get; set; } = new();
 }
 
 public sealed class SplitConfig
@@ -168,6 +187,12 @@ public sealed class SplitConfig
                 z.T = Math.Clamp(z.T, 0, 1); z.B = Math.Clamp(z.B, 0, 1);
             }
             layout.Zones.RemoveAll(z => z.R - z.L <= 0.01 || z.B - z.T <= 0.01);
+
+            layout.Margins ??= new Margins();
+            layout.Margins.Top = Math.Max(0, layout.Margins.Top);
+            layout.Margins.Bottom = Math.Max(0, layout.Margins.Bottom);
+            layout.Margins.Left = Math.Max(0, layout.Margins.Left);
+            layout.Margins.Right = Math.Max(0, layout.Margins.Right);
         }
 
         foreach (var key in Monitors.Where(kv => kv.Value.Zones.Count == 0).Select(kv => kv.Key).ToList())
@@ -179,12 +204,38 @@ public sealed class SplitConfig
         return this;
     }
 
-    /// <summary>Zones for a device, falling back to "*".</summary>
-    public List<FracRect> ZonesFor(string device)
+    /// <summary>The layout a device actually uses, falling back to "*".</summary>
+    public MonitorLayout LayoutFor(string device)
     {
-        if (Monitors.TryGetValue(device, out var m) && m.Zones.Count > 0) return m.Zones;
-        if (Monitors.TryGetValue(Fallback, out var f) && f.Zones.Count > 0) return f.Zones;
-        return Default().Monitors[Fallback].Zones;
+        if (Monitors.TryGetValue(device, out var m) && m.Zones.Count > 0) return m;
+        if (Monitors.TryGetValue(Fallback, out var f) && f.Zones.Count > 0) return f;
+        return Default().Monitors[Fallback];
+    }
+
+    public List<FracRect> ZonesFor(string device) => LayoutFor(device).Zones;
+
+    /// <summary>
+    /// Gives a device its own entry, cloned from whatever it was inheriting. Editing a monitor that
+    /// was using the "*" fallback has to fork, or the edit would silently move every other display.
+    /// </summary>
+    public MonitorLayout OwnLayout(string device)
+    {
+        if (Monitors.TryGetValue(device, out var own) && own.Zones.Count > 0) return own;
+
+        var inherited = LayoutFor(device);
+        var forked = new MonitorLayout
+        {
+            Zones = inherited.Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B)).ToList(),
+            Margins = inherited.Margins.Copy(),
+        };
+        Monitors[device] = forked;
+        return forked;
+    }
+
+    public void SetMargins(string device, Margins margins)
+    {
+        OwnLayout(device).Margins = margins;
+        Save();
     }
 
     /// <summary>
@@ -207,7 +258,8 @@ public sealed class SplitConfig
 
     public void SetZones(string device, List<FracRect> zones)
     {
-        Monitors[device] = new MonitorLayout { Zones = zones };
+        var layout = OwnLayout(device);
+        layout.Zones = zones;
         Save();
     }
 }

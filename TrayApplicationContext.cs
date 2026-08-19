@@ -27,6 +27,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             config.SetZones(device, edited);
             Log.Write($"zones resized on {device}: {edited.Count} zones");
+            UpdateTrayText();
+        };
+
+        overlay.MarginsEdited += (device, m) =>
+        {
+            config.SetMargins(device, m);
+            Log.Write($"margins on {device}: T{m.Top} B{m.Bottom} L{m.Left} R{m.Right}");
         };
 
         hotkeys = new HotkeyWindow(OnHotkey);

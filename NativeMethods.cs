@@ -103,6 +103,23 @@ public static class Native
         public string szDevice;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct APPBARDATA
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uCallbackMessage;
+        public uint uEdge;
+        public RECT rc;
+        public IntPtr lParam;   // LPARAM: 8 bytes on x64, so IntPtr rather than int
+    }
+
+    public const uint ABM_GETTASKBARPOS = 0x00000005;
+    public const uint ABE_LEFT = 0, ABE_TOP = 1, ABE_RIGHT = 2, ABE_BOTTOM = 3;
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    public static extern IntPtr SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
+
     public delegate void WinEventDelegate(
         IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);

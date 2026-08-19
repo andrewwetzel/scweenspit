@@ -66,7 +66,7 @@ public sealed class ZoneManager(SplitConfig config)
     /// </summary>
     public List<RECT> ZonesFor(MonitorGeometry geo)
     {
-        var work = geo.Work;
+        var work = EffectiveWork(geo);
         int w = work.Width, h = work.Height;
 
         return Config.ZonesFor(geo.Device)
@@ -81,6 +81,25 @@ public sealed class ZoneManager(SplitConfig config)
             .Where(r => r.Width > 0 && r.Height > 0)
             .OrderBy(r => r.Top).ThenBy(r => r.Left)
             .ToList();
+    }
+
+    /// <summary>
+    /// The area zones are laid out in: what Windows reports as the work area, less the user's own
+    /// margins. Margins that would leave nothing usable are ignored rather than obeyed.
+    /// </summary>
+    public RECT EffectiveWork(MonitorGeometry geo)
+    {
+        var m = Config.LayoutFor(geo.Device).Margins;
+        if (m is null || !m.Any) return geo.Work;
+
+        var r = new RECT
+        {
+            Left = geo.Work.Left + m.Left,
+            Top = geo.Work.Top + m.Top,
+            Right = geo.Work.Right - m.Right,
+            Bottom = geo.Work.Bottom - m.Bottom,
+        };
+        return r.Width < 200 || r.Height < 200 ? geo.Work : r;
     }
 
     private RECT Pad(RECT r)

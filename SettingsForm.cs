@@ -45,6 +45,7 @@ public sealed class SettingsForm : Form
 
         AddNav("General", ShowGeneral);
         AddNav("Layouts", ShowLayouts);
+        AddNav("Taskbar", ShowTaskbar);
         AddNav("Exclusions", ShowExclusions);
         AddNav("Diagnostics", ShowDiagnostics);
 
@@ -218,12 +219,113 @@ public sealed class SettingsForm : Form
             edit.Width = 200;
             edit.Click += (_, _) => { Hide(); overlay.Show(zones, OverlayMode.Edit); };
             page.Controls.Add(edit);
+
+            page.Controls.Add(new Label
+            {
+                Text = "Reserved space (pixels kept clear at each edge)",
+                AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+                Margin = new Padding(0, 12, 0, 4),
+            });
+
+            var margins = config.LayoutFor(geo.Device).Margins;
+            var strip = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 6) };
+            var device = geo.Device;
+
+            foreach (var (name, get, set) in new (string, Func<Margins, int>, Action<Margins, int>)[]
+            {
+                ("Top",    m => m.Top,    (m, v) => m.Top = v),
+                ("Bottom", m => m.Bottom, (m, v) => m.Bottom = v),
+                ("Left",   m => m.Left,   (m, v) => m.Left = v),
+                ("Right",  m => m.Right,  (m, v) => m.Right = v),
+            })
+            {
+                strip.Controls.Add(new Label
+                {
+                    Text = name, AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(),
+                    Margin = new Padding(0, 8, 4, 0),
+                });
+
+                var box = Theme.Number(get(margins), 0, 2000, 4);
+                box.Width = 70;
+                box.Margin = new Padding(0, 2, 16, 4);
+                var setter = set;
+                box.ValueChanged += (_, _) =>
+                {
+                    var edited = config.LayoutFor(device).Margins.Copy();
+                    setter(edited, (int)box.Value);
+                    config.SetMargins(device, edited);
+                    applyChanges();
+                };
+                strip.Controls.Add(box);
+            }
+            page.Controls.Add(strip);
         }
 
         var show = Theme.Action("Show all zones (Win+Alt+Z)");
         show.Width = 220;
         show.Click += (_, _) => overlay.Flash(zones, 2500);
         page.Controls.Add(show);
+    }
+
+    private void ShowTaskbar()
+    {
+        var page = Page("Taskbar",
+            "Zones are laid out inside the Windows work area, so the taskbar is already avoided. " +
+            "This is for moving the taskbar itself, and for telling ScweenSpit to keep clear of " +
+            "anything Windows does not report — an auto-hiding or third-party bar.");
+
+        var current = Taskbar.Current();
+        page.Controls.Add(new Label
+        {
+            Text = current is null ? "Current position: unknown" : $"Current position: {current}",
+            AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(11f, FontStyle.Bold),
+            Margin = new Padding(0, 4, 0, 10),
+        });
+
+        if (!Taskbar.CanMove)
+        {
+            page.Controls.Add(new Label
+            {
+                Text = "⚠  Windows 11 removed taskbar repositioning. The buttons below still write the " +
+                       "setting, but Explorer ignores it and the bar stays at the bottom. Nothing here " +
+                       "will break — it simply will not move.",
+                AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 12),
+            });
+        }
+
+        var row = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560 };
+        foreach (var edge in new[] { TaskbarEdge.Bottom, TaskbarEdge.Top, TaskbarEdge.Left, TaskbarEdge.Right })
+        {
+            var b = Theme.Action($"Move to {edge}", primary: current == edge);
+            b.Width = 130;
+            var target = edge;
+            b.Click += (_, _) => MoveTaskbar(target);
+            row.Controls.Add(b);
+        }
+        page.Controls.Add(row);
+
+        page.Controls.Add(Theme.Caption(
+            "Moving the taskbar restarts Windows Explorer, which briefly blanks the desktop and closes " +
+            "any open File Explorer windows. Per-display reserved space lives on the Layouts page."));
+    }
+
+    private void MoveTaskbar(TaskbarEdge edge)
+    {
+        var answer = MessageBox.Show(
+            $"Move the taskbar to the {edge.ToString().ToLowerInvariant()} edge?\n\n" +
+            "This restarts Windows Explorer: the desktop will blank for a moment and open File " +
+            "Explorer windows will close." +
+            (Taskbar.CanMove ? "" : "\n\nOn Windows 11 this is very likely to have no effect."),
+            "ScweenSpit", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+
+        if (answer != DialogResult.OK) return;
+
+        if (!Taskbar.Move(edge))
+            MessageBox.Show("Could not write the taskbar setting — see the log.", "ScweenSpit",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+        ShowTaskbar();
     }
 
     private static bool SameZones(List<FracRect> a, List<FracRect> b) =>
