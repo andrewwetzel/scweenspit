@@ -40,6 +40,11 @@ public sealed class WinEventHookService : IDisposable
     private IntPtr hookLocation, hookMoveEnd;
     private long lastPrune;
 
+    // Counters, reported on a heartbeat. They are what tells the three failure modes apart:
+    // no events at all / events but everything filtered out / detected but the move did nothing.
+    private long eventsSeen, targetsSeen, fullscreenSeen, clamps;
+    private long lastBeat;
+
     public WinEventHookService(ZoneManager zones)
     {
         this.zones = zones;
@@ -61,7 +66,9 @@ public sealed class WinEventHookService : IDisposable
         hookLocation  = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
                                         IntPtr.Zero, callback, 0, 0, flags);
 
-        Log.Write($"hooks installed: moveend={hookMoveEnd:X} location={hookLocation:X}");
+        int err = Marshal.GetLastWin32Error();
+        Log.Write($"hooks installed: moveend=0x{hookMoveEnd:X} location=0x{hookLocation:X}" +
+                  (Running ? "" : $"  *** BOTH FAILED, err={err} ***"));
     }
 
     public void Stop()
@@ -88,7 +95,12 @@ public sealed class WinEventHookService : IDisposable
     {
         // LOCATIONCHANGE also fires for carets, scrollbars and cursors — cheapest test first.
         if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || hWnd == IntPtr.Zero) return;
+
+        eventsSeen++;
+        Heartbeat();
+
         if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
+        targetsSeen++;
 
         try
         {
@@ -100,12 +112,19 @@ public sealed class WinEventHookService : IDisposable
                 return;
             }
 
+            fullscreenSeen++;
+            Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} class={ClassNameOf(hWnd)} rect={win} " +
+                      $"monitor={geo.Device} bounds={geo.Bounds} work={geo.Work} " +
+                      $"maximized={ZoneManager.IsMaximized(hWnd)} style=0x{GetWindowLongPtr(hWnd, GWL_STYLE):X}");
+
             if (zones.IsOptedOut(geo)) return;   // monitor configured as a single full-size zone
 
             var zoneRects = zones.ZonesFor(geo);
-            if (zoneRects.Count == 0) return;
+            if (zoneRects.Count == 0) { Log.Write($"no zones for {geo.Device}"); return; }
 
-            Apply(hWnd, zoneRects[ZoneManager.PickZoneIndex(zoneRects, ReferenceRect(hWnd, win))]);
+            int index = ZoneManager.PickZoneIndex(zoneRects, ReferenceRect(hWnd, win));
+            Log.Write($"  -> zone {index} of {zoneRects.Count}: {zoneRects[index]}");
+            Apply(hWnd, zoneRects[index]);
         }
         catch (Exception ex)
         {
@@ -128,7 +147,8 @@ public sealed class WinEventHookService : IDisposable
     public void Apply(IntPtr hWnd, RECT zone)
     {
         Touch(hWnd);
-        if (!ZoneManager.ClampToZone(hWnd, zone)) return;
+        if (!ZoneManager.ClampToZone(hWnd, zone)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
+        clamps++;
         Touch(hWnd); // restamp: the move itself is about to echo back as LOCATIONCHANGE
 
         verifyTarget = hWnd;
@@ -156,6 +176,16 @@ public sealed class WinEventHookService : IDisposable
         Touch(hWnd);
         ZoneManager.ClampToZone(hWnd, verifyZone);
         Touch(hWnd);
+    }
+
+    /// <summary>Periodic one-liner: the fastest way to see which stage is starving.</summary>
+    private void Heartbeat()
+    {
+        long now = Environment.TickCount64;
+        if (now - lastBeat < 5_000) return;
+        lastBeat = now;
+        Log.Write($"[beat] events={eventsSeen} targets={targetsSeen} fullscreen={fullscreenSeen} clamps={clamps} " +
+                  $"hooks={(Running ? "up" : "DOWN")}");
     }
 
     // ---- reentrancy guard --------------------------------------------------

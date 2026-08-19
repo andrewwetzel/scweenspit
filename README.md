@@ -6,14 +6,13 @@ YouTube, VLC), fills only the sub-screen the window is in instead of the whole d
 
 ## Get a binary
 
-Every push to `main` builds on `windows-latest` and attaches the executables to the run as
-artifacts; tagging `v*` publishes them to a GitHub Release. Three flavours:
+Every push to `main` builds on `windows-latest` and attaches `ScweenSpit.exe` to the run as an
+artifact; tagging `v*` publishes it to a GitHub Release. The build is **win-x64, self-contained**
+(~145 MB) — nothing to install, just run it.
 
-| Artifact | Size | Requires |
-| --- | --- | --- |
-| `win-x64` self-contained | ~145 MB | nothing |
-| `win-arm64` self-contained | ~158 MB | nothing (Windows on ARM) |
-| `win-x64-framework-dependent` | ~185 KB | .NET 8 Desktop Runtime |
+```
+gh release download <tag> -p '*win-x64.exe'
+```
 
 ## Build
 
@@ -23,7 +22,7 @@ needs Windows.
 
 ```
 dotnet build -c Release          # typechecks anywhere
-./scripts/publish.sh             # all three Windows binaries, from any OS
+./scripts/publish.sh             # the Windows binary, from any OS
 dotnet run -c Release            # Windows only
 ```
 
@@ -108,5 +107,16 @@ Three details that this design lives or dies by:
 
 ## Diagnostics
 
-Set `SCWEENSPIT_LOG=1` before launching to append clamp decisions to
-`%APPDATA%\ScweenSpit\scweenspit.log`. Off by default, and never throws.
+Logging is **on by default** — every startup, monitor layout, zone rectangle and clamp decision is
+appended to `%APPDATA%\ScweenSpit\scweenspit.log` (also reachable from the tray menu). Set
+`SCWEENSPIT_LOG=0` to silence it. It self-truncates past 5 MB and never throws.
+
+A `[beat]` line every five seconds carries the counters that localise a fault:
+
+```
+[beat] events=1843 targets=52 fullscreen=1 clamps=1 hooks=up
+```
+
+`events=0` means the hook never fired. `targets=0` with events flowing means every window was
+filtered out. `fullscreen=0` means nothing was recognised as maximized or borderless. `clamps=0`
+with `fullscreen>0` means the move itself was refused.

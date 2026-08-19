@@ -5,13 +5,7 @@ set -euo pipefail
 out="${1:-./publish}"
 cd "$(dirname "$0")/.."
 
-pub() {  # rid, self-contained, dir
-  dotnet publish -c Release -r "$1" --self-contained "$2" -p:PublishSingleFile=true -o "$out/$3"
-}
-
-pub win-x64   true  win-x64
-pub win-arm64 true  win-arm64
-pub win-x64   false win-x64-framework-dependent
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$out/win-x64"
 
 echo
 echo "built:"

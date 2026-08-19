@@ -26,12 +26,8 @@ jobs:
 
       - name: Publish
         run: |
-          dotnet publish -c Release -r win-x64   --self-contained true  -p:PublishSingleFile=true -o publish/x64
-          dotnet publish -c Release -r win-arm64 --self-contained true  -p:PublishSingleFile=true -o publish/arm64
-          dotnet publish -c Release -r win-x64   --self-contained false -p:PublishSingleFile=true -o publish/fd
-          Copy-Item publish/x64/ScweenSpit.exe   ScweenSpit-${env:TAG}-win-x64.exe
-          Copy-Item publish/arm64/ScweenSpit.exe ScweenSpit-${env:TAG}-win-arm64.exe
-          Copy-Item publish/fd/ScweenSpit.exe    ScweenSpit-${env:TAG}-win-x64-framework-dependent.exe
+          dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish/x64
+          Copy-Item publish/x64/ScweenSpit.exe ScweenSpit-${env:TAG}-win-x64.exe
 
       - name: Create release
         run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes ScweenSpit-*.exe

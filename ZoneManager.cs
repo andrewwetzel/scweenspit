@@ -13,6 +13,8 @@ public sealed class ZoneManager(SplitConfig config)
 
     public SplitConfig Config { get; set; } = config;
 
+    private static bool monitorInfoFailureLogged;
+
     // ---- monitors ----------------------------------------------------------
 
     public static bool TryGetMonitor(IntPtr hWnd, out MonitorGeometry geo)
@@ -27,7 +29,17 @@ public sealed class ZoneManager(SplitConfig config)
         if (hMonitor == IntPtr.Zero) return false;
 
         var mi = new MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFOEX>() };
-        if (!GetMonitorInfo(hMonitor, ref mi)) return false;
+        if (!GetMonitorInfo(hMonitor, ref mi))
+        {
+            // A wrong cbSize is the classic cause here, and it would silently kill every clamp.
+            if (!monitorInfoFailureLogged)
+            {
+                monitorInfoFailureLogged = true;
+                Log.Write($"GetMonitorInfo FAILED (cbSize={mi.cbSize}, " +
+                          $"err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()})");
+            }
+            return false;
+        }
 
         geo = new MonitorGeometry(mi.szDevice, mi.rcWork, mi.rcMonitor);
         return true;

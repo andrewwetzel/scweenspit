@@ -33,10 +33,41 @@ public sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip(),
         };
         tray.ContextMenuStrip.Opening += (_, _) => BuildMenu();
-        tray.DoubleClick += (_, _) => ToggleAutoClamp();
+        BuildMenu();
+
+        // Left-click opens the menu too — one less way to be stuck with an icon that seems inert.
+        tray.MouseUp += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            BuildMenu();
+            tray.ContextMenuStrip!.Show(Cursor.Position);
+        };
 
         if (config.AutoClamp) hook.Start();
         RegisterHotkeys();
+        LogStartup();
+    }
+
+    /// <summary>Dumps the whole decision surface once, so a single run explains itself.</summary>
+    private void LogStartup()
+    {
+        var monitors = ZoneManager.AllMonitors();
+        Log.Write($"autoclamp={config.AutoClamp} debounce={config.DebounceMs}ms " +
+                  $"hooks={(hook.Running ? "up" : "DOWN")} monitors={monitors.Count}");
+
+        int total = 0;
+        foreach (var geo in monitors)
+        {
+            var rects = zones.ZonesFor(geo);
+            total += rects.Count;
+            Log.Write($"monitor {geo.Device} bounds={geo.Bounds} work={geo.Work} optedOut={zones.IsOptedOut(geo)}");
+            for (int i = 0; i < rects.Count; i++)
+                Log.Write($"    zone {i}: {rects[i]}  ({rects[i].Width}x{rects[i].Height})");
+        }
+
+        Notify(monitors.Count == 0
+            ? "No monitors detected - see the log."
+            : $"{monitors.Count} monitor(s), {total} zones. Clamping {(hook.Running ? "active" : "OFF")}.");
     }
 
     // ---- menu --------------------------------------------------------------
@@ -62,6 +93,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem("Reload config", null, (_, _) => ReloadConfig()));
         items.Add(new ToolStripMenuItem("Open config file", null, (_, _) => OpenConfig()));
+        items.Add(new ToolStripMenuItem("Open log file", null, (_, _) => Open(Log.LogPath)));
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { tray.Visible = false; ExitThread(); }));
     }
@@ -112,14 +144,20 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OpenConfig()
     {
+        if (!File.Exists(SplitConfig.Path)) config.Save();
+        Open(SplitConfig.Path);
+    }
+
+    private void Open(string path)
+    {
         try
         {
-            if (!File.Exists(SplitConfig.Path)) config.Save();
-            Process.Start(new ProcessStartInfo(SplitConfig.Path) { UseShellExecute = true });
+            if (!File.Exists(path)) { Notify($"Not created yet: {path}"); return; }
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            Notify($"Could not open config: {ex.Message}");
+            Notify($"Could not open {path}: {ex.Message}");
         }
     }
 
