@@ -60,7 +60,8 @@ public sealed class ZoneManager(SplitConfig config)
 
     /// <summary>
     /// Materializes this monitor's fractional zones into pixel rectangles against its work area
-    /// (which already excludes the taskbar), ordered left-to-right then top-to-bottom.
+    /// (which already excludes the taskbar), in reading order: top-to-bottom, then left-to-right,
+    /// so hotkey cycling walks Quadrants as TL, TR, BL, BR rather than down the columns.
     /// Shared fractional edges round to identical pixels, so zones never gap or overlap.
     /// </summary>
     public List<RECT> ZonesFor(MonitorGeometry geo)
@@ -76,9 +77,19 @@ public sealed class ZoneManager(SplitConfig config)
                 Right  = work.Left + (int)Math.Round(f.R * w),
                 Bottom = work.Top  + (int)Math.Round(f.B * h),
             })
+            .Select(Pad)
             .Where(r => r.Width > 0 && r.Height > 0)
-            .OrderBy(r => r.Left).ThenBy(r => r.Top)
+            .OrderBy(r => r.Top).ThenBy(r => r.Left)
             .ToList();
+    }
+
+    private RECT Pad(RECT r)
+    {
+        int p = Config.Padding;
+        if (p <= 0) return r;
+        // Refuse to pad a zone out of existence.
+        if (r.Width <= 2 * p || r.Height <= 2 * p) return r;
+        return new RECT { Left = r.Left + p, Top = r.Top + p, Right = r.Right - p, Bottom = r.Bottom - p };
     }
 
     /// <summary>A single zone spanning the whole work area means "leave this monitor alone".</summary>
@@ -131,7 +142,17 @@ public sealed class ZoneManager(SplitConfig config)
         if (!GetWindowPlacement(hWnd, ref wp) || wp.showCmd != SW_SHOWMAXIMIZED) return false;
 
         rect = wp.rcNormalPosition;
-        return rect.Width > 0 && rect.Height > 0;
+        if (rect.Width <= 0 || rect.Height <= 0) return false;
+
+        // WINDOWPLACEMENT is documented in *workspace* coordinates, which differ from screen
+        // coordinates whenever the taskbar sits at the top or left of the monitor.
+        if (TryGetMonitor(hWnd, out var geo))
+        {
+            int dx = geo.Work.Left - geo.Bounds.Left, dy = geo.Work.Top - geo.Bounds.Top;
+            rect.Left += dx; rect.Right += dx;
+            rect.Top += dy; rect.Bottom += dy;
+        }
+        return true;
     }
 
     /// <summary>Chromeless window that covers the monitor's full bounds — i.e. borderless fullscreen.</summary>
@@ -164,10 +185,20 @@ public sealed class ZoneManager(SplitConfig config)
         bool maximized = IsMaximized(hWnd);
         if (!maximized && Near(win, zone)) return false;
 
-        if (maximized) ShowWindow(hWnd, SW_RESTORE);
+        if (maximized && !ShowWindow(hWnd, SW_RESTORE))
+            Log.Write($"  ShowWindow(SW_RESTORE) returned false for 0x{hWnd:X}");
 
-        SetWindowPos(hWnd, HWND_TOP, zone.Left, zone.Top, zone.Width, zone.Height,
-            SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOZORDER);
+        // The BOOL matters: UIPI refuses cross-integrity moves (an elevated window from an
+        // unelevated us) and returns FALSE. Treating that as success would report a healthy
+        // clamp in the log while nothing on screen moved.
+        if (!SetWindowPos(hWnd, HWND_TOP, zone.Left, zone.Top, zone.Width, zone.Height,
+                SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOZORDER))
+        {
+            int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            Log.Write($"  SetWindowPos FAILED for 0x{hWnd:X} err={err}" +
+                      (err == 5 ? " (ACCESS_DENIED - target window is elevated, we are not)" : ""));
+            return false;
+        }
 
         Log.Write($"clamp {hWnd:X} -> {zone} (maximized={maximized})");
         return true;

@@ -8,12 +8,13 @@ namespace ScweenSpit;
 /// <summary>Tray icon, menu, and the hidden window that owns the global hotkeys.</summary>
 public sealed class TrayApplicationContext : ApplicationContext
 {
-    private const int HotkeyPrev = 1, HotkeyNext = 2;
+    private const int HotkeyPrev = 1, HotkeyNext = 2, HotkeyZones = 3;
 
     private readonly NotifyIcon tray;
     private readonly HotkeyWindow hotkeys;
     private readonly ZoneManager zones;
     private readonly WinEventHookService hook;
+    private readonly ZoneOverlay overlay = new();
     private SplitConfig config;
 
     public TrayApplicationContext()
@@ -42,6 +43,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             BuildMenu();
             tray.ContextMenuStrip!.Show(Cursor.Position);
         };
+
+        ApplySnapSuppression();
 
         if (config.AutoClamp) hook.Start();
         RegisterHotkeys();
@@ -85,12 +88,27 @@ public sealed class TrayApplicationContext : ApplicationContext
         items.Add(clamp);
         items.Add(new ToolStripSeparator());
 
+        items.Add(new ToolStripMenuItem(overlay.Visible ? "Hide zones" : "Show zones", null,
+            (_, _) => overlay.Toggle(zones)));
+
+        items.Add(new ToolStripSeparator());
+
         var layouts = new ToolStripMenuItem("Layout");
         foreach (var geo in ZoneManager.AllMonitors())
             layouts.DropDownItems.Add(MonitorMenu(geo));
         items.Add(layouts);
 
+        items.Add(new ToolStripMenuItem("Suppress Windows snap", null, (_, _) => ToggleSnapSuppression())
+        {
+            Checked = config.SuppressWindowsSnap,
+            ToolTipText = "Stops Aero Snap and Win+Arrow from competing with these zones.",
+        });
+
+        items.Add(new ToolStripMenuItem("Start with Windows", null,
+            (_, _) => Startup.Set(!Startup.Enabled)) { Checked = Startup.Enabled });
+
         items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("Exclude active window's app", null, (_, _) => ExcludeActiveApp()));
         items.Add(new ToolStripMenuItem("Reload config", null, (_, _) => ReloadConfig()));
         items.Add(new ToolStripMenuItem("Open config file", null, (_, _) => OpenConfig()));
         items.Add(new ToolStripMenuItem("Open log file", null, (_, _) => Open(Log.LogPath)));
@@ -111,6 +129,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             {
                 config.SetZones(geo.Device, make());
                 Log.Write($"layout {geo.Device} -> {name}");
+                overlay.Flash(zones);
             })
             { Checked = SameZones(current, preset) });
         }
@@ -133,12 +152,61 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (config.AutoClamp) hook.Start(); else hook.Stop();
     }
 
+    /// <summary>Adds whatever is in front to the exclusion list — the quick way to stop the tool
+    /// interfering with a game or a video player without hand-editing JSON.</summary>
+    private void ExcludeActiveApp()
+    {
+        var hWnd = GetForegroundWindow();
+        if (hWnd == IntPtr.Zero) { Notify("No active window."); return; }
+
+        var name = WinEventHookService.OwnerProcessOf(hWnd);
+        if (name is "?" or "ScweenSpit") { Notify($"Cannot exclude '{name}'."); return; }
+
+        if (config.Exclude.Contains(name, StringComparer.OrdinalIgnoreCase))
+        {
+            config.Exclude.RemoveAll(e => e.Equals(name, StringComparison.OrdinalIgnoreCase));
+            Notify($"{name} is no longer excluded.");
+        }
+        else
+        {
+            config.Exclude.Add(name);
+            Notify($"{name} will no longer be clamped.");
+        }
+        config.Save();
+    }
+
+    private void ToggleSnapSuppression()
+    {
+        config.SuppressWindowsSnap = !config.SuppressWindowsSnap;
+        ApplySnapSuppression();
+        config.Save();
+    }
+
+    /// <summary>
+    /// Reconciles Windows' snap settings with the preference. Restoring from a persisted backup
+    /// covers the case where a previous run was killed rather than closed.
+    /// </summary>
+    private void ApplySnapSuppression()
+    {
+        if (config.SuppressWindowsSnap)
+        {
+            config.SnapRestore ??= WindowsSnap.Suppress();
+        }
+        else if (config.SnapRestore is { } saved)
+        {
+            WindowsSnap.Restore(saved);
+            config.SnapRestore = null;
+        }
+    }
+
     private void ReloadConfig()
     {
         config = SplitConfig.Load();
         zones.Config = config;
 
         if (config.AutoClamp) hook.Start(); else hook.Stop();
+        ApplySnapSuppression();
+        overlay.Flash(zones);
         Notify("Config reloaded");
     }
 
@@ -166,15 +234,18 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void RegisterHotkeys()
     {
         const uint mods = MOD_WIN | MOD_ALT | MOD_NOREPEAT;
-        bool ok = RegisterHotKey(hotkeys.Handle, HotkeyPrev, mods, VK_LEFT)
-                & RegisterHotKey(hotkeys.Handle, HotkeyNext, mods, VK_RIGHT);
+        bool ok = RegisterHotKey(hotkeys.Handle, HotkeyPrev,  mods, VK_LEFT)
+                & RegisterHotKey(hotkeys.Handle, HotkeyNext,  mods, VK_RIGHT)
+                & RegisterHotKey(hotkeys.Handle, HotkeyZones, mods, VK_Z);
 
-        if (!ok) Notify("Win+Alt+Left/Right could not be registered (already in use).");
+        if (!ok) Notify("Some Win+Alt hotkeys could not be registered (already in use).");
     }
 
     /// <summary>Cycles the foreground window through the zones of the monitor it is on.</summary>
     private void OnHotkey(int id)
     {
+        if (id == HotkeyZones) { overlay.Toggle(zones); return; }
+
         var hWnd = GetForegroundWindow();
         if (hWnd == IntPtr.Zero || !WinEventHookService.IsClampTarget(hWnd)) return;
         if (!GetWindowRect(hWnd, out var win) || !ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
@@ -212,7 +283,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             UnregisterHotKey(hotkeys.Handle, HotkeyPrev);
             UnregisterHotKey(hotkeys.Handle, HotkeyNext);
+            UnregisterHotKey(hotkeys.Handle, HotkeyZones);
             hook.Dispose();
+            overlay.Dispose();
+
+            if (config.SnapRestore is { } saved)
+            {
+                WindowsSnap.Restore(saved);
+                config.SnapRestore = null;
+                config.Save();
+            }
+
             tray.Visible = false;
             tray.Dispose();
             hotkeys.DestroyHandle();

@@ -28,19 +28,46 @@ dotnet run -c Release            # Windows only
 
 ## Use
 
-The tray menu has:
+The tray menu (left-click or right-click) has:
 
 - **Auto-clamp** — master on/off. Off truly unhooks; nothing is intercepted.
+- **Show zones** — draws the current layout over every monitor: each zone outlined, numbered
+  and captioned with its pixel size. Click-through, so you can leave it up while you work.
 - **Layout ▸ *monitor* ▸ preset** — per-monitor layouts, each independent
   (Full, 70/30, 30/70, 60/40, 50/50, Thirds, Top/Bottom, Quadrants).
   The list is rebuilt each time the menu opens, so hot-plugged displays show up.
-- **Reload config** / **Open config file**
+- **Suppress Windows snap** — see below.
+- **Start with Windows**
+- **Exclude active window's app** — toggles whatever is in front in and out of the exclusion list.
+- **Reload config** / **Open config file** / **Open log file**
 - **Exit**
 
-Double-clicking the tray icon toggles auto-clamp.
+| Hotkey | Action |
+| --- | --- |
+| `Win+Alt+Left` / `Win+Alt+Right` | cycle the focused window through its monitor's zones |
+| `Win+Alt+Z` | show/hide the zone overlay |
 
-`Win+Alt+Left` / `Win+Alt+Right` cycle the focused window through the zones of the monitor
-it is currently on.
+## Keeping Windows out of the way
+
+Windows has its own opinions about window placement, and they compete with these zones. **Suppress
+Windows snap** turns off the three that actually interfere:
+
+| Setting | What it stopped doing |
+| --- | --- |
+| `SPI_SETWINARRANGING` | Aero Snap — dragging to an edge half-tiles the window |
+| `SPI_SETSNAPSIZING` | edge-resize snapping |
+| `SPI_SETDOCKMOVING` | dock-on-move |
+
+These are **per-user system settings, not app settings**. Turning them off changes your desktop for
+every app, so the previous values are written to `SnapRestore` in the config and put back on exit —
+and, if the process is killed rather than closed, on the next launch. It defaults to off.
+
+Two things it deliberately does *not* touch, because they need registry edits and an Explorer
+restart: the Windows 11 **Snap Layouts** flyout (hovering the maximize button) and **Snap Assist**.
+Turn those off in Settings → System → Multitasking if they bother you.
+
+If you also run PowerToys FancyZones, disable one or the other — two tools racing to place the same
+window will fight, and the loser retries.
 
 ## Config
 
@@ -50,6 +77,9 @@ it is currently on.
 {
   "AutoClamp": true,
   "DebounceMs": 400,
+  "Padding": 0,
+  "SuppressWindowsSnap": false,
+  "Exclude": ["vlc", "mpv.exe", "UnityWndClass"],
   "Monitors": {
     "*": {
       "Zones": [
@@ -70,8 +100,15 @@ it is currently on.
 A zone is a fraction of the monitor's **work area** (taskbar already excluded), so one
 shape covers columns, rows and grids. Keys are Win32 device names; `"*"` is the fallback
 for any monitor without its own entry. Hand-edit and hit **Reload config** — no restart.
+Zones are numbered in reading order: top-to-bottom, then left-to-right.
 
-Give a monitor a single full-size zone (`0,0,1,1`) to opt it out entirely.
+- Give a monitor a single full-size zone (`0,0,1,1`) to opt it out entirely.
+- `Padding` insets every zone by that many pixels, so tiled windows don't touch.
+- `Exclude` lists processes (with or without `.exe`) or window classes to leave alone — games and
+  video players are the usual candidates, since forcing them out of fullscreen is rarely wanted.
+
+An unreadable config is copied to `config.json.bad` before defaults replace it, so a typo never
+costs you a hand-tuned layout.
 
 ## How it works
 
@@ -82,6 +119,9 @@ Give a monitor a single full-size zone (`0,0,1,1`) to opt it out entirely.
 | `ZoneManager.cs` | monitor geometry, split math, the clamp |
 | `WinEventHookService.cs` | WinEvent hooks, window filtering, reentrancy guard |
 | `TrayApplicationContext.cs` | tray icon, menu, hotkey window |
+| `ZoneOverlay.cs` | the click-through zone visualiser |
+| `WindowsSnap.cs` | suppressing Windows' own snap behaviour |
+| `Startup.cs` | run-at-login registry entry |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
 
 Three details that this design lives or dies by:

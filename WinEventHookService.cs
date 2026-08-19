@@ -21,12 +21,20 @@ public sealed class WinEventHookService : IDisposable
 
     private const long PruneIntervalMs = 5_000;
 
+    /// <summary>Never evict a stamp that the debounce still needs — otherwise raising DebounceMs
+    /// past the prune interval silently stops working, which is the opposite of what the docs say.</summary>
+    private long RetainMs => Math.Max(PruneIntervalMs, zones.Config.DebounceMs + 1_000);
+
     private readonly ZoneManager zones;
     private readonly ConcurrentDictionary<IntPtr, long> recent = new();
 
     // Last known non-fullscreen rectangle per window: once a window covers the whole monitor its
     // own rect no longer says which zone the user had it in. Pruned when the window dies.
     private readonly ConcurrentDictionary<IntPtr, RECT> lastNormal = new();
+
+    // Owning process per window. Resolving a pid to a name is comparatively expensive and the answer
+    // never changes for a given hwnd, so it is worth remembering.
+    private readonly ConcurrentDictionary<IntPtr, string> owners = new();
 
     // Apps like Chrome re-assert their fullscreen size once, just after we shrink them —
     // inside the debounce window, where we are deaf. One bounded re-check settles it.
@@ -79,6 +87,7 @@ public sealed class WinEventHookService : IDisposable
         callback = null;
         recent.Clear();
         lastNormal.Clear();
+        owners.Clear();
         Log.Write("hooks removed");
     }
 
@@ -112,8 +121,15 @@ public sealed class WinEventHookService : IDisposable
                 return;
             }
 
+            string owner = OwnerProcess(hWnd), cls = ClassNameOf(hWnd);
+            if (zones.Config.IsExcluded(owner, cls))
+            {
+                Log.Write($"excluded: {owner} / {cls}");
+                return;
+            }
+
             fullscreenSeen++;
-            Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} class={ClassNameOf(hWnd)} rect={win} " +
+            Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} proc={owner} class={cls} rect={win} " +
                       $"monitor={geo.Device} bounds={geo.Bounds} work={geo.Work} " +
                       $"maximized={ZoneManager.IsMaximized(hWnd)} style=0x{GetWindowLongPtr(hWnd, GWL_STYLE):X}");
 
@@ -178,6 +194,21 @@ public sealed class WinEventHookService : IDisposable
         Touch(hWnd);
     }
 
+    /// <summary>Process name that owns a window, or "?" if it cannot be resolved.</summary>
+    public static string OwnerProcessOf(IntPtr hWnd)
+    {
+        try
+        {
+            GetWindowThreadProcessId(hWnd, out uint pid);
+            if (pid == 0) return "?";
+            using var proc = System.Diagnostics.Process.GetProcessById((int)pid);
+            return proc.ProcessName;
+        }
+        catch { return "?"; }
+    }
+
+    private string OwnerProcess(IntPtr hWnd) => owners.GetOrAdd(hWnd, OwnerProcessOf);
+
     /// <summary>Periodic one-liner: the fastest way to see which stage is starving.</summary>
     private void Heartbeat()
     {
@@ -199,10 +230,13 @@ public sealed class WinEventHookService : IDisposable
         if (now - lastPrune > PruneIntervalMs)
         {
             lastPrune = now;
+            long retain = RetainMs;
             foreach (var kv in recent)
-                if (now - kv.Value > PruneIntervalMs) recent.TryRemove(kv.Key, out _);
+                if (now - kv.Value > retain) recent.TryRemove(kv.Key, out _);
             foreach (var key in lastNormal.Keys)
                 if (!IsWindow(key)) lastNormal.TryRemove(key, out _);
+            foreach (var key in owners.Keys)
+                if (!IsWindow(key)) owners.TryRemove(key, out _);
         }
 
         // WINEVENT_SKIPOWNPROCESS does not help here: we move *other* processes' windows,

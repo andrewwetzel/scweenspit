@@ -28,10 +28,37 @@ public sealed class SplitConfig
     /// <summary>How long (ms) to ignore further events for a window we just moved.</summary>
     public int DebounceMs { get; set; } = 400;
 
+    /// <summary>Gap in pixels left around every zone. 0 makes zones touch edge to edge.</summary>
+    public int Padding { get; set; }
+
+    /// <summary>Disable Windows' own Aero Snap while we run, so it stops competing with our zones.</summary>
+    public bool SuppressWindowsSnap { get; set; }
+
+    /// <summary>What Windows' snap settings were before we suppressed them. Bookkeeping, not a preference:
+    /// it lets the next launch put them back even if this one is killed rather than closed.</summary>
+    public int[]? SnapRestore { get; set; }
+
+    /// <summary>Never touch windows of these processes or window classes. Matched case-insensitively,
+    /// with or without a .exe suffix — e.g. "vlc", "mpv.exe", "UnityWndClass".</summary>
+    public List<string> Exclude { get; set; } = new();
+
     /// <summary>Keyed by Win32 device name (\\.\DISPLAY1); "*" is the fallback for unlisted monitors.</summary>
     public Dictionary<string, MonitorLayout> Monitors { get; set; } = new();
 
     public const string Fallback = "*";
+
+    /// <summary>True when this window belongs to something the user has opted out of.</summary>
+    public bool IsExcluded(string process, string windowClass)
+    {
+        foreach (var e in Exclude)
+        {
+            if (e.Length == 0) continue;
+            var bare = e.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? e[..^4] : e;
+            if (bare.Equals(process, StringComparison.OrdinalIgnoreCase)) return true;
+            if (e.Equals(windowClass, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
 
     // ---- presets used by the tray menu -------------------------------------
     public static readonly (string Name, Func<List<FracRect>> Make)[] Presets =
@@ -69,8 +96,16 @@ public sealed class SplitConfig
         }
         catch (Exception ex)
         {
-            // A corrupt config must never stop the app; fall through to defaults.
+            // A corrupt config must never stop the app — but it must not be destroyed either;
+            // it is hand-edited, so keep a copy before defaults overwrite it.
             Log.Write($"config load failed: {ex.Message}");
+            try
+            {
+                var bad = Path + ".bad";
+                File.Copy(Path, bad, overwrite: true);
+                Log.Write($"unreadable config preserved at {bad}");
+            }
+            catch (Exception copyEx) { Log.Write($"could not preserve bad config: {copyEx.Message}"); }
         }
 
         var fresh = Default();
@@ -100,9 +135,20 @@ public sealed class SplitConfig
     private SplitConfig Normalized()
     {
         if (DebounceMs < 50) DebounceMs = 50;
+        if (Padding < 0) Padding = 0;
+        Exclude = Exclude.Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => e.Trim()).Distinct().ToList();
 
         foreach (var layout in Monitors.Values)
+        {
+            // Fractions outside [0,1] would place a zone off the monitor entirely - a window sent
+            // there has no reachable titlebar.
+            foreach (var z in layout.Zones)
+            {
+                z.L = Math.Clamp(z.L, 0, 1); z.R = Math.Clamp(z.R, 0, 1);
+                z.T = Math.Clamp(z.T, 0, 1); z.B = Math.Clamp(z.B, 0, 1);
+            }
             layout.Zones.RemoveAll(z => z.R - z.L <= 0.01 || z.B - z.T <= 0.01);
+        }
 
         foreach (var key in Monitors.Where(kv => kv.Value.Zones.Count == 0).Select(kv => kv.Key).ToList())
             Monitors.Remove(key);

@@ -21,7 +21,9 @@ public static class Native
     public const long WS_CAPTION       = 0x00C00000L;
     public const long WS_THICKFRAME    = 0x00040000L;
     public const long WS_CHILD         = 0x40000000L;
-    public const long WS_EX_TOOLWINDOW = 0x00000080L;
+    public const int  WS_EX_TOOLWINDOW  = 0x00000080;
+    public const int  WS_EX_TRANSPARENT = 0x00000020;   // click-through
+    public const int  WS_EX_NOACTIVATE  = 0x08000000;   // never takes focus
 
     // ---- ShowWindow / placement -------------------------------------------
     public const int SW_RESTORE        = 9;
@@ -29,6 +31,7 @@ public static class Native
 
     // ---- SetWindowPos ------------------------------------------------------
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
     public const uint SWP_NOACTIVATE   = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW   = 0x0040;
@@ -44,6 +47,16 @@ public static class Native
     public const uint MOD_NOREPEAT = 0x4000;
     public const uint VK_LEFT  = 0x25;
     public const uint VK_RIGHT = 0x27;
+    public const uint VK_Z     = 0x5A;
+
+    // ---- system parameters (Windows' own snap behaviour) --------------------
+    public const uint SPI_GETWINARRANGING = 0x0082;
+    public const uint SPI_SETWINARRANGING = 0x0083;
+    public const uint SPI_GETSNAPSIZING   = 0x008C;
+    public const uint SPI_SETSNAPSIZING   = 0x008D;
+    public const uint SPI_GETDOCKMOVING   = 0x0090;
+    public const uint SPI_SETDOCKMOVING   = 0x0091;
+    public const uint SPIF_SENDCHANGE     = 0x0002;
 
     // ---- DWM ---------------------------------------------------------------
     public const int DWMWA_CLOAKED = 14;
@@ -106,7 +119,7 @@ public static class Native
 
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
@@ -128,7 +141,10 @@ public static class Native
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW")]
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW", SetLastError = true)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
     [DllImport("user32.dll")]
@@ -142,6 +158,14 @@ public static class Native
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
+
+    /// <summary>Reading form: pvParam is a pointer to the value.</summary>
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
+    public static extern bool SystemParametersInfoGet(uint uiAction, uint uiParam, ref int pvParam, uint fWinIni);
+
+    /// <summary>Writing form: for the BOOL settings pvParam carries the value itself, not a pointer.</summary>
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
+    public static extern bool SystemParametersInfoSet(uint uiAction, uint uiParam, nint pvParam, uint fWinIni);
 
     [DllImport("user32.dll")]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
