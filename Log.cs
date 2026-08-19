@@ -17,6 +17,7 @@ internal static class Log
         System.IO.Path.GetDirectoryName(SplitConfig.Path)!, "scweenspit.log");
 
     private static readonly object Gate = new();
+    private static readonly HashSet<string> Once = [];
 
     public static void Write(string message)
     {
@@ -32,6 +33,18 @@ internal static class Log
             }
         }
         catch { /* diagnostics must never break the app */ }
+    }
+
+    /// <summary>
+    /// Writes a line at most once per key. For states that never resolve — an excluded window, a
+    /// display that is opted out — the unthrottled line repeats for as long as the window exists
+    /// and eventually trips the size cap, deleting the history it was meant to provide.
+    /// </summary>
+    public static void WriteOnce(string key, string message)
+    {
+        if (!Enabled) return;
+        lock (Gate) { if (!Once.Add(key)) return; }
+        Write(message);
     }
 
     /// <summary>Banner written once at startup so every log says what produced it.</summary>

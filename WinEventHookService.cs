@@ -150,10 +150,18 @@ public sealed class WinEventHookService : IDisposable
             // Hooks may be up purely to serve drag-to-zone.
             if (!zones.Config.AutoClamp) return;
 
+            // Both of these are terminal states: the window stays fullscreen, so an unthrottled
+            // line here repeats for the life of the window.
+            if (zones.IsOptedOut(geo))
+            {
+                Log.WriteOnce($"optedout:{geo.Device}", $"{geo.Device} is opted out; leaving windows alone");
+                return;
+            }
+
             string owner = OwnerProcess(hWnd), cls = ClassNameOf(hWnd);
             if (zones.Config.IsExcluded(owner, cls))
             {
-                Log.Write($"excluded: {owner} / {cls}");
+                Log.WriteOnce($"excluded:{hWnd}", $"excluded: {owner} / {cls}");
                 return;
             }
 
@@ -161,8 +169,6 @@ public sealed class WinEventHookService : IDisposable
             Log.Write($"fullscreen-ish: hwnd=0x{hWnd:X} proc={owner} class={cls} rect={win} " +
                       $"monitor={geo.Device} bounds={geo.Bounds} work={geo.Work} " +
                       $"maximized={ZoneManager.IsMaximized(hWnd)} style=0x{GetWindowLongPtr(hWnd, GWL_STYLE):X}");
-
-            if (zones.IsOptedOut(geo)) return;   // monitor configured as a single full-size zone
 
             var zoneRects = zones.ZonesFor(geo);
             if (zoneRects.Count == 0) { Log.Write($"no zones for {geo.Device}"); return; }
