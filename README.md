@@ -8,7 +8,14 @@ YouTube, VLC), fills only the sub-screen the window is in instead of the whole d
 
 Every push to `main` builds on `windows-latest` and attaches `ScweenSpit.exe` to the run as an
 artifact; tagging `v*` publishes it to a GitHub Release. The build is **win-x64, self-contained**
-(~145 MB) — nothing to install, just run it.
+(~63 MB) — nothing to install, just run it.
+
+That size is almost entirely the bundled .NET runtime: the app's own code is **70 KB**. A
+self-contained WinForms app carries all of `Microsoft.WindowsDesktop.App`, which is one indivisible
+runtime pack containing **both** WinForms and WPF — 37 MB of WPF that this app never touches.
+Single-file compression halves the total; trimming would cut it far further but is refused outright
+(`NETSDK1175`: Windows Forms is not supported with trimming). A framework-dependent build is
+**184 KB** if you would rather install the .NET 8 Desktop Runtime once.
 
 ```
 gh release download <tag> -p '*win-x64.exe'

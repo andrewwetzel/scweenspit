@@ -18,6 +18,10 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- 145 MB -> 63 MB. Costs a few hundred ms of decompression at launch, which is nothing for
+         something started once at login. Trimming would help far more but NETSDK1175 blocks it:
+         Windows Forms is not supported with trimming. -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
 </Project>
