@@ -19,11 +19,16 @@ jobs:
         run: dotnet build -c Release
 
       - name: Test
+        shell: pwsh
         run: |
-          if (Get-ChildItem -Recurse -Filter *.Tests.csproj) {
-            dotnet test -c Release --logger "console;verbosity=normal"
-          } else {
-            Write-Host "no test projects yet - skipping"
+          # Each test project is named explicitly: a bare "dotnet test" at the repo root resolves
+          # only the root project, discovers nothing, and exits 0 - a green tick over zero tests.
+          $tests = Get-ChildItem -Recurse -Filter *.Tests.csproj
+          if (-not $tests) { Write-Host "no test projects yet - skipping"; exit 0 }
+          foreach ($t in $tests) {
+            dotnet test $t.FullName -c Release --logger "console;verbosity=normal"
+            # pwsh only surfaces the LAST native exit code, so a failure mid-loop would be lost.
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Publish
