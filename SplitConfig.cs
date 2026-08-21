@@ -11,8 +11,16 @@ public sealed class FracRect
     public double R { get; set; } = 1;
     public double B { get; set; } = 1;
 
+    /// <summary>
+    /// Lay this zone out against the whole monitor rather than the work area, and keep windows in
+    /// it above the taskbar. For a genuinely fullscreen pane on part of a display: the taskbar
+    /// stays visible and usable everywhere this zone does not reach.
+    /// </summary>
+    public bool CoverTaskbar { get; set; }
+
     public FracRect() { }
-    public FracRect(double l, double t, double r, double b) { L = l; T = t; R = r; B = b; }
+    public FracRect(double l, double t, double r, double b, bool coverTaskbar = false)
+    { L = l; T = t; R = r; B = b; CoverTaskbar = coverTaskbar; }
 }
 
 /// <summary>Space reserved at the edges of a display, in physical pixels.</summary>
@@ -248,6 +256,10 @@ public sealed class SplitConfig
             layout.Zones.RemoveAll(z => z.R - z.L <= 0.01 || z.B - z.T <= 0.01);
             ZoneEdges.Canonicalise(layout.Zones);
 
+            // Stored in the same reading order the overlay numbers them in, so "Zone 2" in the
+            // settings window is always the 2 painted on screen.
+            layout.Zones = layout.Zones.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
+
             layout.Margins ??= new Margins();
             layout.Margins.Top = Math.Max(0, layout.Margins.Top);
             layout.Margins.Bottom = Math.Max(0, layout.Margins.Bottom);
@@ -263,7 +275,7 @@ public sealed class SplitConfig
         // move every other one - rather than deleting the user's margins.
         foreach (var entry in Monitors.Values)
             if (entry.Zones.Count == 0 && entry.Margins.Any)
-                entry.Zones = Monitors[Fallback].Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B)).ToList();
+                entry.Zones = Monitors[Fallback].Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B, z.CoverTaskbar)).ToList();
 
         foreach (var key in Monitors.Where(kv => kv.Value.Zones.Count == 0 && kv.Key != Fallback)
                                     .Select(kv => kv.Key).ToList())
@@ -293,7 +305,7 @@ public sealed class SplitConfig
         var inherited = LayoutFor(device);
         var forked = new MonitorLayout
         {
-            Zones = inherited.Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B)).ToList(),
+            Zones = inherited.Zones.Select(z => new FracRect(z.L, z.T, z.R, z.B, z.CoverTaskbar)).ToList(),
             Margins = inherited.Margins.Copy(),
         };
         Monitors[device] = forked;
@@ -328,7 +340,7 @@ public sealed class SplitConfig
     public void SetZones(string device, List<FracRect> zones)
     {
         var layout = OwnLayout(device);
-        layout.Zones = zones;
+        layout.Zones = zones.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
         Save();
     }
 }

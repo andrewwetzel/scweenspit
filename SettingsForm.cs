@@ -234,6 +234,30 @@ public sealed class SettingsForm : Form
             page.Controls.Add(presets);
 
 
+            var frac = config.ZonesFor(geo.Device);
+            for (int i = 0; i < frac.Count; i++)
+            {
+                int index = i;
+                var zoneDevice = geo.Device;
+                var cover = Theme.Toggle($"Zone {i + 1}: fill the whole display height, over the taskbar",
+                                         frac[i].CoverTaskbar);
+                cover.Margin = new Padding(0, 2, 0, 0);
+                cover.CheckedChanged += (_, _) =>
+                {
+                    var edited = ZoneEdges.Clone(config.ZonesFor(zoneDevice));
+                    if (index >= edited.Count) return;
+                    edited[index].CoverTaskbar = cover.Checked;
+                    config.SetZones(zoneDevice, edited);
+                    applyChanges();
+                    overlay.Flash(zones);
+                };
+                page.Controls.Add(cover);
+            }
+            page.Controls.Add(Theme.Caption(
+                "A zone set this way is measured against the whole display rather than the work area, " +
+                "and windows placed in it are kept above the taskbar — so it is genuinely fullscreen " +
+                "over its part of the screen while the taskbar stays visible and usable everywhere else."));
+
             page.Controls.Add(new Label
             {
                 Text = "Reserved space (pixels kept clear at each edge)",

@@ -123,5 +123,5 @@ public static class ZoneEdges
     }
 
     public static List<FracRect> Clone(List<FracRect> zones) =>
-        zones.Select(z => new FracRect(z.L, z.T, z.R, z.B)).ToList();
+        zones.Select(z => new FracRect(z.L, z.T, z.R, z.B, z.CoverTaskbar)).ToList();
 }

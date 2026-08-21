@@ -49,7 +49,7 @@ public sealed class WinEventHookService : IDisposable
     private IntPtr postDragWindow;
     private int anchorZone = -1;
     private string dragDevice = "";
-    private RECT? dragTarget;
+    private Zone? dragTarget;
 
     /// <summary>Overlay used to show where a dragged window would land. Optional.</summary>
     public ZoneOverlay? Overlay { get; set; }
@@ -58,12 +58,15 @@ public sealed class WinEventHookService : IDisposable
     // inside the debounce window, where we are deaf. One bounded re-check settles it.
     private readonly System.Windows.Forms.Timer verify = new();
     private IntPtr verifyTarget;
-    private RECT verifyZone;
+    private Zone verifyZone;
 
     // The delegate must outlive the hook: the GC has no idea user32 holds a pointer to it.
     private WinEventDelegate? callback;
     private GCHandle pin;
     private IntPtr hookLocation, hookMoveEnd, hookShow;
+
+    // Windows we raised above the taskbar for a cover-taskbar zone; restored when they leave one.
+    private readonly ConcurrentDictionary<IntPtr, byte> madeTopmost = new();
 
     // Windows the user personally dragged across a display boundary. Their choice stands.
     private readonly ConcurrentDictionary<IntPtr, byte> allowedToSpan = new();
@@ -129,6 +132,7 @@ public sealed class WinEventHookService : IDisposable
         if (hookShow     != IntPtr.Zero) { UnhookWinEvent(hookShow);     hookShow     = IntPtr.Zero; }
         if (pin.IsAllocated) pin.Free();
         callback = null;
+        RestoreTopmost();
         recent.Clear();
         lastNormal.Clear();
         owners.Clear();
@@ -244,7 +248,7 @@ public sealed class WinEventHookService : IDisposable
 
         var target = ZoneManager.ContainWithin(win, zones.EffectiveWork(geo));
         Log.Write($"spanning: 0x{hWnd:X} {ClassNameOf(hWnd)} {win} -> {target} on {geo.Device}");
-        Apply(hWnd, target);
+        Apply(hWnd, new Zone(target, CoverTaskbar: false));
     }
 
     /// <summary>Lets a window straddle displays for the rest of its life, or takes that back.</summary>
@@ -364,7 +368,7 @@ public sealed class WinEventHookService : IDisposable
         dragTarget = span ? ZoneManager.Union(rects[anchorZone], rects[hit]) : rects[hit];
         if (!span) anchorZone = hit;
 
-        Overlay.Highlight(geo.Device, dragTarget);
+        Overlay.Highlight(geo.Device, dragTarget?.Rect);
     }
 
     private void ClearDragTarget()
@@ -479,16 +483,21 @@ public sealed class WinEventHookService : IDisposable
     }
 
     /// <summary>Stamps the reentrancy guard, then moves the window. The order matters.</summary>
-    public void Apply(IntPtr hWnd, RECT zone)
+    public void Apply(IntPtr hWnd, Zone zone)
     {
         Touch(hWnd);
-        if (!ZoneManager.ClampToZone(hWnd, zone)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
+
+        // Z-order is decided even when the rectangle is already right: a window can be in the
+        // correct place and still be sitting underneath the taskbar.
+        ApplyTopmost(hWnd, zone.CoverTaskbar);
+
+        if (!ZoneManager.ClampToZone(hWnd, zone.Rect)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
         clamps++;
 
         // The window now lives here and is no longer fullscreen, so this IS its last normal
         // position. Without this the next maximize resolves against the pre-move rectangle and
         // flies back to the zone it came from, permanently.
-        lastNormal[hWnd] = zone;
+        lastNormal[hWnd] = zone.Rect;
         Touch(hWnd); // restamp: the move itself is about to echo back as LOCATIONCHANGE
 
         verifyTarget = hWnd;
@@ -514,7 +523,7 @@ public sealed class WinEventHookService : IDisposable
 
         Log.Write($"re-verify {hWnd:X}: still fullscreen, re-clamping");
         Touch(hWnd);
-        if (ZoneManager.ClampToZone(hWnd, verifyZone)) lastNormal[hWnd] = verifyZone;
+        if (ZoneManager.ClampToZone(hWnd, verifyZone.Rect)) lastNormal[hWnd] = verifyZone.Rect;
         Touch(hWnd);
     }
 
@@ -557,6 +566,30 @@ public sealed class WinEventHookService : IDisposable
                   $"hooks={(Healthy ? "up" : Running ? "PARTIAL" : "DOWN")}");
     }
 
+    /// <summary>
+    /// Raises a window over the taskbar, or puts it back. Only ever undone for windows this app
+    /// raised: an app that was already always-on-top for its own reasons keeps that.
+    /// </summary>
+    private void ApplyTopmost(IntPtr hWnd, bool wanted)
+    {
+        bool have = madeTopmost.ContainsKey(hWnd);
+        if (wanted == have) return;
+
+        ZoneManager.SetTopmost(hWnd, wanted);
+        if (wanted) madeTopmost[hWnd] = 0;
+        else madeTopmost.TryRemove(hWnd, out _);
+    }
+
+    /// <summary>Drops every window we raised back to normal z-order.</summary>
+    private void RestoreTopmost()
+    {
+        foreach (var hWnd in madeTopmost.Keys)
+        {
+            if (IsWindow(hWnd)) ZoneManager.SetTopmost(hWnd, false);
+            madeTopmost.TryRemove(hWnd, out _);
+        }
+    }
+
     // ---- reentrancy guard --------------------------------------------------
 
     private void Touch(IntPtr hWnd) => recent[hWnd] = Environment.TickCount64;
@@ -577,6 +610,8 @@ public sealed class WinEventHookService : IDisposable
                 if (!IsWindow(key)) owners.TryRemove(key, out _);
             foreach (var key in allowedToSpan.Keys)
                 if (!IsWindow(key)) allowedToSpan.TryRemove(key, out _);
+            foreach (var key in madeTopmost.Keys)
+                if (!IsWindow(key)) madeTopmost.TryRemove(key, out _);
         }
 
         // WINEVENT_SKIPOWNPROCESS does not help here: we move *other* processes' windows,

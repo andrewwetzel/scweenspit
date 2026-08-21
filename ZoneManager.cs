@@ -4,7 +4,35 @@ namespace ScweenSpit;
 
 public readonly record struct MonitorGeometry(string Device, RECT Work, RECT Bounds);
 
+/// <summary>A materialised zone: where it is, and whether windows in it sit over the taskbar.</summary>
+public readonly record struct Zone(RECT Rect, bool CoverTaskbar)
+{
+    public override string ToString() => CoverTaskbar ? $"{Rect} [over taskbar]" : Rect.ToString();
+}
+
 /// <summary>Screen geometry, split math and the window clamp itself.</summary>
+/// <summary>Geometry helpers that read better as extensions.</summary>
+static class RectExtensions
+{
+    /// <summary>
+    /// Grows a zone out over the taskbar on the sides where it already reaches the edge of the work
+    /// area, leaving internal edges alone. Measuring the whole zone against the monitor instead
+    /// would shift the divider it shares with its neighbours whenever the taskbar is not at the
+    /// bottom — the two zones would no longer meet.
+    /// </summary>
+    public static RECT ExtendedTo(this RECT rect, FracRect f, RECT bounds)
+    {
+        const double edge = 0.001;
+        return new RECT
+        {
+            Left   = f.L <= edge     ? bounds.Left   : rect.Left,
+            Top    = f.T <= edge     ? bounds.Top    : rect.Top,
+            Right  = f.R >= 1 - edge ? bounds.Right  : rect.Right,
+            Bottom = f.B >= 1 - edge ? bounds.Bottom : rect.Bottom,
+        };
+    }
+}
+
 public sealed class ZoneManager(SplitConfig config)
 {
     /// <summary>Slack (px) for "already where we want it" and "covers the whole monitor" tests.</summary>
@@ -64,24 +92,26 @@ public sealed class ZoneManager(SplitConfig config)
     /// so hotkey cycling walks Quadrants as TL, TR, BL, BR rather than down the columns.
     /// Shared fractional edges round to identical pixels, so zones never gap or overlap.
     /// </summary>
-    public List<RECT> ZonesFor(MonitorGeometry geo)
+    public List<Zone> ZonesFor(MonitorGeometry geo)
     {
         var work = EffectiveWork(geo);
-        int w = work.Width, h = work.Height;
 
         return Config.ZonesFor(geo.Device)
-            .Select(f => new RECT
-            {
-                Left   = work.Left + (int)Math.Round(f.L * w),
-                Top    = work.Top  + (int)Math.Round(f.T * h),
-                Right  = work.Left + (int)Math.Round(f.R * w),
-                Bottom = work.Top  + (int)Math.Round(f.B * h),
-            })
-            .Select(Pad)
-            .Where(r => r.Width > 0 && r.Height > 0)
-            .OrderBy(r => r.Top).ThenBy(r => r.Left)
+            .Select(f => new Zone(f.CoverTaskbar ? Materialise(f, work).ExtendedTo(f, geo.Bounds)
+                                                 : Materialise(f, work), f.CoverTaskbar))
+            .Select(z => z with { Rect = Pad(z.Rect) })
+            .Where(z => z.Rect.Width > 0 && z.Rect.Height > 0)
+            .OrderBy(z => z.Rect.Top).ThenBy(z => z.Rect.Left)
             .ToList();
     }
+
+    private static RECT Materialise(FracRect f, RECT area) => new()
+    {
+        Left   = area.Left + (int)Math.Round(f.L * area.Width),
+        Top    = area.Top  + (int)Math.Round(f.T * area.Height),
+        Right  = area.Left + (int)Math.Round(f.R * area.Width),
+        Bottom = area.Top  + (int)Math.Round(f.B * area.Height),
+    };
 
     /// <summary>
     /// The area zones are laid out in: what Windows reports as the work area, less the user's own
@@ -130,11 +160,11 @@ public sealed class ZoneManager(SplitConfig config)
     }
 
     /// <summary>Index of the zone containing a point, or -1.</summary>
-    public static int ZoneIndexAt(List<RECT> zones, POINT p)
+    public static int ZoneIndexAt(List<Zone> zones, POINT p)
     {
         for (int i = 0; i < zones.Count; i++)
         {
-            var z = zones[i];
+            var z = zones[i].Rect;
             if (p.X >= z.Left && p.X < z.Right && p.Y >= z.Top && p.Y < z.Bottom) return i;
         }
         return -1;
@@ -144,32 +174,32 @@ public sealed class ZoneManager(SplitConfig config)
     /// The zone under a point, or the nearest one when the point falls in a gap — the gutter left
     /// by Padding, or a reserved margin band. Dropping in a 16px gutter should still land somewhere.
     /// </summary>
-    public static int ZoneAtOrNearest(List<RECT> zones, POINT p)
+    public static int ZoneAtOrNearest(List<Zone> zones, POINT p)
     {
         int hit = ZoneIndexAt(zones, p);
         return hit >= 0 ? hit : PickZoneIndex(zones, new RECT { Left = p.X, Top = p.Y, Right = p.X, Bottom = p.Y });
     }
 
-    /// <summary>Smallest rectangle covering both zones — how a window spans several at once.</summary>
-    public static RECT Union(RECT a, RECT b) => new()
+    /// <summary>Smallest zone covering both — how a window spans several at once.</summary>
+    public static Zone Union(Zone a, Zone b) => new(new RECT
     {
-        Left = Math.Min(a.Left, b.Left),
-        Top = Math.Min(a.Top, b.Top),
-        Right = Math.Max(a.Right, b.Right),
-        Bottom = Math.Max(a.Bottom, b.Bottom),
-    };
+        Left = Math.Min(a.Rect.Left, b.Rect.Left),
+        Top = Math.Min(a.Rect.Top, b.Rect.Top),
+        Right = Math.Max(a.Rect.Right, b.Rect.Right),
+        Bottom = Math.Max(a.Rect.Bottom, b.Rect.Bottom),
+    }, a.CoverTaskbar || b.CoverTaskbar);
 
     public static bool TryGetMonitorAt(POINT p, out MonitorGeometry geo) =>
         TryGetMonitorInfo(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), out geo);
 
     /// <summary>Index of the zone holding the window's centre point; nearest zone centre otherwise.</summary>
-    public static int PickZoneIndex(List<RECT> zones, RECT win)
+    public static int PickZoneIndex(List<Zone> zones, RECT win)
     {
         int cx = (win.Left + win.Right) / 2, cy = (win.Top + win.Bottom) / 2;
 
         for (int i = 0; i < zones.Count; i++)
         {
-            var z = zones[i];
+            var z = zones[i].Rect;
             if (cx >= z.Left && cx < z.Right && cy >= z.Top && cy < z.Bottom) return i;
         }
 
@@ -177,7 +207,7 @@ public sealed class ZoneManager(SplitConfig config)
         double bestDist = double.MaxValue;
         for (int i = 0; i < zones.Count; i++)
         {
-            var z = zones[i];
+            var z = zones[i].Rect;
             double dx = (z.Left + z.Right) / 2.0 - cx, dy = (z.Top + z.Bottom) / 2.0 - cy;
             double dist = dx * dx + dy * dy;
             if (dist < bestDist) { bestDist = dist; best = i; }
@@ -313,6 +343,17 @@ public sealed class ZoneManager(SplitConfig config)
 
         Log.Write($"clamp {hWnd:X} -> {zone} (maximized={maximized})");
         return true;
+    }
+
+    /// <summary>
+    /// Raises a window above the taskbar, or puts it back among ordinary windows. Required for a
+    /// zone that covers the taskbar: the shell is topmost, so a normal window cannot draw over it.
+    /// </summary>
+    public static void SetTopmost(IntPtr hWnd, bool topmost)
+    {
+        SetWindowPos(hWnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        Log.Write($"  topmost={topmost} for 0x{hWnd:X}");
     }
 
     private static bool Near(RECT a, RECT b) =>

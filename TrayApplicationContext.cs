@@ -225,7 +225,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             total += rects.Count;
             Log.Write($"monitor {geo.Device} bounds={geo.Bounds} work={geo.Work} optedOut={zones.IsOptedOut(geo)}");
             for (int i = 0; i < rects.Count; i++)
-                Log.Write($"    zone {i}: {rects[i]}  ({rects[i].Width}x{rects[i].Height})");
+                Log.Write($"    zone {i}: {rects[i]}  ({rects[i].Rect.Width}x{rects[i].Rect.Height})");
         }
 
         Notify(monitors.Count == 0

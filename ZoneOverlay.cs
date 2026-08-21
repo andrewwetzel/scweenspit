@@ -73,7 +73,7 @@ public sealed class ZoneOverlay : IDisposable
             // Give the window its rectangle BEFORE the handle exists, so it is created on the
             // target monitor. Created at the default position it would be born on the primary
             // display and then cross a DPI boundary, which makes WinForms rescale it behind us.
-            form.Bounds = new Rectangle(geo.Work.Left, geo.Work.Top, geo.Work.Width, geo.Work.Height);
+            form.Bounds = new Rectangle(geo.Bounds.Left, geo.Bounds.Top, geo.Bounds.Width, geo.Bounds.Height);
             form.Show();
         }
 
@@ -114,7 +114,7 @@ public sealed class ZoneOverlay : IDisposable
         private enum Grip { None, Divider, MarginLeft, MarginRight, MarginTop, MarginBottom }
 
         private readonly MonitorGeometry geo;
-        private readonly List<RECT> pixels;
+        private readonly List<Zone> pixels;
         private readonly List<FracRect> fractions;
         private readonly Margins margins;
         private readonly int padding;
@@ -134,7 +134,7 @@ public sealed class ZoneOverlay : IDisposable
         public event Action<string, Margins>? MarginsCommitted;
         public event Action? Dismissed;
 
-        public OverlayForm(MonitorGeometry geo, RECT inner, List<RECT> pixels,
+        public OverlayForm(MonitorGeometry geo, RECT inner, List<Zone> pixels,
                            List<FracRect> fractions, Margins margins, int padding, OverlayMode mode)
         {
             this.geo = geo;
@@ -143,9 +143,9 @@ public sealed class ZoneOverlay : IDisposable
             // Fit once, here, against the same rule ZoneManager uses. Holding raw values would let
             // the editor show and commit margins the zone math then silently trims.
             this.margins = margins.Fitted(geo.Work.Width, geo.Work.Height);
+            _ = inner;
             this.padding = padding;
             this.mode = mode;
-            _ = inner;   // derived live from margins; the parameter documents the caller's intent
 
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -180,7 +180,7 @@ public sealed class ZoneOverlay : IDisposable
 
         /// <summary>WinForms would rescale Bounds by this form's DPI; place it in raw pixels.</summary>
         private void PlaceNatively() =>
-            SetWindowPos(Handle, HWND_TOPMOST, geo.Work.Left, geo.Work.Top, geo.Work.Width, geo.Work.Height,
+            SetWindowPos(Handle, HWND_TOPMOST, geo.Bounds.Left, geo.Bounds.Top, geo.Bounds.Width, geo.Bounds.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
         protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -201,13 +201,19 @@ public sealed class ZoneOverlay : IDisposable
 
         // ---- geometry helpers (fraction <-> local pixel) --------------------
 
+        /// <summary>The work area in form-local coordinates. The form now spans the whole monitor,
+        /// so this is offset by however much the taskbar takes.</summary>
+        private Rectangle WorkLocal => new(
+            geo.Work.Left - geo.Bounds.Left, geo.Work.Top - geo.Bounds.Top, geo.Work.Width, geo.Work.Height);
+
         /// <summary>The laid-out area in form-local coordinates, live as the margins are dragged.</summary>
         private Rectangle Inner()
         {
-            var fit = margins.Fitted(Width, Height);
-            return new Rectangle(fit.Left, fit.Top,
-                                 Math.Max(1, Width - fit.Left - fit.Right),
-                                 Math.Max(1, Height - fit.Top - fit.Bottom));
+            var work = WorkLocal;
+            var fit = margins.Fitted(work.Width, work.Height);
+            return new Rectangle(work.X + fit.Left, work.Y + fit.Top,
+                                 Math.Max(1, work.Width - fit.Left - fit.Right),
+                                 Math.Max(1, work.Height - fit.Top - fit.Bottom));
         }
 
         private int XOf(double frac) { var i = Inner(); return i.X + (int)Math.Round(frac * i.Width); }
@@ -215,8 +221,27 @@ public sealed class ZoneOverlay : IDisposable
         private double FracX(int x) { var i = Inner(); return Math.Clamp((double)(x - i.X) / Math.Max(1, i.Width), 0, 1); }
         private double FracY(int y) { var i = Inner(); return Math.Clamp((double)(y - i.Y) / Math.Max(1, i.Height), 0, 1); }
 
-        private Rectangle LocalRect(FracRect f) => new(
-            XOf(f.L), YOf(f.T), Math.Max(1, XOf(f.R) - XOf(f.L)), Math.Max(1, YOf(f.B) - YOf(f.T)));
+        private Rectangle LocalRect(FracRect f)
+        {
+            var area = Inner();
+            int l = area.X + (int)Math.Round(f.L * area.Width);
+            int t = area.Y + (int)Math.Round(f.T * area.Height);
+            int r = area.X + (int)Math.Round(f.R * area.Width);
+            int b = area.Y + (int)Math.Round(f.B * area.Height);
+
+            // Same rule as ZoneManager: grow over the taskbar only on sides that already reach the
+            // edge, so the preview matches what the window will actually get.
+            if (f.CoverTaskbar)
+            {
+                const double edge = 0.001;
+                if (f.L <= edge) l = 0;
+                if (f.T <= edge) t = 0;
+                if (f.R >= 1 - edge) r = Width;
+                if (f.B >= 1 - edge) b = Height;
+            }
+
+            return new Rectangle(l, t, Math.Max(1, r - l), Math.Max(1, b - t));
+        }
 
         // ---- edit interaction ----------------------------------------------
 
@@ -274,16 +299,17 @@ public sealed class ZoneOverlay : IDisposable
 
         private void DragMargin(Grip grip, int x, int y)
         {
+            var work = WorkLocal;
             switch (grip)
             {
                 case Grip.MarginLeft:
-                    margins.Left = Math.Clamp(x, 0, Math.Max(0, Width - margins.Right - Margins.MinUsable)); break;
+                    margins.Left = Math.Clamp(x - work.Left, 0, Math.Max(0, work.Width - margins.Right - Margins.MinUsable)); break;
                 case Grip.MarginRight:
-                    margins.Right = Math.Clamp(Width - x, 0, Math.Max(0, Width - margins.Left - Margins.MinUsable)); break;
+                    margins.Right = Math.Clamp(work.Right - x, 0, Math.Max(0, work.Width - margins.Left - Margins.MinUsable)); break;
                 case Grip.MarginTop:
-                    margins.Top = Math.Clamp(y, 0, Math.Max(0, Height - margins.Bottom - Margins.MinUsable)); break;
+                    margins.Top = Math.Clamp(y - work.Top, 0, Math.Max(0, work.Height - margins.Bottom - Margins.MinUsable)); break;
                 case Grip.MarginBottom:
-                    margins.Bottom = Math.Clamp(Height - y, 0, Math.Max(0, Height - margins.Top - Margins.MinUsable)); break;
+                    margins.Bottom = Math.Clamp(work.Bottom - y, 0, Math.Max(0, work.Height - margins.Top - Margins.MinUsable)); break;
             }
         }
 
@@ -357,7 +383,8 @@ public sealed class ZoneOverlay : IDisposable
             // In edit mode we draw the live fractions; otherwise the already-computed pixel zones.
             var boxes = mode == OverlayMode.Edit
                 ? fractions.Select(LocalRect).Select(PadPreview).ToList()
-                : pixels.Select(z => new Rectangle(z.Left - geo.Work.Left, z.Top - geo.Work.Top, z.Width, z.Height)).ToList();
+                : pixels.Select(z => new Rectangle(z.Rect.Left - geo.Bounds.Left, z.Rect.Top - geo.Bounds.Top,
+                                                  z.Rect.Width, z.Rect.Height)).ToList();
 
             for (int i = 0; i < boxes.Count; i++)
             {
@@ -368,13 +395,24 @@ public sealed class ZoneOverlay : IDisposable
                 g.DrawRectangle(edge, r);
                 g.DrawString($"{i + 1}", index, Brushes.White, r, centred);
 
+                bool covers = mode == OverlayMode.Edit
+                    ? i < fractions.Count && fractions[i].CoverTaskbar
+                    : i < pixels.Count && pixels[i].CoverTaskbar;
+
                 var sub = new Rectangle(r.X, r.Y + 32, r.Width, r.Height);
-                g.DrawString($"{boxes[i].Width} × {boxes[i].Height}", caption, Brushes.White, sub, centred);
+                g.DrawString($"{boxes[i].Width} × {boxes[i].Height}{(covers ? "   ·  over taskbar" : "")}",
+                             caption, Brushes.White, sub, centred);
+
+                if (covers)
+                {
+                    using var accent = new Pen(Color.FromArgb(255, 190, 110), 3f) { DashStyle = DashStyle.Dash };
+                    g.DrawRectangle(accent, Rectangle.Inflate(r, -3, -3));
+                }
             }
 
             if (highlight is { } h)
             {
-                var r = new Rectangle(h.Left - geo.Work.Left, h.Top - geo.Work.Top, h.Width, h.Height);
+                var r = new Rectangle(h.Left - geo.Bounds.Left, h.Top - geo.Bounds.Top, h.Width, h.Height);
                 g.FillRectangle(hot, Rectangle.Inflate(r, -4, -4));
                 using var thick = new Pen(Color.White, 4f);
                 g.DrawRectangle(thick, Rectangle.Inflate(r, -4, -4));

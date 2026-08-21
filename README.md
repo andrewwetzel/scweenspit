@@ -58,6 +58,27 @@ Three ways, in rough order of how often you'll reach for them:
 | `Win+Alt+Z` | show/hide the zone overlay |
 | `Win+Alt+S` | let the focused window span displays, or stop it |
 
+### A zone that covers the taskbar
+
+Zones normally live inside the work area, so they stop short of the taskbar — and an ordinary window
+cannot draw over it anyway, because the shell is always-on-top.
+
+Tick **Zone N: fill the whole display height, over the taskbar** under Layouts and that zone grows
+out over the taskbar, with windows placed in it kept above it. The taskbar stays visible and usable
+everywhere the zone does not reach.
+
+This is what you want for a remote-desktop or VNC client — a Kasm PWA, say — that should be
+genuinely fullscreen across the left 70% of a display while the taskbar remains available on the
+right 30%. Set a 70/30 split, tick the box on zone 1, then let the app go fullscreen as normal
+(`F11`); it gets clamped into the zone at full display height.
+
+Only the outer edges grow. A zone already touching the left, top and bottom of the work area extends
+to the display on those three sides, while the divider it shares with its neighbour stays exactly
+where it was — so the two zones still meet, even with the taskbar on the left or top.
+
+Windows raised this way are put back to normal z-order when they leave such a zone, and when
+ScweenSpit exits.
+
 ### Keeping windows on one display
 
 Some apps reopen at whatever rectangle they last remembered, which on a multi-monitor desktop often
@@ -149,7 +170,7 @@ window will fight, and the loser retries.
   "Monitors": {
     "*": {
       "Zones": [
-        { "L": 0.0, "T": 0.0, "R": 0.70, "B": 1.0 },
+        { "L": 0.0, "T": 0.0, "R": 0.70, "B": 1.0, "CoverTaskbar": false },
         { "L": 0.70, "T": 0.0, "R": 1.0, "B": 1.0 }
       ],
       "Margins": { "Top": 0, "Bottom": 0, "Left": 0, "Right": 0 }
