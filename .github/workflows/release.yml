@@ -25,9 +25,16 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Publish
+        shell: pwsh
         run: |
-          dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish/x64
-          Copy-Item publish/x64/ScweenSpit.exe ScweenSpit-${env:TAG}-win-x64.exe
+          dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish/app
+
+          New-Item -ItemType Directory -Force launcher/payload | Out-Null
+          Copy-Item publish/app/ScweenSpit.exe launcher/payload/ScweenSpit.exe -Force
+          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 -o publish/setup
+
+          Copy-Item publish/setup/ScweenSpit-Setup.exe "ScweenSpit-Setup-${env:TAG}.exe"
+          Copy-Item publish/app/ScweenSpit.exe        "ScweenSpit-${env:TAG}-win-x64.exe"
 
       - name: Create release
-        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes ScweenSpit-*.exe
+        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes ScweenSpit-Setup-*.exe ScweenSpit-*-win-x64.exe

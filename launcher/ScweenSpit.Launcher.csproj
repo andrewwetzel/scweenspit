@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ScweenSpit.Launcher</RootNamespace>
+    <AssemblyName>ScweenSpit-Setup</AssemblyName>
+    <!-- LibraryImport source generation emits unsafe marshalling code -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Native AOT: this has to start on a machine with no .NET at all, which is the whole point.
+         It also keeps the download small. AOT cannot be cross-compiled, so only CI (windows-latest)
+         can publish it; plain `dotnet build` still typechecks anywhere. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StackTraceSupport>false</StackTraceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The real app, embedded. Absent on a bare checkout; CI publishes it here first. -->
+    <EmbeddedResource Include="payload/ScweenSpit.exe" LogicalName="ScweenSpit.exe"
+                      Condition="Exists('payload/ScweenSpit.exe')" />
+  </ItemGroup>
+
+</Project>

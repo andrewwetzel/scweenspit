@@ -6,20 +6,28 @@ YouTube, VLC), fills only the sub-screen the window is in instead of the whole d
 
 ## Get a binary
 
-Every push to `main` builds on `windows-latest` and attaches `ScweenSpit.exe` to the run as an
-artifact; tagging `v*` publishes it to a GitHub Release. The build is **win-x64, self-contained**
-(~63 MB) — nothing to install, just run it.
+Every push to `main` builds on `windows-latest` and attaches the executables to the run; tagging
+`v*` publishes them to a GitHub Release. Two of them:
 
-That size is almost entirely the bundled .NET runtime: the app's own code is **70 KB**. A
-self-contained WinForms app carries all of `Microsoft.WindowsDesktop.App`, which is one indivisible
-runtime pack containing **both** WinForms and WPF — 37 MB of WPF that this app never touches.
-Single-file compression halves the total; trimming would cut it far further but is refused outright
-(`NETSDK1175`: Windows Forms is not supported with trimming). A framework-dependent build is
-**184 KB** if you would rather install the .NET 8 Desktop Runtime once.
+| Download | Size | Use it when |
+| --- | --- | --- |
+| `ScweenSpit-Setup.exe` | a few MB | you are not sure whether you have .NET — it checks, offers to install the runtime, then runs the app |
+| `ScweenSpit.exe` | ~250 KB | you already have the .NET 8 Desktop Runtime |
 
-```
-gh release download <tag> -p '*win-x64.exe'
-```
+The app itself is a couple of hundred kilobytes. Bundling the runtime with it costs **63 MB**, almost
+none of which is ours: `Microsoft.WindowsDesktop.App` ships WinForms and WPF as one indivisible pack,
+so 37 MB of that is WPF this app never touches. Trimming would cut it right down, but `NETSDK1175`
+forbids trimming for Windows Forms outright.
+
+So the runtime is shared instead. `ScweenSpit-Setup.exe` is compiled ahead of time to native code —
+it has to start on a machine with no .NET at all, which is the one thing the app itself cannot do.
+It looks for `Microsoft.WindowsDesktop.App` 8.x, and if it is missing, asks first, downloads the
+official installer from Microsoft, runs it (UAC will prompt), then unpacks the app to
+`%LOCALAPPDATA%\ScweenSpit\bin` and starts it. On every later launch it finds the runtime, skips
+straight to the end, and costs nothing.
+
+If you would rather have the old no-dependencies build, it is one commented-out line in
+`scripts/publish.sh`.
 
 ## Build
 
@@ -32,6 +40,9 @@ dotnet build -c Release          # typechecks anywhere
 ./scripts/publish.sh             # the Windows binary, from any OS
 dotnet run -c Release            # Windows only
 ```
+
+`ScweenSpit-Setup.exe` is the exception: Native AOT cannot be cross-compiled, so only the Windows
+CI job builds it.
 
 ## Use
 
@@ -218,6 +229,7 @@ fitted independently, so an absurd left margin cannot void a perfectly good top 
 | `Startup.cs` | run-at-login registry entry |
 | `Taskbar.cs` | reading and relocating the Windows taskbar |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
+| `launcher/` | the native self-installing launcher (separate project) |
 
 Three details that this design lives or dies by:
 

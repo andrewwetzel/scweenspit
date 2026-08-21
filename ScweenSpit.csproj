@@ -14,14 +14,21 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- single-file publish: dotnet publish -c Release -r win-x64 -->
+    <!-- Framework-dependent single file: ~190 KB, against the shared .NET Desktop Runtime.
+         Bundling the runtime instead costs 63 MB compressed, almost none of it ours - and 37 MB of
+         that is WPF this app never touches, because Microsoft.WindowsDesktop.App ships WinForms and
+         WPF as one indivisible pack. Trimming would fix that but NETSDK1175 forbids it outright for
+         Windows Forms. ScweenSpit-Setup.exe installs the runtime for anyone who lacks it. -->
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <!-- 145 MB -> 63 MB. Costs a few hundred ms of decompression at launch, which is nothing for
-         something started once at login. Trimming would help far more but NETSDK1175 blocks it:
-         Windows Forms is not supported with trimming. -->
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The launcher is a separate, natively-compiled project. Without this the root project's
+         **/*.cs glob would pull its sources - and its obj/ - straight into the app. -->
+    <Compile Remove="launcher/**" />
+    <None Remove="launcher/**" />
+    <EmbeddedResource Remove="launcher/**" />
+  </ItemGroup>
 
 </Project>

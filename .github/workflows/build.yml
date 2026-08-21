@@ -31,12 +31,25 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Publish
-        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish/win-x64
+      - name: Publish app
+        run: dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish/app
+
+      - name: Publish self-installing launcher
+        shell: pwsh
+        run: |
+          # The launcher embeds the app, so the app has to exist first. Native AOT cannot be
+          # cross-compiled, which is why this step only ever runs here.
+          New-Item -ItemType Directory -Force launcher/payload | Out-Null
+          Copy-Item publish/app/ScweenSpit.exe launcher/payload/ScweenSpit.exe -Force
+          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 -o publish/setup
+          Get-ChildItem publish/app/ScweenSpit.exe, publish/setup/ScweenSpit-Setup.exe |
+            ForEach-Object { "{0,-24} {1,8:N0} KB" -f $_.Name, ($_.Length / 1KB) }
 
       - uses: actions/upload-artifact@v7
         with:
           name: ScweenSpit-${{ github.sha }}
-          path: publish/win-x64/ScweenSpit.exe
+          path: |
+            publish/app/ScweenSpit.exe
+            publish/setup/ScweenSpit-Setup.exe
           if-no-files-found: error
           retention-days: 30

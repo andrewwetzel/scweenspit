@@ -5,7 +5,16 @@ set -euo pipefail
 out="${1:-./publish}"
 cd "$(dirname "$0")/.."
 
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$out/win-x64"
+# Framework-dependent: ~250 KB against the shared .NET Desktop Runtime.
+dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained false \
+    -p:PublishSingleFile=true -o "$out/win-x64"
+
+# ScweenSpit-Setup.exe is Native AOT and cannot be cross-compiled; CI (windows-latest) builds it.
+echo "note: the self-installing launcher is built on Windows only - see .github/workflows/build.yml"
+
+# Want the old no-dependencies build instead? It is 63 MB, almost all of it runtime:
+#   dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained true \
+#       -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o "$out/self-contained"
 
 echo
 echo "built:"
