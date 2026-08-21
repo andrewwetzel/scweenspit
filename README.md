@@ -11,7 +11,7 @@ Every push to `main` builds on `windows-latest` and attaches the executables to 
 
 | Download | Size | Use it when |
 | --- | --- | --- |
-| `ScweenSpit-Setup.exe` | a few MB | you are not sure whether you have .NET — it checks, offers to install the runtime, then runs the app |
+| `ScweenSpit-Setup.exe` | ~1.9 MB | you are not sure whether you have .NET — it checks, offers to install the runtime, then runs the app |
 | `ScweenSpit.exe` | ~250 KB | you already have the .NET 8 Desktop Runtime |
 
 The app itself is a couple of hundred kilobytes. Bundling the runtime with it costs **63 MB**, almost
@@ -21,10 +21,15 @@ forbids trimming for Windows Forms outright.
 
 So the runtime is shared instead. `ScweenSpit-Setup.exe` is compiled ahead of time to native code —
 it has to start on a machine with no .NET at all, which is the one thing the app itself cannot do.
-It looks for `Microsoft.WindowsDesktop.App` 8.x, and if it is missing, asks first, downloads the
-official installer from Microsoft, runs it (UAC will prompt), then unpacks the app to
+It looks for `Microsoft.WindowsDesktop.App` 8.x in the shared-framework folder — rather than shelling
+out to `dotnet`, which is exactly what may be missing — and if it is absent, asks first, downloads
+the official installer from Microsoft, runs it (UAC will prompt), then unpacks the app to
 `%LOCALAPPDATA%\ScweenSpit\bin` and starts it. On every later launch it finds the runtime, skips
 straight to the end, and costs nothing.
+
+It downloads through `curl.exe` (in System32 since Windows 10 1803), falling back to urlmon. Using
+`HttpClient` would have linked the managed socket and TLS stack into the binary statically — 5.1 MB
+instead of 1.9 MB, for one download that happens at most once per machine.
 
 If you would rather have the old no-dependencies build, it is one commented-out line in
 `scripts/publish.sh`.
