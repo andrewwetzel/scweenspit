@@ -89,7 +89,9 @@ internal static partial class Program
     private static bool InstallRuntime()
     {
         if (Ask($"ScweenSpit needs the .NET {RequiredMajor} Desktop Runtime, which is not installed.\n\n"
-              + "Download it from Microsoft and install it now? (about 58 MB)") != IdYes)
+              + "Download it from Microsoft and install it now?\n\n"
+              + "It is about 58 MB, so this may take a few minutes with no visible progress. "
+              + "Windows will ask for permission before installing.") != IdYes)
             return false;
 
         var installer = Path.Combine(Path.GetTempPath(), $"windowsdesktop-runtime-{RequiredMajor}-win-x64.exe");
@@ -127,19 +129,51 @@ internal static partial class Program
         return false;
     }
 
+    /// <summary>
+    /// Fetches the installer without linking a managed HTTP stack. HttpClient would drag the whole
+    /// managed socket and TLS implementation into the binary — several megabytes, statically, for
+    /// one download that happens at most once per machine. Windows already ships two downloaders.
+    /// </summary>
     private static void Download(string url, string destination)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-        using var response = http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-        response.EnsureSuccessStatusCode();
-
         var partial = destination + ".part";
-        using (var body = response.Content.ReadAsStream())
-        using (var file = File.Create(partial))
-            body.CopyTo(file);
+        try { File.Delete(partial); } catch { }
+
+        if (!TryCurl(url, partial) && !TryUrlMon(url, partial))
+            throw new IOException("Neither curl nor urlmon could fetch the installer.");
+
+        // A truncated or error-page download would otherwise be handed to the shell as an installer.
+        var length = new FileInfo(partial).Length;
+        if (length < 10 * 1024 * 1024)
+            throw new IOException($"The download stopped early ({length / 1024} KB).");
 
         File.Move(partial, destination, overwrite: true);
     }
+
+    /// <summary>curl.exe has shipped in System32 since Windows 10 1803, and follows redirects.</summary>
+    private static bool TryCurl(string url, string destination)
+    {
+        var curl = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "curl.exe");
+        if (!File.Exists(curl)) return false;
+
+        var run = Process.Start(new ProcessStartInfo(curl)
+        {
+            Arguments = $"-L --fail --silent --show-error --output \"{destination}\" \"{url}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        });
+        if (run is null) return false;
+
+        run.WaitForExit();
+        return run.ExitCode == 0 && File.Exists(destination);
+    }
+
+    /// <summary>Fallback for Windows builds older than curl: one call, no managed networking.</summary>
+    private static bool TryUrlMon(string url, string destination) =>
+        URLDownloadToFile(IntPtr.Zero, url, destination, 0, IntPtr.Zero) == 0 && File.Exists(destination);
+
+    [LibraryImport("urlmon.dll", EntryPoint = "URLDownloadToFileW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int URLDownloadToFile(IntPtr caller, string url, string file, uint reserved, IntPtr callback);
 
     // ---- unpacking ---------------------------------------------------------
 
