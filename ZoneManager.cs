@@ -185,6 +185,55 @@ public sealed class ZoneManager(SplitConfig config)
         return best;
     }
 
+    // ---- staying on one display --------------------------------------------
+
+    /// <summary>Overlap between two rectangles, in pixels. Zero when they do not touch.</summary>
+    public static long OverlapArea(RECT a, RECT b)
+    {
+        long w = Math.Min(a.Right, b.Right) - Math.Max(a.Left, b.Left);
+        long h = Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Top, b.Top);
+        return w > 0 && h > 0 ? w * h : 0;
+    }
+
+    /// <summary>
+    /// True when the window has a real presence on a display other than <paramref name="home"/> —
+    /// which is what "it opened across all my screens" actually means. A window merely hanging a
+    /// few pixels off an edge, or pushed off-screen entirely, is not spanning and is left alone.
+    /// </summary>
+    public static bool SpansDisplays(RECT win, MonitorGeometry home)
+    {
+        long area = (long)win.Width * win.Height;
+        if (area <= 0) return false;
+
+        // Cheap exit for the overwhelmingly common case: it all fits on its own monitor.
+        if (OverlapArea(win, home.Bounds) >= area * 98 / 100) return false;
+
+        long threshold = Math.Max(MinSpanPixels, area * MinSpanPercent / 100);
+        foreach (var other in AllMonitors())
+        {
+            if (other.Device == home.Device) continue;
+            if (OverlapArea(win, other.Bounds) >= threshold) return true;
+        }
+        return false;
+    }
+
+    private const long MinSpanPixels = 20_000;   // ~140x140: smaller than this is a stray edge
+    private const long MinSpanPercent = 3;
+
+    /// <summary>
+    /// Slides the window back inside <paramref name="area"/>, keeping its size where it fits and
+    /// shrinking only when it genuinely cannot. Moving beats resizing: an app that reopens across
+    /// two screens usually wants its remembered size, just not its remembered position.
+    /// </summary>
+    public static RECT ContainWithin(RECT win, RECT area)
+    {
+        int w = Math.Min(win.Width, area.Width);
+        int h = Math.Min(win.Height, area.Height);
+        int x = Math.Clamp(win.Left, area.Left, area.Right - w);
+        int y = Math.Clamp(win.Top, area.Top, area.Bottom - h);
+        return new RECT { Left = x, Top = y, Right = x + w, Bottom = y + h };
+    }
+
     // ---- detection ---------------------------------------------------------
 
     public static bool IsMaximized(IntPtr hWnd)

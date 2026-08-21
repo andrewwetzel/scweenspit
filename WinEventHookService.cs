@@ -63,7 +63,16 @@ public sealed class WinEventHookService : IDisposable
     // The delegate must outlive the hook: the GC has no idea user32 holds a pointer to it.
     private WinEventDelegate? callback;
     private GCHandle pin;
-    private IntPtr hookLocation, hookMoveEnd;
+    private IntPtr hookLocation, hookMoveEnd, hookShow;
+
+    // Windows the user personally dragged across a display boundary. Their choice stands.
+    private readonly ConcurrentDictionary<IntPtr, byte> allowedToSpan = new();
+
+    // Newly shown windows, checked after a short settle: an app that is still laying itself out
+    // must not be fought over its own opening position.
+    private readonly ConcurrentDictionary<IntPtr, long> pendingShow = new();
+    private readonly System.Windows.Forms.Timer settle = new() { Interval = 100 };
+    private const long SettleMs = 350;
     private long lastPrune;
 
     // Counters, reported on a heartbeat. They are what tells the three failure modes apart:
@@ -77,12 +86,13 @@ public sealed class WinEventHookService : IDisposable
         verify.Tick += (_, _) => { verify.Stop(); ReVerify(); };
         dragTick.Tick += (_, _) => DragUpdate();
         postDrag.Tick += (_, _) => { postDrag.Stop(); ReconcileAfterDrag(); };
+        settle.Tick += (_, _) => DrainPendingShow();
     }
 
-    public bool Running => hookLocation != IntPtr.Zero || hookMoveEnd != IntPtr.Zero;
+    public bool Running => hookLocation != IntPtr.Zero || hookMoveEnd != IntPtr.Zero || hookShow != IntPtr.Zero;
 
-    /// <summary>Both hooks installed. A half-installed pair still reports Running, but is not well.</summary>
-    public bool Healthy => hookLocation != IntPtr.Zero && hookMoveEnd != IntPtr.Zero;
+    /// <summary>All hooks installed. A partial set still reports Running, but is not well.</summary>
+    public bool Healthy => hookLocation != IntPtr.Zero && hookMoveEnd != IntPtr.Zero && hookShow != IntPtr.Zero;
 
     public void Start()
     {
@@ -97,9 +107,13 @@ public sealed class WinEventHookService : IDisposable
                                         IntPtr.Zero, callback, 0, 0, flags);
         hookLocation  = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
                                         IntPtr.Zero, callback, 0, 0, flags);
+        // A window that opens straddling two displays may never move again, so LOCATIONCHANGE alone
+        // would never see it.
+        hookShow      = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+                                        IntPtr.Zero, callback, 0, 0, flags);
 
         int err = Marshal.GetLastWin32Error();
-        Log.Write($"hooks installed: moveend=0x{hookMoveEnd:X} location=0x{hookLocation:X}" +
+        Log.Write($"hooks installed: moveend=0x{hookMoveEnd:X} location=0x{hookLocation:X} show=0x{hookShow:X}" +
                   (Running ? "" : $"  *** BOTH FAILED, err={err} ***"));
     }
 
@@ -112,11 +126,15 @@ public sealed class WinEventHookService : IDisposable
         CancelDrag();
         if (hookLocation != IntPtr.Zero) { UnhookWinEvent(hookLocation); hookLocation = IntPtr.Zero; }
         if (hookMoveEnd  != IntPtr.Zero) { UnhookWinEvent(hookMoveEnd);  hookMoveEnd  = IntPtr.Zero; }
+        if (hookShow     != IntPtr.Zero) { UnhookWinEvent(hookShow);     hookShow     = IntPtr.Zero; }
         if (pin.IsAllocated) pin.Free();
         callback = null;
         recent.Clear();
         lastNormal.Clear();
         owners.Clear();
+        allowedToSpan.Clear();
+        pendingShow.Clear();
+        settle.Stop();
         Log.Write("hooks removed");
     }
 
@@ -126,6 +144,7 @@ public sealed class WinEventHookService : IDisposable
         verify.Dispose();
         dragTick.Dispose();
         postDrag.Dispose();
+        settle.Dispose();
     }
 
     // ---- the callback ------------------------------------------------------
@@ -143,6 +162,7 @@ public sealed class WinEventHookService : IDisposable
         {
             if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
             if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
+            if (eventType == EVENT_OBJECT_SHOW)          { QueueShow(hWnd); return; }
 
             if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
             targetsSeen++;
@@ -161,18 +181,22 @@ public sealed class WinEventHookService : IDisposable
         if (!GetWindowRect(hWnd, out var win)) return;
         if (!ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
 
+        bool dragging = hWnd == dragWindow;
+
         if (!ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
         {
             // Recorded even mid-drag and even with clamping off: this is the rectangle that decides
             // which zone a later maximize lands in, and letting it go stale sends the window back
             // to whichever zone owns the middle of the screen.
             lastNormal[hWnd] = win;
+
+            if (!dragging) KeepOnOneDisplay(hWnd, win, geo);
             return;
         }
 
         // The user is hand-placing it; do not fight them for it. Remember that we looked away, so
         // the end of the drag can take a second look.
-        if (hWnd == dragWindow) { dragSawFullscreen = true; return; }
+        if (dragging) { dragSawFullscreen = true; return; }
 
         // Hooks may be up purely to serve drag-to-zone.
         if (!zones.Config.AutoClamp) return;
@@ -203,6 +227,63 @@ public sealed class WinEventHookService : IDisposable
         int index = ZoneManager.PickZoneIndex(zoneRects, ReferenceRect(hWnd, win));
         Log.Write($"  -> zone {index} of {zoneRects.Count}: {zoneRects[index]}");
         Apply(hWnd, zoneRects[index]);
+    }
+
+    // ---- keeping windows on one display ------------------------------------
+
+    /// <summary>
+    /// Pulls a window that appeared straddling several displays back onto the one it mostly
+    /// occupies. Windows the user dragged across a boundary themselves are exempt.
+    /// </summary>
+    private void KeepOnOneDisplay(IntPtr hWnd, RECT win, MonitorGeometry geo)
+    {
+        if (!zones.Config.KeepOnOneDisplay) return;
+        if (allowedToSpan.ContainsKey(hWnd)) return;
+        if (!ZoneManager.SpansDisplays(win, geo)) return;
+        if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) return;
+
+        var target = ZoneManager.ContainWithin(win, zones.EffectiveWork(geo));
+        Log.Write($"spanning: 0x{hWnd:X} {ClassNameOf(hWnd)} {win} -> {target} on {geo.Device}");
+        Apply(hWnd, target);
+    }
+
+    /// <summary>Lets a window straddle displays for the rest of its life, or takes that back.</summary>
+    public bool ToggleSpanAllowed(IntPtr hWnd)
+    {
+        if (allowedToSpan.TryRemove(hWnd, out _)) return false;
+        allowedToSpan[hWnd] = 0;
+        return true;
+    }
+
+    private void QueueShow(IntPtr hWnd)
+    {
+        if (!zones.Config.KeepOnOneDisplay) return;
+
+        pendingShow[hWnd] = Environment.TickCount64 + SettleMs;
+        settle.Start();
+    }
+
+    /// <summary>
+    /// Re-examines recently shown windows once they have settled. Checking on the SHOW event itself
+    /// catches apps mid-layout and starts a tug of war over their own opening position.
+    /// </summary>
+    private void DrainPendingShow()
+    {
+        long now = Environment.TickCount64;
+
+        foreach (var entry in pendingShow)
+        {
+            if (now < entry.Value) continue;
+            if (!pendingShow.TryRemove(entry.Key, out _)) continue;
+
+            var hWnd = entry.Key;
+            if (!IsClampTarget(hWnd)) continue;
+
+            try { Reconcile(hWnd); }
+            catch (Exception ex) { Log.Write($"settle reconcile failed: {ex}"); }
+        }
+
+        if (pendingShow.IsEmpty) settle.Stop();
     }
 
     /// <summary>Second look at a window whose fullscreen transition happened during its own drag.</summary>
@@ -334,6 +415,15 @@ public sealed class WinEventHookService : IDisposable
         HideDragOverlay();
         pinnedOverlay = false;
 
+        // Whatever else happens, a boundary crossed by hand is a decision, not an accident.
+        if (dragged != IntPtr.Zero && dragged == hWnd
+            && GetWindowRect(hWnd, out var dropped) && ZoneManager.TryGetMonitor(hWnd, out var onto)
+            && ZoneManager.SpansDisplays(dropped, onto))
+        {
+            allowedToSpan[hWnd] = 0;
+            Log.Write($"0x{hWnd:X} dragged across displays; allowed to span");
+        }
+
         if (dragged == IntPtr.Zero || dragged != hWnd || target is null)
         {
             ArmPostDrag(dragged, sawFullscreen);
@@ -453,6 +543,8 @@ public sealed class WinEventHookService : IDisposable
         verifyTarget = IntPtr.Zero;
         postDrag.Stop();
         postDragWindow = IntPtr.Zero;
+        pendingShow.Clear();
+        settle.Stop();
     }
 
     /// <summary>Periodic one-liner: the fastest way to see which stage is starving.</summary>
@@ -483,6 +575,8 @@ public sealed class WinEventHookService : IDisposable
                 if (!IsWindow(key)) lastNormal.TryRemove(key, out _);
             foreach (var key in owners.Keys)
                 if (!IsWindow(key)) owners.TryRemove(key, out _);
+            foreach (var key in allowedToSpan.Keys)
+                if (!IsWindow(key)) allowedToSpan.TryRemove(key, out _);
         }
 
         // WINEVENT_SKIPOWNPROCESS does not help here: we move *other* processes' windows,

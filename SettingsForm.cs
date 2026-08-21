@@ -168,6 +168,15 @@ public sealed class SettingsForm : Form
         spanMod.SelectedIndexChanged += (_, _) => { config.SpanModifier = (string)spanMod.SelectedItem!; Save(); };
         Row(page, "Hold to span several zones", spanMod);
 
+        var oneDisplay = Theme.Toggle("Keep windows on one display", config.KeepOnOneDisplay);
+        oneDisplay.CheckedChanged += (_, _) => { config.KeepOnOneDisplay = oneDisplay.Checked; Save(); };
+        page.Controls.Add(oneDisplay);
+        page.Controls.Add(Theme.Caption(
+            "Apps that reopen straddling several screens get pulled back onto the one they mostly " +
+            "occupy, keeping their size. Drag a window across a boundary yourself and it stays put — " +
+            "that is a decision, not an accident. Win+Alt+S toggles the exemption for the window in " +
+            "front, and anything on the Exclusions page is left alone entirely."));
+
         var snap = Theme.Toggle("Suppress Windows' own snapping while running", config.SuppressWindowsSnap);
         snap.CheckedChanged += (_, _) => { config.SuppressWindowsSnap = snap.Checked; Save(); };
         page.Controls.Add(snap);

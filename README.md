@@ -56,6 +56,20 @@ Three ways, in rough order of how often you'll reach for them:
 | --- | --- |
 | `Win+Alt+Left` / `Win+Alt+Right` | cycle the focused window through its monitor's zones |
 | `Win+Alt+Z` | show/hide the zone overlay |
+| `Win+Alt+S` | let the focused window span displays, or stop it |
+
+### Keeping windows on one display
+
+Some apps reopen at whatever rectangle they last remembered, which on a multi-monitor desktop often
+means straddling two screens. **Keep windows on one display** (General, on by default) pulls those
+back onto the display they mostly occupy, keeping their size and only moving them.
+
+It distinguishes accidents from intent: a window you **drag** across a boundary yourself is exempted
+for as long as it lives. `Win+Alt+S` toggles that exemption for the window in front, and anything on
+the Exclusions page is never touched.
+
+Newly opened windows are checked a third of a second after they appear rather than immediately —
+an app still laying itself out should not be fought over its own opening position.
 
 ### Adjusting the zones
 
@@ -127,6 +141,7 @@ window will fight, and the loser retries.
   "DebounceMs": 400,
   "Padding": 0,
   "SuppressWindowsSnap": false,
+  "KeepOnOneDisplay": true,
   "DragToZone": true,
   "DragModifier": "Shift",
   "SpanModifier": "Control",

@@ -9,6 +9,7 @@ public static class Native
     // ---- events / hooks ----------------------------------------------------
     public const uint EVENT_SYSTEM_MOVESIZESTART    = 0x000A;
     public const uint EVENT_SYSTEM_MOVESIZEEND      = 0x000B;
+    public const uint EVENT_OBJECT_SHOW             = 0x8002;
     public const uint EVENT_OBJECT_LOCATIONCHANGE   = 0x800B;
     public const uint WINEVENT_OUTOFCONTEXT         = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS       = 0x0002;
@@ -73,6 +74,7 @@ public static class Native
     public const uint VK_LEFT  = 0x25;
     public const uint VK_RIGHT = 0x27;
     public const uint VK_Z     = 0x5A;
+    public const uint VK_S     = 0x53;
     public const int  VK_SHIFT   = 0x10;
     public const int  VK_CONTROL = 0x11;
     public const int  VK_MENU    = 0x12;   // Alt

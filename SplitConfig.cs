@@ -91,6 +91,12 @@ public sealed class SplitConfig
     /// it lets the next launch put them back even if this one is killed rather than closed.</summary>
     public int[]? SnapRestore { get; set; }
 
+    /// <summary>
+    /// Pull a window back onto a single display when it appears straddling several. Windows you
+    /// drag across a boundary yourself are exempted for as long as they live.
+    /// </summary>
+    public bool KeepOnOneDisplay { get; set; } = true;
+
     /// <summary>Snap a window into a zone when you drop it there while dragging.</summary>
     public bool DragToZone { get; set; } = true;
 

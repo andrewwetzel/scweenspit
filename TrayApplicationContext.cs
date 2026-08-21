@@ -7,7 +7,7 @@ namespace ScweenSpit;
 /// <summary>Tray presence, global hotkeys, and the lifetime of everything else.</summary>
 public sealed class TrayApplicationContext : ApplicationContext
 {
-    private const int HotkeyPrev = 1, HotkeyNext = 2, HotkeyZones = 3;
+    private const int HotkeyPrev = 1, HotkeyNext = 2, HotkeyZones = 3, HotkeySpan = 4;
 
     private readonly NotifyIcon tray;
     private readonly HotkeyWindow hotkeys;
@@ -243,7 +243,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         const uint mods = MOD_WIN | MOD_ALT | MOD_NOREPEAT;
         bool ok = RegisterHotKey(hotkeys.Handle, HotkeyPrev,  mods, VK_LEFT)
                 & RegisterHotKey(hotkeys.Handle, HotkeyNext,  mods, VK_RIGHT)
-                & RegisterHotKey(hotkeys.Handle, HotkeyZones, mods, VK_Z);
+                & RegisterHotKey(hotkeys.Handle, HotkeyZones, mods, VK_Z)
+                & RegisterHotKey(hotkeys.Handle, HotkeySpan,  mods, VK_S);
 
         if (!ok) Notify("Some Win+Alt hotkeys could not be registered (already in use).");
     }
@@ -251,6 +252,18 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void OnHotkey(int id)
     {
         if (id == HotkeyZones) { overlay.Toggle(zones); return; }
+
+        if (id == HotkeySpan)
+        {
+            var target = GetForegroundWindow();
+            if (target == IntPtr.Zero || !WinEventHookService.IsClampTarget(target)) return;
+
+            bool allowed = hook.ToggleSpanAllowed(target);
+            Notify(allowed
+                ? "This window may span displays."
+                : "This window will be kept on one display.");
+            return;
+        }
 
         var hWnd = GetForegroundWindow();
         if (hWnd == IntPtr.Zero || !WinEventHookService.IsClampTarget(hWnd)) return;
@@ -291,6 +304,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeyPrev);
             UnregisterHotKey(hotkeys.Handle, HotkeyNext);
             UnregisterHotKey(hotkeys.Handle, HotkeyZones);
+            UnregisterHotKey(hotkeys.Handle, HotkeySpan);
 
             foregroundWatch.Dispose();
             hook.Dispose();
