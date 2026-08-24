@@ -26,7 +26,6 @@ public sealed class TaskbarWindow : Form
     private List<TaskWindow> windows = [];
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
     private int hovered = -1, hoveredStatus = -1;
-    private bool hoveredHome;
     private long lastStatusPoll;
 
     private (int Percent, bool Charging)? battery;
@@ -125,47 +124,56 @@ public sealed class TaskbarWindow : Form
         Invalidate();
     }
 
-    /// <summary>Room the status area needs at the far end of the bar.</summary>
-    private int StatusExtent
+    /// <summary>
+    /// The cluster at the far end, in reading order. ScweenSpit sits with the other status icons
+    /// rather than in the corner: it is a background app, and that is where background apps live.
+    /// </summary>
+    private enum Tray { Home, Volume, Network, Battery }
+
+    private List<Tray> TrayItems()
     {
-        get
-        {
-            if (!settings.ShowStatus) return 0;
-            int indicators = (battery is null ? 2 : 3) * StatusIcon;
-            return indicators + (Vertical ? 34 : 62);   // plus the clock
-        }
+        var items = new List<Tray> { Tray.Home };
+        if (!settings.ShowStatus) return items;
+
+        items.Add(Tray.Volume);
+        items.Add(Tray.Network);
+        if (battery is not null) items.Add(Tray.Battery);
+        return items;
     }
+
+    private int ClockExtent => settings.ShowStatus ? (Vertical ? 48 : 88) : 0;
+
+    /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
+    private int StatusExtent => TrayItems().Count * StatusIcon + ClockExtent;
+
+    private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
+
+    private Rectangle TrayAt(int index) => Vertical
+        ? new Rectangle(0, StatusStart + index * StatusIcon, Width, StatusIcon)
+        : new Rectangle(StatusStart + index * StatusIcon, 0, StatusIcon, Height);
+
+    private Rectangle ClockArea => Vertical
+        ? new Rectangle(0, Height - ClockExtent, Width, ClockExtent)
+        : new Rectangle(Width - ClockExtent, 0, ClockExtent, Height);
 
     private Rectangle SlotAt(int index) => Vertical
         ? new Rectangle(0, index * Slot, Width, Slot)
         : new Rectangle(index * Slot, 0, Slot, Height);
 
-    /// <summary>Slot zero is ours, the way the Start button owns the corner of the real taskbar.</summary>
-    private Rectangle HomeSlot => SlotAt(0);
-
-    private int Capacity => Math.Max(0, ((Vertical ? Height : Width) - StatusExtent) / Math.Max(1, Slot) - 1);
+    private int Capacity => Math.Max(0, StatusStart / Math.Max(1, Slot));
 
     private int SlotUnder(Point p)
     {
         for (int i = 0; i < Math.Min(windows.Count, Capacity); i++)
-            if (SlotAt(i + 1).Contains(p)) return i;
+            if (SlotAt(i).Contains(p)) return i;
         return -1;
     }
 
-    /// <summary>Status icons are laid out from the far end inwards: clock last, then the indicators.</summary>
-    private Rectangle StatusAt(int index)
+    private int TrayUnder(Point p)
     {
-        int offset = (Vertical ? 34 : 62) + index * StatusIcon;
-        return Vertical
-            ? new Rectangle(0, Height - offset - StatusIcon, Width, StatusIcon)
-            : new Rectangle(Width - offset - StatusIcon, 0, StatusIcon, Height);
-    }
-
-    private int StatusUnder(Point p)
-    {
-        if (!settings.ShowStatus) return -1;
-        for (int i = 0; i < 3; i++)
-            if (StatusAt(i).Contains(p)) return i;
+        var items = TrayItems();
+        for (int i = 0; i < items.Count; i++)
+            if (TrayAt(i).Contains(p)) return i;
         return -1;
     }
 
@@ -175,27 +183,25 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseMove(e);
 
-        int under = SlotUnder(e.Location), status = StatusUnder(e.Location);
-        bool home = HomeSlot.Contains(e.Location);
-        if (under == hovered && status == hoveredStatus && home == hoveredHome) return;
+        int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
+        if (under == hovered && tray == hoveredStatus) return;
 
         hovered = under;
-        hoveredStatus = status;
-        hoveredHome = home;
-        Cursor = under >= 0 || status >= 0 || home ? Cursors.Hand : Cursors.Default;
+        hoveredStatus = tray;
+        Cursor = under >= 0 || tray >= 0 ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these.
-        tips.SetToolTip(this, home ? "ScweenSpit — settings"
+        tips.SetToolTip(this, tray >= 0 ? TrayTip(TrayItems()[tray])
                             : under >= 0 && under < windows.Count ? windows[under].Title
-                            : status >= 0 ? StatusTip(status)
                             : string.Empty);
         Invalidate();
     }
 
-    private string StatusTip(int index) => index switch
+    private string TrayTip(Tray item) => item switch
     {
-        0 => volume is { } v ? (v.Muted ? "Muted" : $"Volume {v.Percent}%") : "Volume",
-        1 => link switch
+        Tray.Home => "ScweenSpit — settings",
+        Tray.Volume => volume is { } v ? (v.Muted ? "Muted" : $"Volume {v.Percent}%") : "Volume",
+        Tray.Network => link switch
         {
             LinkKind.Wired => "Wired network",
             LinkKind.Wireless => "Wi-Fi",
@@ -208,7 +214,6 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseLeave(e);
         hovered = hoveredStatus = -1;
-        hoveredHome = false;
         Invalidate();
     }
 
@@ -216,18 +221,20 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseDown(e);
 
-        if (HomeSlot.Contains(e.Location))
+        int tray = TrayUnder(e.Location);
+        if (tray >= 0)
         {
-            MenuRequested?.Invoke(Cursor.Position);
+            switch (TrayItems()[tray])
+            {
+                case Tray.Home: MenuRequested?.Invoke(Cursor.Position); break;
+                case Tray.Volume: SystemStatus.Open("ms-settings:sound"); break;
+                case Tray.Network: SystemStatus.Open("ms-settings:network"); break;
+                case Tray.Battery: SystemStatus.Open("ms-settings:batterysaver"); break;
+            }
             return;
         }
 
-        int status = StatusUnder(e.Location);
-        if (status >= 0)
-        {
-            SystemStatus.Open(status switch { 0 => "ms-settings:sound", 1 => "ms-settings:network", _ => "ms-settings:batterysaver" });
-            return;
-        }
+        if (ClockArea.Contains(e.Location)) { SystemStatus.Open("ms-settings:dateandtime"); return; }
 
         int under = SlotUnder(e.Location);
         if (under < 0 || under >= windows.Count) return;
@@ -254,12 +261,10 @@ public sealed class TaskbarWindow : Form
         using var text = new SolidBrush(Theme.Text);
         using var dim = new SolidBrush(Theme.Muted);
 
-        PaintHome(g, hot);
-
         int shown = Math.Min(windows.Count, Capacity);
         for (int i = 0; i < shown; i++)
         {
-            var slot = SlotAt(i + 1);
+            var slot = SlotAt(i);
             var w = windows[i];
 
             if (w.Handle == foreground) g.FillRectangle(active, slot);
@@ -298,17 +303,36 @@ public sealed class TaskbarWindow : Form
             g.DrawString(w.Title, label, w.Minimised ? dim : text, caption, format);
         }
 
-        if (settings.ShowStatus) PaintStatus(g);
+        PaintTray(g);
     }
 
-    /// <summary>The ScweenSpit button: our own zone glyph, in the corner slot.</summary>
-    private void PaintHome(Graphics g, Brush hot)
+    private void PaintTray(Graphics g)
     {
-        var slot = HomeSlot;
-        if (hoveredHome) g.FillRectangle(hot, slot);
+        using var hot = new SolidBrush(Theme.Raised);
+        var items = TrayItems();
 
-        int size = Math.Clamp(Math.Min(slot.Width, slot.Height) / 2, 14, 28);
-        var box = new Rectangle(slot.X + (slot.Width - size) / 2, slot.Y + (slot.Height - size) / 2, size, size);
+        for (int i = 0; i < items.Count; i++)
+        {
+            var area = TrayAt(i);
+            if (i == hoveredStatus) g.FillRectangle(hot, area);
+
+            switch (items[i])
+            {
+                case Tray.Home: PaintHome(g, area); break;
+                case Tray.Volume when volume is { } v: StatusGlyphs.Volume(g, area, v.Percent, v.Muted, Theme.Text); break;
+                case Tray.Network: StatusGlyphs.Network(g, area, link, Theme.Text); break;
+                case Tray.Battery when battery is { } b: StatusGlyphs.Battery(g, area, b.Percent, b.Charging, Theme.Text); break;
+            }
+        }
+
+        if (settings.ShowStatus) PaintClock(g);
+    }
+
+    /// <summary>Our own split-screen glyph, the same one the tray icon uses.</summary>
+    private void PaintHome(Graphics g, Rectangle area)
+    {
+        int size = Math.Clamp(Math.Min(area.Width, area.Height) / 2, 12, 22);
+        var box = new Rectangle(area.X + (area.Width - size) / 2, area.Y + (area.Height - size) / 2, size, size);
 
         int split = (int)Math.Round(box.Width * 0.68);
         using var major = new SolidBrush(Theme.Accent);
@@ -318,45 +342,23 @@ public sealed class TaskbarWindow : Form
         g.FillRectangle(minor, box.X + split + 1, box.Y, box.Width - split - 1, box.Height);
     }
 
-    private void PaintStatus(Graphics g)
-    {
-        using var hot = new SolidBrush(Theme.Raised);
-
-        for (int i = 0; i < 3; i++)
-        {
-            if (i == 2 && battery is null) continue;
-
-            var area = StatusAt(i);
-            if (i == hoveredStatus) g.FillRectangle(hot, area);
-
-            switch (i)
-            {
-                case 0 when volume is { } v: StatusGlyphs.Volume(g, area, v.Percent, v.Muted, Theme.Text); break;
-                case 1: StatusGlyphs.Network(g, area, link, Theme.Text); break;
-                case 2 when battery is { } b: StatusGlyphs.Battery(g, area, b.Percent, b.Charging, Theme.Text); break;
-            }
-        }
-
-        PaintClock(g);
-    }
-
     private void PaintClock(Graphics g)
     {
-        using var time = Theme.Face(Vertical ? 9.5f : 10f, FontStyle.Bold);
-        using var date = Theme.Face(7.5f);
+        using var time = Theme.Face(Vertical ? 12f : 13f, FontStyle.Bold);
+        using var date = Theme.Face(Vertical ? 8f : 9f);
         using var brush = new SolidBrush(Theme.Text);
         using var faint = new SolidBrush(Theme.Muted);
         using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
+        var area = ClockArea;
         var now = DateTime.Now;
-        var area = Vertical
-            ? new Rectangle(0, Height - 34, Width, 34)
-            : new Rectangle(Width - 62, 0, 60, Height);
 
+        // Two thirds to the time, one to the date: the time is what anyone is actually reading.
+        int split = (int)(area.Height * 0.58);
         g.DrawString(now.ToString("HH:mm"), time, brush,
-                     new Rectangle(area.X, area.Y + 3, area.Width, area.Height / 2), centred);
+                     new Rectangle(area.X, area.Y + 2, area.Width, split), centred);
         g.DrawString(now.ToString(Vertical ? "d MMM" : "ddd d MMM"), date, faint,
-                     new Rectangle(area.X, area.Y + area.Height / 2, area.Width, area.Height / 2 - 3), centred);
+                     new Rectangle(area.X, area.Y + split, area.Width, area.Height - split - 2), centred);
     }
 
     protected override void Dispose(bool disposing)

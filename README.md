@@ -163,16 +163,14 @@ It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar u
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
-The first slot is the **ScweenSpit button** — it opens the same menu as the tray icon. That matters
-once the Windows taskbar is hidden, because our tray icon goes with it, and without this the app
-would have no way back to Settings or Exit.
-
 It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
 
-The status area carries **volume, network, battery and a clock**, each opening the matching Windows
-settings page when clicked. They are drawn as vector shapes rather than glyph-font characters,
+The status cluster at the far end carries the **ScweenSpit button**, then **volume, network, battery
+and a clock**. Each opens the matching Windows settings page; ScweenSpit opens its own menu, which
+matters once the Windows taskbar is hidden — our tray icon goes with it, and without this there
+would be no way back to Settings or Exit. They are drawn as vector shapes rather than glyph-font characters,
 because which icon font exists and which code point means what varies by Windows version, and a
 missing glyph renders as a hollow box with no warning.
 
