@@ -224,6 +224,35 @@ Growing a bar takes room from its zone, and windows already sitting there do not
 so ScweenSpit re-places the ones the bar would cover. It waits until you stop adjusting first — a
 thickness spinner fires on every step, and re-placing everything on each one is unpleasant to watch.
 
+### Claude usage in the bar
+
+The status cluster can carry your **claude.ai usage limits**: the session (5-hour) limit, the weekly
+one, and the weekly per-model limit, drawn as three thin bars with the session percentage above them.
+Each bar is coloured by its own consumption — blue, amber past half, red past 85% — so three of them
+read at a glance without a legend. Hovering gives the figures and when each one resets; clicking
+opens the usage page on claude.ai.
+
+Set the account up under **Claude usage**, then switch the bars on per display under **Taskbar** —
+on a multi-monitor desk the same strip repeated on every bar is noise rather than information.
+
+It needs your claude.ai **session cookie**, which you copy out of the browser: sign in to claude.ai,
+press F12, and take the value of the `sessionKey` row under Application ▸ Cookies. It expires every
+few weeks, so this needs redoing occasionally — the strip says `key` when it does.
+
+That cookie is your whole claude.ai account, not just its usage figures, so it is treated as a
+credential rather than as a setting: **DPAPI-encrypted to your Windows account before it reaches
+`config.json`**, never written to the log, and passed to the curl fallback on stdin rather than in a
+command line other processes can read. Copying `config.json` to another machine leaves the key
+behind, unreadable.
+
+Nothing is requested while the feature is off. With it on, ScweenSpit polls claude.ai every three
+minutes by default — the figures move slowly and it is somebody else's server. claude.ai rotates the
+session cookie from time to time and the replacement is stored automatically; without that, a key
+that was working quietly stops.
+
+This is adapted from [claude-usage-widget](https://github.com/niccolo-sabato/claude-usage-widget) by
+Niccolò Sabato, under the MIT licence — see [Third-party code](#third-party-code).
+
 ### Why "fill over the taskbar" sometimes does nothing
 
 That setting grows a zone into the space the taskbar reserves. If nothing is reserving space — the
@@ -295,6 +324,14 @@ window will fight, and the loser retries.
   "DragModifier": "Shift",
   "SpanModifier": "Control",
   "Exclude": ["vlc", "mpv.exe", "UnityWndClass"],
+  "Claude": {
+    "Enabled": false,
+    "SessionKey": null,
+    "OrgId": null,
+    "RefreshSeconds": 180,
+    "ShowWeekly": true,
+    "ShowModel": true
+  },
   "Monitors": {
     "*": {
       "Zones": [
@@ -322,6 +359,9 @@ Zones are numbered in reading order: top-to-bottom, then left-to-right.
 - `Padding` insets every zone by that many pixels, so tiled windows don't touch.
 - `Exclude` lists processes (with or without `.exe`) or window classes to leave alone — games and
   video players are the usual candidates, since forcing them out of fullscreen is rarely wanted.
+- `Claude` configures the usage strip. `SessionKey` holds DPAPI ciphertext, not the key — paste the
+  key in Settings rather than here, since only ScweenSpit can encrypt one that this machine will
+  read back. `OrgId` is worked out from the key on first poll and cached; clear it to re-resolve.
 
 An unreadable config is copied to `config.json.bad` and **left in place** — the running settings
 keep working and Reload tells you what happened, rather than one typo silently replacing every
@@ -348,6 +388,8 @@ fitted independently, so an absurd left margin cannot void a perfectly good top 
 | `AppBar.cs` | Win32 appbar registration — reserving screen space system-wide |
 | `TaskbarWindow.cs` / `BarManager.cs` | our own dockable taskbar |
 | `WindowList.cs` | deciding which windows belong on a taskbar |
+| `ClaudeUsage.cs` / `UsageStrip.cs` | claude.ai usage: polling, and the bars it draws |
+| `Secret.cs` | DPAPI, so a credential never sits in the config in plain text |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
 | `launcher/` | the native self-installing launcher (separate project) |
 
@@ -388,6 +430,26 @@ A `[beat]` line every five seconds carries the counters that localise a fault:
 filtered out. `fullscreen=0` means nothing was recognised as maximized or borderless. `clamps=0`
 with `fullscreen>0` means the move itself was refused.
 
+## Docking and undocking
+
+**Settings → Displays.** Set things up the way you want them for the arrangement you are in, then
+**Remember this arrangement**. Do the same undocked, and each one comes back with its hardware — the
+Windows taskbar restored on the laptop panel, hidden again at the desk.
+
+A profile carries the settings that tend to differ between docked and undocked: clamping,
+drag-to-zone, keeping windows on one display, hiding the Windows taskbar, snap suppression and the
+minimise animation. Anything it does not name is left alone.
+
+Zone layouts and bars need no profile — they are already stored per display, so they follow on their
+own. A bar configured for a monitor simply is not there when that monitor is not.
+
+An arrangement is recognised by how many displays are attached and at what sizes, not by their device
+names: Windows reassigns `\\.\DISPLAY`*n* between docks, so a name-based key would fail at exactly
+the moment it mattered. The cost is that two different displays of the same size look alike.
+
+The display change is also what prompts a general tidy-up — a bar reserving space on a monitor that
+has just been unplugged goes with it. Nothing else in the app watches for that.
+
 ## Updating
 
 **Settings → Updates → Check for updates.** If there is a newer release it shows the notes and an
@@ -422,6 +484,22 @@ text in `config.json` — the page says so.
 
 Running the unpacked copy in `%LOCALAPPDATA%\ScweenSpit\bin` directly rather than the file you
 downloaded means there is nothing to replace, and the page says that too.
+
+## Third-party code
+
+The claude.ai usage strip is derived from
+[claude-usage-widget](https://github.com/niccolo-sabato/claude-usage-widget) by Niccolò Sabato, used
+under the MIT licence. What is taken from it is the protocol knowledge — which endpoints carry the
+figures, the headers they expect, how an organisation is chosen, the shape of the reply, and the
+session-cookie rotation that has to be written back — plus the colour scale the bars are drawn on.
+The code itself is ours; the original is Python/tkinter and draws its own window.
+
+The full licence text, and a point-by-point account of what was derived, is in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If the usage strip is useful to you, the upstream
+project is worth a star — and it does a good deal more than this strip does, including notifications,
+multiple accounts and a browser extension that fetches the key for you.
+
+ScweenSpit is not affiliated with, endorsed by, or sponsored by Anthropic.
 
 ## If nothing seems to happen
 

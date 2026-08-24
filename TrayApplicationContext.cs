@@ -1,5 +1,6 @@
 using System.Windows.Forms;
 using System.Drawing;
+using Microsoft.Win32;
 using static ScweenSpit.Native;
 
 namespace ScweenSpit;
@@ -29,6 +30,11 @@ public sealed class TrayApplicationContext : ApplicationContext
     // Debounced: a thickness spinner fires on every step, and re-placing every window under the bar
     // on each one would be both slow and unpleasant to watch.
     private readonly System.Windows.Forms.Timer reflow = new() { Interval = 600 };
+
+    // Docking raises several display events in a row, so react once things have settled.
+    private readonly System.Windows.Forms.Timer displaySettle = new() { Interval = 1500 };
+    private readonly Control marshaller = new();
+    private string topology = "";
     private readonly SplitConfig config;
     private SettingsForm? settings;
     private UpdateInfo? pendingUpdate;
@@ -92,6 +98,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplySnapSuppression();
         ApplyTaskbarVisibility();
         ApplyAnimationPreference();
+        ApplyUsageTracking();
         bars.Apply(config, zones);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
@@ -146,6 +153,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         // Order matters: free the shell taskbar's reserved strip first, then let our bars claim it.
         ApplyTaskbarVisibility();
         ApplyAnimationPreference();
+        ApplyUsageTracking();
         bars.Apply(config, zones);
         bars.Reposition();
 
@@ -201,6 +209,20 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// Reconciles Windows' snap settings with the preference. Restoring from a persisted backup
     /// covers a previous run that was killed rather than closed.
     /// </summary>
+    /// <summary>
+    /// Points the usage poller at the current configuration. The save callback runs on the poll
+    /// thread — claude.ai rotates the session key mid-session and it has to be written back — so it
+    /// is marshalled onto this one, where every other write to the config file happens.
+    /// </summary>
+    private void ApplyUsageTracking() =>
+        ClaudeUsage.Configure(config.Claude, () =>
+        {
+            if (tray.ContextMenuStrip is { IsHandleCreated: true } menu && menu.InvokeRequired)
+                menu.BeginInvoke(config.Save);
+            else
+                config.Save();
+        });
+
     private void ApplySnapSuppression()
     {
         if (config.SuppressWindowsSnap)
@@ -258,6 +280,40 @@ public sealed class TrayApplicationContext : ApplicationContext
             config.TaskbarRestore = null;
             config.Save();
         }
+    }
+
+    /// <summary>
+    /// Raised on a system thread, and several times over while a dock settles. Marshalled onto the
+    /// UI thread and debounced, because everything it leads to touches windows.
+    /// </summary>
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        try
+        {
+            marshaller.BeginInvoke(() => { displaySettle.Stop(); displaySettle.Start(); });
+        }
+        catch (Exception ex) { Log.Write($"display change could not be marshalled: {ex.Message}"); }
+    }
+
+    private void DisplaysChanged()
+    {
+        var now = DisplayTopology.Signature();
+        bool different = now != topology;
+        topology = now;
+
+        Log.Write($"displays now {now} — {DisplayTopology.Describe()}");
+
+        if (different && config.FollowDisplayChanges && config.Profiles.TryGetValue(now, out var profile))
+        {
+            profile.ApplyTo(config);
+            config.Save();
+            Notify($"Switched to {profile.Name ?? now}.");
+            Log.Write($"applied profile for {now}");
+        }
+
+        // Whether or not a profile matched: a display may have gone, and a bar reserving space on it
+        // has to go with it. Nothing else in the app watches for that.
+        ApplyChanges();
     }
 
     /// <summary>Moves windows out from under any bar that has taken space they were occupying.</summary>
@@ -438,11 +494,15 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeySpan);
 
             foregroundWatch.Dispose();
+            ClaudeUsage.Stop();      // stops the poll loop before the process winds down
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();
             overlay.Dispose();
             settings?.Dispose();
 
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            displaySettle.Dispose();
+            marshaller.Dispose();
             taskbarWatch.Dispose();
             reflow.Dispose();
 

@@ -38,6 +38,7 @@ public sealed class TaskbarWindow : Form
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
     private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
     private int hovered = -1, hoveredStatus = -1;
+    private bool hoveredUsage;
     private long lastStatusPoll;
 
     private (int Percent, bool Charging)? battery;
@@ -223,14 +224,27 @@ public sealed class TaskbarWindow : Form
 
     private int ClockExtent => settings.ShowStatus ? (Vertical ? 48 : 88) : 0;
 
+    /// <summary>
+    /// Whether the claude.ai strip is drawn here: this bar has to want it, and the account has to be
+    /// configured. An enabled-but-keyless strip would be a permanent placeholder taking up room.
+    /// </summary>
+    private bool UsageVisible => settings.ShowUsage && ClaudeUsage.Enabled;
+
+    private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
+
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent => UsageExtent + TrayItems().Count * StatusIcon + ClockExtent;
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
+    /// <summary>The strip leads the cluster, so the icons and clock keep the positions they had.</summary>
+    private Rectangle UsageArea => Vertical
+        ? new Rectangle(0, StatusStart, Width, UsageExtent)
+        : new Rectangle(StatusStart, 0, UsageExtent, Height);
+
     private Rectangle TrayAt(int index) => Vertical
-        ? new Rectangle(0, StatusStart + index * StatusIcon, Width, StatusIcon)
-        : new Rectangle(StatusStart + index * StatusIcon, 0, StatusIcon, Height);
+        ? new Rectangle(0, StatusStart + UsageExtent + index * StatusIcon, Width, StatusIcon)
+        : new Rectangle(StatusStart + UsageExtent + index * StatusIcon, 0, StatusIcon, Height);
 
     private Rectangle ClockArea => Vertical
         ? new Rectangle(0, Height - ClockExtent, Width, ClockExtent)
@@ -297,14 +311,18 @@ public sealed class TaskbarWindow : Form
         base.OnMouseMove(e);
 
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
-        if (under == hovered && tray == hoveredStatus) return;
+        bool usage = UsageVisible && UsageArea.Contains(e.Location);
+        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage) return;
 
         hovered = under;
         hoveredStatus = tray;
-        Cursor = under >= 0 || tray >= 0 ? Cursors.Hand : Cursors.Default;
+        hoveredUsage = usage;
+        Cursor = under >= 0 || tray >= 0 || usage ? Cursors.Hand : Cursors.Default;
 
-        // An icons-only bar is unreadable without these.
-        tips.SetToolTip(this, tray >= 0 ? TrayTip(TrayItems()[tray])
+        // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
+        // like: five pixels of colour cannot say which limit it is, or when it resets.
+        tips.SetToolTip(this, usage ? UsageStrip.Tip(ClaudeUsage.Current)
+                            : tray >= 0 ? TrayTip(TrayItems()[tray])
                             : under >= 0 && under < buttons.Count ? Describe(buttons[under])
                             : string.Empty);
         Invalidate();
@@ -331,12 +349,19 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseLeave(e);
         hovered = hoveredStatus = -1;
+        hoveredUsage = false;
         Invalidate();
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+
+        if (UsageVisible && UsageArea.Contains(e.Location))
+        {
+            SystemStatus.Open(ClaudeUsage.UsagePage);
+            return;
+        }
 
         int tray = TrayUnder(e.Location);
         if (tray >= 0)
@@ -492,6 +517,14 @@ public sealed class TaskbarWindow : Form
     private void PaintTray(Graphics g)
     {
         using var hot = new SolidBrush(Theme.Raised);
+
+        if (UsageVisible)
+        {
+            var strip = UsageArea;
+            if (hoveredUsage) g.FillRectangle(hot, strip);
+            UsageStrip.Paint(g, strip, ClaudeUsage.Current);
+        }
+
         var items = TrayItems();
 
         for (int i = 0; i < items.Count; i++)

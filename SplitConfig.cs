@@ -99,6 +99,13 @@ public sealed class BarSettings
     /// <summary>Show battery, network, volume and the clock.</summary>
     public bool ShowStatus { get; set; } = true;
 
+    /// <summary>
+    /// Show the claude.ai usage bars in the status cluster. Per-bar rather than global: on a
+    /// multi-display setup the same strip repeated on every bar is noise, not information.
+    /// Has no effect until a session key is configured — see <see cref="ClaudeSettings"/>.
+    /// </summary>
+    public bool ShowUsage { get; set; }
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
@@ -111,6 +118,41 @@ public sealed class BarSettings
     /// keeps windows ScweenSpit places clear of it.
     /// </summary>
     public int? Zone { get; set; }
+}
+
+/// <summary>
+/// Everything the claude.ai usage strip needs. The account this points at is read-only to us: we
+/// ask for usage figures and nothing else.
+/// </summary>
+public sealed class ClaudeSettings
+{
+    /// <summary>Master switch. Off means the poller never starts and no request is ever made.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The claude.ai session cookie, encrypted to this Windows account by DPAPI — never the raw
+    /// key. It is a whole-account credential and this file is hand-edited and pasted into bug
+    /// reports, so it must not be legible here. See <see cref="Secret"/>.
+    /// </summary>
+    public string? SessionKey { get; set; }
+
+    /// <summary>
+    /// Which organisation's usage to read. Resolved from the key on first poll and cached, because
+    /// working it out costs two extra requests; cleared whenever the key changes.
+    /// </summary>
+    public string? OrgId { get; set; }
+
+    /// <summary>
+    /// Seconds between polls. Three minutes matches upstream: the figures move slowly and this is
+    /// somebody else's server.
+    /// </summary>
+    public int RefreshSeconds { get; set; } = 180;
+
+    /// <summary>Show the seven-day limit under the session one.</summary>
+    public bool ShowWeekly { get; set; } = true;
+
+    /// <summary>Show the weekly per-model limit, when the account has one.</summary>
+    public bool ShowModel { get; set; } = true;
 }
 
 public sealed class MonitorLayout
@@ -167,6 +209,15 @@ public sealed class SplitConfig
     /// </summary>
     public bool KeepOnOneDisplay { get; set; } = true;
 
+    /// <summary>
+    /// Settings remembered per display arrangement, keyed by <see cref="DisplayTopology.Signature"/>.
+    /// Applied when the arrangement changes — docking, undocking, unplugging a monitor.
+    /// </summary>
+    public Dictionary<string, DisplayProfile> Profiles { get; set; } = new();
+
+    /// <summary>Apply the saved profile when the displays change.</summary>
+    public bool FollowDisplayChanges { get; set; } = true;
+
     /// <summary>Look for a newer release on startup, at most once a day.</summary>
     public bool CheckForUpdates { get; set; } = true;
 
@@ -201,6 +252,12 @@ public sealed class SplitConfig
     /// asked about would be a surprise, and it reserves screen space.
     /// </summary>
     public Dictionary<string, BarSettings> Bars { get; set; } = new();
+
+    /// <summary>
+    /// The claude.ai usage strip. One account for the machine; which bars draw it is per-bar.
+    /// Named "Claude" rather than "ClaudeUsage" so it does not shadow the class of that name.
+    /// </summary>
+    public ClaudeSettings Claude { get; set; } = new();
 
     public const string Fallback = "*";
 
@@ -313,7 +370,9 @@ public sealed class SplitConfig
 
             // Write then swap. Saving is now triggered by things like a spinner's auto-repeat, and
             // a half-written config is worse than a stale one.
-            var staging = Path + ".tmp";
+            // Unique per write: usage polling can rotate the session key and save from its own
+            // thread, so two saves may now be in flight at once.
+            var staging = $"{Path}.{Environment.CurrentManagedThreadId}.tmp";
             File.WriteAllText(staging, JsonSerializer.Serialize(this, JsonOpts));
             File.Move(staging, Path, overwrite: true);
         }
@@ -343,6 +402,9 @@ public sealed class SplitConfig
             bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, Math.Max(0, bar.Thickness / 2 - 8));
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
+
+        // Below half a minute this stops being a status readout and starts being a scraper.
+        Claude.RefreshSeconds = Math.Clamp(Claude.RefreshSeconds, 30, 3600);
 
         foreach (var layout in Monitors.Values)
         {
@@ -435,6 +497,8 @@ public sealed class SplitConfig
         DragToZone = o.DragToZone;
         DragModifier = o.DragModifier;
         SpanModifier = o.SpanModifier;
+        Profiles = o.Profiles;
+        FollowDisplayChanges = o.FollowDisplayChanges;
         CheckForUpdates = o.CheckForUpdates;
         UpdateRepository = o.UpdateRepository;
         UpdateToken = o.UpdateToken;
@@ -442,6 +506,7 @@ public sealed class SplitConfig
         Exclude = o.Exclude;
         Monitors = o.Monitors;
         Bars = o.Bars;
+        Claude = o.Claude;
     }
 
     public void SetZones(string device, List<FracRect> zones)

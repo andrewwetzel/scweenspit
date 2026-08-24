@@ -55,7 +55,9 @@ public sealed class SettingsForm : Form
         AddNav("General", ShowGeneral);
         AddNav("Layouts", ShowLayouts);
         AddNav("Taskbar", ShowTaskbar);
+        AddNav("Claude usage", ShowClaude);
         AddNav("Exclusions", ShowExclusions);
+        AddNav("Displays", ShowDisplays);
         AddNav("Updates", ShowUpdates);
         AddNav("Diagnostics", ShowDiagnostics);
 
@@ -523,7 +525,135 @@ public sealed class SettingsForm : Form
             var status = Theme.Toggle("Show volume, network, battery and the clock", settings.ShowStatus);
             status.CheckedChanged += (_, _) => { settings.ShowStatus = status.Checked; Save(); };
             page.Controls.Add(status);
+
+            var usage = Theme.Toggle("Show Claude usage bars", settings.ShowUsage);
+            usage.CheckedChanged += (_, _) => { settings.ShowUsage = usage.Checked; Save(); };
+            page.Controls.Add(usage);
+
+            if (!config.Claude.Enabled || string.IsNullOrWhiteSpace(config.Claude.SessionKey))
+                page.Controls.Add(Theme.Caption(
+                    "Nothing is drawn until an account is set up under Claude usage."));
         }
+    }
+
+    // ---- claude usage ------------------------------------------------------
+
+    private void ShowClaude()
+    {
+        var claude = config.Claude;
+        var page = Page("Claude usage",
+            "Session and weekly limits from claude.ai, drawn into the status cluster of any bar " +
+            "that asks for them.");
+
+        page.Controls.Add(Theme.Caption(
+            "Adapted from claude-usage-widget by Niccolò Sabato (MIT). ScweenSpit is not affiliated " +
+            "with Anthropic; the figures are the ones claude.ai reports for your own account."));
+
+        var on = Theme.Toggle("Track claude.ai usage", claude.Enabled);
+        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); ShowClaude(); };
+        page.Controls.Add(on);
+
+        if (!claude.Enabled)
+        {
+            page.Controls.Add(Theme.Caption(
+                "While this is off, no session key is read and no request is ever made to claude.ai."));
+            return;
+        }
+
+        // ---- the key
+        bool haveKey = !string.IsNullOrWhiteSpace(claude.SessionKey);
+        page.Controls.Add(Theme.Caption(
+            "Sign in to claude.ai in your browser, then press F12 and open Application ▸ Cookies ▸ " +
+            "https://claude.ai. Copy the value of the sessionKey row and paste it below. It starts " +
+            "with sk-ant- and it expires every few weeks, so this needs redoing occasionally."));
+
+        page.Controls.Add(Theme.Caption(
+            "That cookie is your whole claude.ai account, not just its usage figures. ScweenSpit " +
+            "encrypts it to this Windows account before it touches the config file, sends it only " +
+            "to claude.ai, and never writes it to the log."));
+
+        var key = new TextBox
+        {
+            Width = 430, UseSystemPasswordChar = true, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = Theme.Face(), BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 2, 0, 6),
+            PlaceholderText = haveKey ? "A key is stored — paste a new one to replace it" : "sk-ant-…",
+        };
+        Row(page, haveKey ? "Session key (stored)" : "Session key", key);
+
+        var keyButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 0, 0, 4) };
+
+        var save = Theme.Action("Save key", primary: true);
+        save.Click += (_, _) =>
+        {
+            if (ClaudeUsage.SetKey(key.Text))
+            {
+                key.Clear();
+                ShowClaude();
+            }
+            else
+            {
+                MessageBox.Show(
+                    "That does not look like a session key. It starts with sk-ant- and is a long " +
+                    "string — copy the whole value of the sessionKey cookie.",
+                    "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        keyButtons.Controls.Add(save);
+
+        if (haveKey)
+        {
+            var forget = Theme.Action("Forget key");
+            forget.Click += (_, _) =>
+            {
+                ClaudeUsage.SetKey(null);
+                ShowClaude();
+            };
+            keyButtons.Controls.Add(forget);
+        }
+
+        var check = Theme.Action("Check now");
+        check.Click += (_, _) => ClaudeUsage.Refresh();
+        keyButtons.Controls.Add(check);
+
+        page.Controls.Add(keyButtons);
+
+        // ---- what to show
+        var weekly = Theme.Toggle("Show the seven-day limit", claude.ShowWeekly);
+        weekly.CheckedChanged += (_, _) => { claude.ShowWeekly = weekly.Checked; Save(); ClaudeUsage.Refresh(); };
+        page.Controls.Add(weekly);
+
+        var model = Theme.Toggle("Show the weekly per-model limit", claude.ShowModel);
+        model.CheckedChanged += (_, _) => { claude.ShowModel = model.Checked; Save(); ClaudeUsage.Refresh(); };
+        page.Controls.Add(model);
+
+        var interval = Theme.Number(claude.RefreshSeconds, 30, 3600, 30);
+        interval.ValueChanged += (_, _) => { claude.RefreshSeconds = (int)interval.Value; Save(); };
+        Row(page, "Seconds between checks", interval);
+
+        // ---- what it is currently reading
+        var state = new Label
+        {
+            AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+            MaximumSize = new Size(430, 0), Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(state);
+
+        void Report() => state.Text = UsageStrip.Tip(ClaudeUsage.Current);
+        Report();
+
+        // The poll runs on its own thread, so the page watches rather than being told.
+        var watch = new System.Windows.Forms.Timer { Interval = 1500 };
+        watch.Tick += (_, _) => Report();
+        watch.Start();
+        page.Disposed += (_, _) => { watch.Stop(); watch.Dispose(); };
+
+        var open = Theme.Action("Open usage on claude.ai");
+        open.Width = 220;
+        open.Click += (_, _) => SystemStatus.Open(ClaudeUsage.UsagePage);
+        page.Controls.Add(open);
+
+        page.Controls.Add(Theme.Caption(
+            "Turn the bars on per display under Taskbar. Clicking the strip opens the same page."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)
@@ -671,6 +801,84 @@ public sealed class SettingsForm : Form
         reload.Margin = new Padding(0, 16, 0, 0);
         reload.Click += (_, _) => { reloadFromDisk(); ShowDiagnostics(); };
         page.Controls.Add(reload);
+    }
+
+    private void ShowDisplays()
+    {
+        var page = Page("Displays",
+            "Settings can follow your hardware. Dock and undock, and the arrangement you are in " +
+            "brings its own back with it.");
+
+        var signature = DisplayTopology.Signature();
+        page.Controls.Add(new Label
+        {
+            Text = DisplayTopology.Describe(),
+            AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(12f, FontStyle.Bold),
+            Margin = new Padding(0, 4, 0, 2),
+        });
+        page.Controls.Add(Theme.Caption($"Recognised as: {signature}"));
+
+        var follow = Theme.Toggle("Apply the saved settings when the displays change", config.FollowDisplayChanges);
+        follow.CheckedChanged += (_, _) => { config.FollowDisplayChanges = follow.Checked; Save(); };
+        page.Controls.Add(follow);
+
+        bool saved = config.Profiles.ContainsKey(signature);
+
+        var name = new TextBox
+        {
+            Text = saved ? config.Profiles[signature].Name ?? "" : "",
+            PlaceholderText = "A name for this arrangement, e.g. \"At the desk\"",
+            Width = 340, BackColor = Theme.Raised, ForeColor = Theme.Text, Font = Theme.Face(),
+            BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(name);
+
+        var save = Theme.Action(saved ? "Update this arrangement" : "Remember this arrangement", primary: true);
+        save.AutoSize = true;
+        save.Click += (_, _) =>
+        {
+            var profile = config.Profiles.TryGetValue(signature, out var existing) ? existing : new DisplayProfile();
+            profile.CaptureFrom(config);
+            profile.Name = string.IsNullOrWhiteSpace(name.Text) ? null : name.Text.Trim();
+            config.Profiles[signature] = profile;
+            Save();
+            ShowDisplays();
+        };
+        page.Controls.Add(save);
+        page.Controls.Add(Theme.Caption(
+            "Captures clamping, drag-to-zone, keeping windows on one display, hiding the Windows " +
+            "taskbar, snap suppression and the minimise animation — the settings that tend to differ " +
+            "between docked and undocked.\n\n" +
+            "Zone layouts and bars are already remembered per display, so they follow on their own: " +
+            "a bar configured for a monitor simply is not there when that monitor is not."));
+
+        if (config.Profiles.Count == 0) return;
+
+        page.Controls.Add(new Label
+        {
+            Text = "Saved arrangements", AutoSize = true, ForeColor = Theme.Text,
+            Font = Theme.Face(13f, FontStyle.Bold), Margin = new Padding(0, 22, 0, 6),
+        });
+
+        foreach (var (key, profile) in config.Profiles.OrderBy(p => p.Key, StringComparer.Ordinal).ToList())
+        {
+            var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
+            row.Controls.Add(new Label
+            {
+                Text = (profile.Name is { Length: > 0 } n ? $"{n}   ·   " : "") + key +
+                       (key == signature ? "   ·   in use now" : ""),
+                AutoSize = true, ForeColor = key == signature ? Theme.Accent : Theme.Muted,
+                Font = Theme.Face(9.5f), Margin = new Padding(0, 8, 12, 0),
+            });
+
+            var forget = Theme.Action("Forget");
+            forget.AutoSize = true;
+            var doomed = key;
+            forget.Click += (_, _) => { config.Profiles.Remove(doomed); Save(); ShowDisplays(); };
+            row.Controls.Add(forget);
+
+            page.Controls.Add(row);
+        }
     }
 
     private void ShowUpdates()
