@@ -550,7 +550,9 @@ public sealed class SettingsForm : Form
             "with Anthropic; the figures are the ones claude.ai reports for your own account."));
 
         var on = Theme.Toggle("Track claude.ai usage", claude.Enabled);
-        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); ShowClaude(); };
+        // Rebuilt after the event unwinds: Page() disposes this checkbox, and doing that
+        // inside its own handler leaves WinForms raising events on a dead control.
+        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); BeginInvoke(ShowClaude); };
         page.Controls.Add(on);
 
         if (!claude.Enabled)
@@ -588,7 +590,7 @@ public sealed class SettingsForm : Form
             if (ClaudeUsage.SetKey(key.Text))
             {
                 key.Clear();
-                ShowClaude();
+                BeginInvoke(ShowClaude);
             }
             else
             {
@@ -606,7 +608,7 @@ public sealed class SettingsForm : Form
             forget.Click += (_, _) =>
             {
                 ClaudeUsage.SetKey(null);
-                ShowClaude();
+                BeginInvoke(ShowClaude);
             };
             keyButtons.Controls.Add(forget);
         }

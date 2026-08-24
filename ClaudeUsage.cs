@@ -68,17 +68,20 @@ public static class ClaudeUsage
     /// <summary>Wakes the poll loop early, for "check now" and for a key that just changed.</summary>
     private static volatile TaskCompletionSource? nudge;
 
+    /// <summary>Survives a Refresh() that lands while a poll is already running.</summary>
+    private static volatile bool wakeWanted;
+
+    /// <summary>
+    /// Mirrors <see cref="Enabled"/> outside the lock. Every bar asks this while laying out, once a
+    /// second, and the answer must not be able to wait on the poll thread.
+    /// </summary>
+    private static volatile bool enabled;
+
     /// <summary>The latest reading, or null when usage tracking is off or has never run.</summary>
     public static UsageReading? Current => current;
 
     /// <summary>True when the feature is switched on and has a key worth sending.</summary>
-    public static bool Enabled
-    {
-        get
-        {
-            lock (gate) return settings is { Enabled: true } s && !string.IsNullOrWhiteSpace(s.SessionKey);
-        }
-    }
+    public static bool Enabled => enabled;
 
     /// <summary>True if a value looks like a session key rather than a cleared or bogus cookie.</summary>
     public static bool Plausible(string? key) =>
@@ -94,6 +97,7 @@ public static class ClaudeUsage
         {
             settings = config;
             persist = save;
+            enabled = config.Enabled && !string.IsNullOrWhiteSpace(config.SessionKey);
 
             if (!config.Enabled)
             {
@@ -103,7 +107,10 @@ public static class ClaudeUsage
                 return;
             }
 
-            if (life is not null) { Refresh(); return; }
+            // Deliberately no poll here: this is called for every settings change in the app, and
+            // refreshing on each one would spend a request on somebody toggling an unrelated switch.
+            // The explicit paths — a new key, "Check now", a changed bar selection — ask for one.
+            if (life is not null) return;
 
             life = new CancellationTokenSource();
             var token = life.Token;
@@ -112,7 +119,13 @@ public static class ClaudeUsage
     }
 
     /// <summary>Asks the loop to poll now instead of waiting out the interval.</summary>
-    public static void Refresh() => nudge?.TrySetResult();
+    public static void Refresh()
+    {
+        // The flag as well as the signal: a request arriving while Poll is already running would
+        // otherwise be lost, and saving a key would appear to do nothing for three minutes.
+        wakeWanted = true;
+        nudge?.TrySetResult();
+    }
 
     /// <summary>
     /// Stores a new session key. Returns false if it does not look like one — better to reject it
@@ -130,6 +143,7 @@ public static class ClaudeUsage
             {
                 settings.SessionKey = null;
                 settings.OrgId = null;
+                enabled = false;
                 current = null;
                 persist?.Invoke();
                 return true;
@@ -142,6 +156,7 @@ public static class ClaudeUsage
 
             settings.SessionKey = stored;
             settings.OrgId = null;                 // a different key may be a different account
+            enabled = settings.Enabled;
             current = null;
             persist?.Invoke();
         }
@@ -157,6 +172,7 @@ public static class ClaudeUsage
         {
             life?.Cancel();
             life = null;
+            enabled = false;
         }
     }
 
@@ -166,6 +182,8 @@ public static class ClaudeUsage
     {
         while (!token.IsCancellationRequested)
         {
+            wakeWanted = false;
+
             try { Poll(); }
             catch (Exception ex)
             {
@@ -180,6 +198,8 @@ public static class ClaudeUsage
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             nudge = wake;
+            if (wakeWanted) continue;              // asked for while the poll above was running
+
             try { await Task.WhenAny(Task.Delay(TimeSpan.FromSeconds(seconds), token), wake.Task); }
             catch (OperationCanceledException) { return; }
         }
