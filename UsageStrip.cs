@@ -52,8 +52,9 @@ internal static class UsageStrip
 
         if (limits.Count == 0)
         {
-            // An empty track still says "this is a usage strip", where a blank gap says nothing.
-            Track(g, new Rectangle(x, y, width, BarThickness), null);
+            // An empty track still says "this is a usage strip", where a blank gap says nothing —
+            // but only if it can be seen. The ordinary trough is barely a shade off the bar itself.
+            Placeholder(g, new Rectangle(x, y, width, BarThickness));
             return;
         }
 
@@ -74,14 +75,29 @@ internal static class UsageStrip
             FormatFlags = StringFormatFlags.NoWrap,
         };
 
+        // Nothing here has room for a sentence, so each state gets the shortest phrase that still
+        // means something on its own. "key" was a fragment of an explanation living in the tooltip,
+        // which reads as a rendering fault rather than as a prompt.
         var (text, colour) = headline is not null
             ? ($"{headline.Percent}%", Fill(headline.Percent))
-            : reading is { NeedsKey: true } ? ("key", Theme.Muted)
-            : reading is { Error: not null } ? ("—", Theme.Muted)
+            : reading is { NeedsKey: true } ? ("set up", Theme.Accent)
+            : reading is { Error: not null } ? ("error", High)
             : ("···", Theme.Muted);
 
         using var brush = new SolidBrush(colour);
         g.DrawString(text, font, brush, area, centred);
+    }
+
+    /// <summary>A track with nothing in it yet, drawn light enough to be visible on the bar.</summary>
+    private static void Placeholder(Graphics g, Rectangle bar)
+    {
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var trough = new SolidBrush(Theme.Divider))
+            Rounded(g, bar, trough);
+
+        g.SmoothingMode = previous;
     }
 
     /// <summary>One limit: an unfilled track with the used portion drawn over it.</summary>
