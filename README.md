@@ -159,6 +159,15 @@ Turn one on per display under **Taskbar** — each display is a separate switch,
 on one screen and nothing on the others. Pick an edge and a thickness; it defaults to 50px of icons,
 the proportions of a real taskbar.
 
+**Across** decides how much of the edge it takes. *Whole display* is the default. On an ultrawide
+split into sub-screens, pick a zone instead and the bar occupies only that zone's edge — a bar along
+the bottom of the right-hand 40%, say, with the left 60% untouched.
+
+A zone-scoped bar is placed by ScweenSpit rather than reserved from Windows, because a work area is
+one rectangle per display and part of an edge cannot be expressed in it. The zone is shortened for
+the bar instead, so windows ScweenSpit places keep clear of it; anything maximised by Windows itself
+will not.
+
 It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar uses, so Windows
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
@@ -183,6 +192,16 @@ gives their reserved strip back, so a bar of yours on the same edge sits flush r
 above a dead band — and it re-asserts, because Explorer puts an auto-hidden taskbar back whenever the
 pointer reaches its edge. Everything is restored when ScweenSpit exits, and on the next launch if
 this one is killed.
+
+### Why "fill over the taskbar" sometimes does nothing
+
+That setting grows a zone into the space the taskbar reserves. If nothing is reserving space — the
+taskbar is hidden, or set to auto-hide — there is nothing to grow into and the setting has no visible
+effect. The Layouts page says so when it detects that.
+
+It also only applies when a window is next placed. **Arrange open windows now**, on the same page,
+applies the current layout to everything already open, so you can see a change without hunting for a
+window to maximize.
 
 ### What our bar cannot do
 

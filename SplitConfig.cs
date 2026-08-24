@@ -86,6 +86,16 @@ public sealed class BarSettings
 
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
+
+    /// <summary>
+    /// Confine the bar to one zone instead of the whole display edge — for an ultrawide split into
+    /// sub-screens, where a bar spanning all of it is not what anyone wants. Null spans the display.
+    ///
+    /// A zone-scoped bar cannot be an appbar: Windows reserves space as a single rectangle per
+    /// monitor, so a partial-width strip is not expressible. The zone is shortened instead, which
+    /// keeps windows ScweenSpit places clear of it.
+    /// </summary>
+    public int? Zone { get; set; }
 }
 
 public sealed class MonitorLayout

@@ -97,7 +97,55 @@ public sealed class ZoneManager(SplitConfig config)
     /// so hotkey cycling walks Quadrants as TL, TR, BL, BR rather than down the columns.
     /// Shared fractional edges round to identical pixels, so zones never gap or overlap.
     /// </summary>
+    /// <summary>The zones as laid out, with room taken out for a zone-scoped bar.</summary>
     public List<Zone> ZonesFor(MonitorGeometry geo)
+    {
+        var zones = RawZonesFor(geo);
+
+        if (Config.Bars.TryGetValue(geo.Device, out var bar) && bar.Zone is int index
+            && index >= 0 && index < zones.Count && Strip(zones[index].Rect, bar) is { } strip)
+        {
+            zones[index] = zones[index] with { Rect = Shorten(zones[index].Rect, strip, SplitConfig.ParseEdge(bar.Edge)) };
+        }
+
+        return zones;
+    }
+
+    /// <summary>
+    /// Where a zone-scoped bar sits: a strip along one edge of its zone. Computed from the zones
+    /// BEFORE the bar is subtracted, or the bar would walk itself inwards on every layout pass.
+    /// </summary>
+    public RECT? BarStrip(MonitorGeometry geo, BarSettings bar)
+    {
+        if (bar.Zone is not int index) return null;
+
+        var zones = RawZonesFor(geo);
+        return index >= 0 && index < zones.Count ? Strip(zones[index].Rect, bar) : null;
+    }
+
+    private static RECT? Strip(RECT zone, BarSettings bar)
+    {
+        int thickness = Math.Min(bar.Thickness, Math.Min(zone.Width, zone.Height) / 2);
+        if (thickness <= 0) return null;
+
+        return SplitConfig.ParseEdge(bar.Edge) switch
+        {
+            BarEdge.Left  => zone with { Right = zone.Left + thickness },
+            BarEdge.Right => zone with { Left = zone.Right - thickness },
+            BarEdge.Top   => zone with { Bottom = zone.Top + thickness },
+            _             => zone with { Top = zone.Bottom - thickness },
+        };
+    }
+
+    private static RECT Shorten(RECT zone, RECT strip, BarEdge edge) => edge switch
+    {
+        BarEdge.Left  => zone with { Left = strip.Right },
+        BarEdge.Right => zone with { Right = strip.Left },
+        BarEdge.Top   => zone with { Top = strip.Bottom },
+        _             => zone with { Bottom = strip.Top },
+    };
+
+    public List<Zone> RawZonesFor(MonitorGeometry geo)
     {
         var work = EffectiveWork(geo);
 

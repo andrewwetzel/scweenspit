@@ -22,6 +22,7 @@ public sealed class TaskbarWindow : Form
 
     private readonly MonitorGeometry monitor;
     private readonly BarSettings settings;
+    private readonly ZoneManager zones;
 
     private List<TaskWindow> windows = [];
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
@@ -42,10 +43,11 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     public event Action<Point>? MenuRequested;
 
-    public TaskbarWindow(MonitorGeometry monitor, BarSettings settings)
+    public TaskbarWindow(MonitorGeometry monitor, BarSettings settings, ZoneManager zones)
     {
         this.monitor = monitor;
         this.settings = settings;
+        this.zones = zones;
         Edge = SplitConfig.ParseEdge(settings.Edge);
 
         FormBorderStyle = FormBorderStyle.None;
@@ -59,7 +61,13 @@ public sealed class TaskbarWindow : Form
         appBar = new AppBar(this);
         appBar.PositionChanged += Reposition;
 
-        Load += (_, _) => { appBar.Register(); Reposition(); Rebuild(); };
+        // Only a full-display bar can be an appbar; a zone-scoped one places itself.
+        Load += (_, _) =>
+        {
+            if (settings.Zone is null) appBar.Register();
+            Reposition();
+            Rebuild();
+        };
         refresh.Tick += (_, _) => Rebuild();
         refresh.Start();
     }
@@ -69,7 +77,20 @@ public sealed class TaskbarWindow : Form
     /// most obviously when the shell's taskbar is hidden and its reservation goes away, which would
     /// otherwise leave our bar stranded above an empty band where the old taskbar used to be.
     /// </summary>
-    public void Reposition() => appBar.Reserve(monitor.Bounds, Edge, settings.Thickness);
+    public void Reposition()
+    {
+        if (zones.BarStrip(monitor, settings) is { } strip)
+        {
+            // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
+            // part of an edge cannot be expressed that way. The zone is shortened for it instead.
+            SetWindowPos(Handle, HWND_TOPMOST, strip.Left, strip.Top, strip.Width, strip.Height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {strip}");
+            return;
+        }
+
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness);
+    }
 
     protected override CreateParams CreateParams
     {

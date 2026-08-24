@@ -9,7 +9,8 @@ namespace ScweenSpit;
 /// </summary>
 public sealed class BarManager : IDisposable
 {
-    private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly, bool IconsOnly, bool ShowStatus);
+    private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
+                                           bool IconsOnly, bool ShowStatus, int? Zone);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
@@ -19,8 +20,11 @@ public sealed class BarManager : IDisposable
     /// <summary>Raised when a bar's ScweenSpit button is clicked, with the screen position to open at.</summary>
     public event Action<System.Drawing.Point>? MenuRequested;
 
-    public void Apply(SplitConfig config)
+    private ZoneManager? zones;
+
+    public void Apply(SplitConfig config, ZoneManager zoneManager)
     {
+        zones = zoneManager;
         var monitors = ZoneManager.AllMonitors().ToDictionary(m => m.Device, m => m);
 
         // Take down bars that are no longer configured, or whose display has gone away.
@@ -33,7 +37,7 @@ public sealed class BarManager : IDisposable
             if (!monitors.TryGetValue(device, out var monitor)) continue;
 
             var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
-                                     settings.IconsOnly, settings.ShowStatus);
+                                     settings.IconsOnly, settings.ShowStatus, settings.Zone);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 
@@ -41,7 +45,7 @@ public sealed class BarManager : IDisposable
 
             try
             {
-                var bar = new TaskbarWindow(monitor, settings);
+                var bar = new TaskbarWindow(monitor, settings, zoneManager);
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
 
                 // Give it its rectangle before the handle exists, so it is created on the display it

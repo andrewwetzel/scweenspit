@@ -15,6 +15,7 @@ public sealed class SettingsForm : Form
     private readonly Action applyChanges;
     private readonly Action reloadFromDisk;
     private readonly Func<bool> hooksUp;
+    private readonly Func<int> arrangeWindows;
 
     private readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Window, Padding = new Padding(28, 24, 28, 24), AutoScroll = true };
     private readonly FlowLayoutPanel nav = new() { Dock = DockStyle.Left, Width = 172, BackColor = Theme.Panel, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 20, 12, 12), WrapContents = false };
@@ -23,9 +24,11 @@ public sealed class SettingsForm : Form
     private ListBox? excludeList;
 
     public SettingsForm(SplitConfig config, ZoneManager zones, ZoneOverlay overlay,
-                        Action applyChanges, Action reloadFromDisk, Func<bool> hooksUp)
+                        Action applyChanges, Action reloadFromDisk, Func<bool> hooksUp,
+                        Func<int> arrangeWindows)
     {
         this.reloadFromDisk = reloadFromDisk;
+        this.arrangeWindows = arrangeWindows;
         this.config = config;
         this.zones = zones;
         this.overlay = overlay;
@@ -259,6 +262,21 @@ public sealed class SettingsForm : Form
                 "and windows placed in it are kept above the taskbar — so it is genuinely fullscreen " +
                 "over its part of the screen while the taskbar stays visible and usable everywhere else."));
 
+            // Nothing to cover means nothing to see, and that is worth saying out loud rather than
+            // leaving someone to conclude the setting is broken.
+            if (geo.Work.Left == geo.Bounds.Left && geo.Work.Top == geo.Bounds.Top
+                && geo.Work.Right == geo.Bounds.Right && geo.Work.Bottom == geo.Bounds.Bottom)
+            {
+                page.Controls.Add(new Label
+                {
+                    Text = "⚠  Nothing is reserving space on this display right now — the taskbar is " +
+                           "hidden or set to auto-hide — so this setting has no visible effect until " +
+                           "something is.",
+                    AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                    Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 10),
+                });
+            }
+
             page.Controls.Add(new Label
             {
                 Text = "Reserved space (pixels kept clear at each edge)",
@@ -316,6 +334,16 @@ public sealed class SettingsForm : Form
         which.AutoSize = true;
         which.Click += (_, _) => DisplayIdentifier.Flash();
         buttons.Controls.Add(which);
+
+        var arrange = Theme.Action("Arrange open windows now");
+        arrange.AutoSize = true;
+        arrange.Click += (_, _) =>
+        {
+            int moved = arrangeWindows();
+            MessageBox.Show($"Placed {moved} window{(moved == 1 ? "" : "s")}.", "ScweenSpit",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
+        buttons.Controls.Add(arrange);
 
         page.Controls.Add(buttons);
     }
@@ -435,6 +463,27 @@ public sealed class SettingsForm : Form
             var thickness = Theme.Number(settings.Thickness, 28, 600, 10);
             thickness.ValueChanged += (_, _) => { settings.Thickness = (int)thickness.Value; Save(); };
             Row(page, "Thickness (pixels)", thickness);
+
+            // On a wide display split into zones, a bar across the whole edge is rarely the point.
+            var zoneCount = config.ZonesFor(device).Count;
+            var spans = new[] { "Whole display" }
+                .Concat(Enumerable.Range(1, zoneCount).Select(i => $"Zone {i}")).ToArray();
+
+            var span = Theme.Choice(spans, settings.Zone is int z && z < zoneCount ? $"Zone {z + 1}" : spans[0]);
+            span.SelectedIndexChanged += (_, _) =>
+            {
+                settings.Zone = span.SelectedIndex == 0 ? null : span.SelectedIndex - 1;
+                Save();
+                overlay.Flash(zones);
+            };
+            Row(page, "Across", span);
+
+            if (settings.Zone is not null)
+                page.Controls.Add(Theme.Caption(
+                    "A bar confined to one zone is placed by ScweenSpit rather than reserved from " +
+                    "Windows — the work area is one rectangle per display, so part of an edge cannot " +
+                    "be reserved. Windows ScweenSpit places keep clear of it; anything maximised by " +
+                    "Windows itself will not."));
 
             var onlyHere = Theme.Toggle("List only windows on this display", settings.ThisDisplayOnly);
             onlyHere.CheckedChanged += (_, _) => { settings.ThisDisplayOnly = onlyHere.Checked; Save(); };

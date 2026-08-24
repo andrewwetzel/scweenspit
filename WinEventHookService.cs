@@ -301,6 +301,34 @@ public sealed class WinEventHookService : IDisposable
         catch (Exception ex) { Log.Write($"post-drag reconcile failed: {ex}"); }
     }
 
+    /// <summary>
+    /// Places every open window into its zone, once, on request. Deliberately not automatic: doing
+    /// this at startup or on every settings change would restore maximized windows and drag a
+    /// fullscreen game out of its display the moment anyone touched a spinner.
+    /// </summary>
+    public int ArrangeAll()
+    {
+        int moved = 0;
+
+        foreach (var window in WindowList.Enumerate())
+        {
+            var hWnd = window.Handle;
+            if (!IsClampTarget(hWnd)) continue;
+            if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
+            if (!GetWindowRect(hWnd, out var rect)) continue;
+            if (!ZoneManager.TryGetMonitor(hWnd, out var geo) || zones.IsOptedOut(geo)) continue;
+
+            var rects = zones.ZonesFor(geo);
+            if (rects.Count == 0) continue;
+
+            Apply(hWnd, rects[ZoneManager.PickZoneIndex(rects, ReferenceRect(hWnd, rect))]);
+            moved++;
+        }
+
+        Log.Write($"arrange: {moved} window(s) placed");
+        return moved;
+    }
+
     // ---- drag to zone ------------------------------------------------------
 
     private void DragBegin(IntPtr hWnd)

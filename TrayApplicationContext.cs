@@ -83,7 +83,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         ApplySnapSuppression();
         ApplyTaskbarVisibility();
-        bars.Apply(config);
+        bars.Apply(config, zones);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
         UpdateTrayText();
@@ -114,7 +114,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         // An external WM_CLOSE (Task Manager "End task", taskbar Close) reports a CloseReason that
         // OnFormClosing does not cancel, so the instance can genuinely be disposed underneath us.
         if (settings is null || settings.IsDisposed)
-            settings = new SettingsForm(config, zones, overlay, ApplyChanges, ReloadConfig, () => hook.Running);
+            settings = new SettingsForm(config, zones, overlay, ApplyChanges, ReloadConfig,
+                                        () => hook.Running, hook.ArrangeAll);
         settings.Reveal();
     }
 
@@ -127,7 +128,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // Order matters: free the shell taskbar's reserved strip first, then let our bars claim it.
         ApplyTaskbarVisibility();
-        bars.Apply(config);
+        bars.Apply(config, zones);
         bars.Reposition();
 
         // Drag-to-zone rides the same hooks as clamping, so the hooks must stay up for either.
