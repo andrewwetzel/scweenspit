@@ -329,15 +329,24 @@ public sealed class SettingsForm : Form
             Margin = new Padding(0, 4, 0, 10),
         });
 
+        var autoHide = Theme.Toggle("Hide the taskbar until I reach for it", Taskbar.AutoHide);
+        autoHide.CheckedChanged += (_, _) => Taskbar.AutoHide = autoHide.Checked;
+        page.Controls.Add(autoHide);
+        page.Controls.Add(Theme.Caption(
+            "Takes effect immediately, needs no restart, and — unlike moving the taskbar — still " +
+            "works on Windows 11. Paired with a zone set to cover the taskbar, it gives you the " +
+            "whole display and the bar on demand."));
+
         if (!Taskbar.CanMove)
         {
             page.Controls.Add(new Label
             {
-                Text = "⚠  Windows 11 removed taskbar repositioning. The buttons below still write the " +
-                       "setting, but Explorer ignores it and the bar stays at the bottom. Nothing here " +
-                       "will break — it simply will not move.",
+                Text = "⚠  Windows 11 removed taskbar repositioning in build 22000. The buttons below " +
+                       "still write the setting, and Explorer still ignores it — the bar stays at the " +
+                       "bottom. Nothing breaks; it simply will not move. Auto-hide above, or a zone set " +
+                       "to cover the taskbar, are the ways to reclaim that space.",
                 AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
-                Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 12),
+                Font = Theme.Face(9f), Margin = new Padding(0, 8, 0, 12),
             });
         }
 

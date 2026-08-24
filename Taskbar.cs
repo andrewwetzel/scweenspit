@@ -24,6 +24,37 @@ public static class Taskbar
     /// <summary>Windows 11 (build 22000+) dropped support for anything but the bottom edge.</summary>
     public static bool CanMove => Environment.OSVersion.Version.Build < 22000;
 
+    /// <summary>
+    /// Whether the taskbar hides itself until you reach for it. Unlike moving it, this is a
+    /// supported API, takes effect immediately, and still works on Windows 11 — which makes it the
+    /// practical way to get the screen back when the bar cannot be relocated.
+    /// </summary>
+    public static bool AutoHide
+    {
+        get
+        {
+            var data = new APPBARDATA { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>() };
+            return (SHAppBarMessage(ABM_GETSTATE, ref data).ToInt64() & ABS_AUTOHIDE) != 0;
+        }
+        set
+        {
+            // ABM_SETSTATE replaces the whole state word, so always-on-top has to be carried over
+            // rather than assumed - dropping it would quietly un-pin the taskbar.
+            var current = new APPBARDATA { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>() };
+            long state = SHAppBarMessage(ABM_GETSTATE, ref current).ToInt64();
+
+            long wanted = value ? state | ABS_AUTOHIDE : state & ~(long)ABS_AUTOHIDE;
+
+            var data = new APPBARDATA
+            {
+                cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(),
+                lParam = (IntPtr)wanted,
+            };
+            SHAppBarMessage(ABM_SETSTATE, ref data);
+            Log.Write($"taskbar auto-hide set to {value} (state 0x{wanted:X})");
+        }
+    }
+
     /// <summary>Where the taskbar actually is right now, via the documented shell API.</summary>
     public static TaskbarEdge? Current()
     {

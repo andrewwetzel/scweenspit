@@ -137,10 +137,23 @@ windows close. You're asked to confirm first.
 Only the **primary** display's taskbar is moved; secondary-display bars live in a separate
 undocumented blob and are deliberately left alone.
 
-**On Windows 11 this will not work.** Microsoft removed taskbar repositioning in build 22000; the
-setting is still written and Explorer still ignores it. The page says so up front rather than
-letting you find out by restarting your shell for nothing — and if the bar does not move, it tells
-you that too instead of leaving a button that looks like it worked.
+**On Windows 11 this will not work.** Microsoft removed taskbar repositioning in build 22000 — the
+code that drew a taskbar on the top or sides is gone from the shell. The `StuckRects3` edge byte is
+still readable and writable, and Explorer simply ignores it. No registry edit brings it back. The
+page says so up front rather than letting you find out by restarting your shell for nothing, and if
+the bar does not move it tells you that too, instead of leaving a button that looks like it worked.
+
+What does work on Windows 11:
+
+- **Hide the taskbar until I reach for it** — auto-hide, on the same page. This one is a supported
+  API (`ABM_SETSTATE`), applies immediately with no restart, and was never removed. Pair it with a
+  zone set to cover the taskbar and you get the whole display, with the bar on demand.
+- **Reserved margins** (Layouts) to keep a strip clear on any edge, for a third-party dock.
+
+If you genuinely need a vertical taskbar, it takes a shell modification — ExplorerPatcher, a Windhawk
+mod, StartAllBack, or a replacement bar such as RetroBar. Those patch or replace Explorer, so they
+tend to break on feature updates; that is the trade, and it is outside what this tool should be
+doing to your machine.
 
 ## Keeping Windows out of the way
 

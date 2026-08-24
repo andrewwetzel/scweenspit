@@ -143,6 +143,10 @@ public static class Native
     }
 
     public const uint ABM_GETTASKBARPOS = 0x00000005;
+    public const uint ABM_GETSTATE       = 0x00000004;
+    public const uint ABM_SETSTATE       = 0x0000000A;
+    public const int  ABS_AUTOHIDE       = 0x00000001;
+    public const int  ABS_ALWAYSONTOP    = 0x00000002;
     public const uint ABE_LEFT = 0, ABE_TOP = 1, ABE_RIGHT = 2, ABE_BOTTOM = 3;
 
     [DllImport("shell32.dll", SetLastError = true)]
