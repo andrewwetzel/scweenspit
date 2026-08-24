@@ -183,6 +183,13 @@ a Chrome PWA gets its own icon rather than disappearing into the browser's, desp
 `chrome.exe`. It is the same mechanism the Windows taskbar groups by. Where a window declares no id,
 the executable is used instead.
 
+Clicking a button brings its window past whatever is maximised. Windows only lets a process hand the
+foreground to a window if it already holds the foreground or was last to receive input, and a taskbar
+holds neither — its own window is deliberately never activated. So the request is refused and the
+window rises only within its own z-order band, which looks exactly like nothing happening until you
+minimise whatever is on top. ScweenSpit briefly attaches its input queue to the outgoing foreground
+window's thread, which makes the call legitimate, and detaches immediately afterwards.
+
 ScweenSpit's own settings window is listed like any other application, which matters once the Windows
 taskbar is hidden: it would otherwise be the one window with no way back to it.
 

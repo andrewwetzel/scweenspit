@@ -115,8 +115,8 @@ public sealed class SettingsForm : Form
         Activate();
 
         // Activate() is not always enough: the click that asked for this came from the tray or from
-        // a bar that never takes focus, so this process may not hold the foreground right.
-        Native.SetForegroundWindow(Handle);
+        // a bar that never takes focus, so this process may not hold the foreground right either.
+        WindowList.Raise(Handle);
     }
 
     // ---- nav ---------------------------------------------------------------

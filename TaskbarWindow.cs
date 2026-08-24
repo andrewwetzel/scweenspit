@@ -440,9 +440,7 @@ public sealed class TaskbarWindow : Form
 
         cycle[button.Id] = next;
 
-        var target = button.Windows[next].Handle;
-        if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
-        SetForegroundWindow(target);
+        WindowList.Raise(button.Windows[next].Handle);
     }
 
     /// <summary>
