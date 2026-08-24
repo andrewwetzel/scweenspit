@@ -492,6 +492,17 @@ public sealed class SettingsForm : Form
             onlyHere.CheckedChanged += (_, _) => { settings.ThisDisplayOnly = onlyHere.Checked; Save(); };
             page.Controls.Add(onlyHere);
 
+            var floating = Theme.Toggle("Float clear of the edges, rounded on every corner", settings.Floating);
+            floating.CheckedChanged += (_, _) => { settings.Floating = floating.Checked; Save(); };
+            page.Controls.Add(floating);
+
+            if (settings.Floating)
+            {
+                var gap = Theme.Number(settings.FloatMargin, 0, 60, 2);
+                gap.ValueChanged += (_, _) => { settings.FloatMargin = (int)gap.Value; Save(); };
+                Row(page, "Gap from the edges (pixels)", gap);
+            }
+
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };
             page.Controls.Add(iconsOnly);
@@ -770,8 +781,12 @@ public sealed class SettingsForm : Form
             try
             {
                 var replaced = await Updater.ApplyAsync(update);
+
+                // Hand it our process id: it has to wait for us to let go of the unpacked copy
+                // before it can replace it, or the update lands on disk and never runs.
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(replaced)
                 {
+                    Arguments = $"--replacing {Environment.ProcessId}",
                     UseShellExecute = true,
                 });
                 quit();

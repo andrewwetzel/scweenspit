@@ -172,8 +172,10 @@ It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar u
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
-Its corners are rounded on the sides facing the desktop and left square against the screen edge,
-matching how Windows 11 treats a docked surface.
+**Float clear of the edges** makes it a free-standing dock: it sits inside its reserved strip with a
+gap all round and every corner rounded. The space stays reserved either way — only the bar moves in,
+so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
+the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
 It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
@@ -389,6 +391,13 @@ the file that is running — no rename dance, no helper process, no reboot. The 
 The download is checked against a SHA-256 published beside it in the release. That catches a
 truncated or corrupted transfer. It is **not** a signature and does not prove the release is genuine
 — there is no code signing here.
+
+Installing hands the new launcher this process's id, and it waits for us to exit before taking over.
+That matters more than it sounds: the app runs from the unpacked copy the new launcher needs to
+replace, so a launcher that pressed on regardless would find the file locked, keep the old payload,
+see an instance already running, and quietly exit — leaving the update on disk and nothing running.
+A launcher that is handed no process id still waits a few seconds before assuming a running copy
+means to stay, so an update from a version predating this still lands.
 
 On startup it looks for a newer release at most once a day and, if it finds one, says so and stops
 there. It never installs anything on its own.

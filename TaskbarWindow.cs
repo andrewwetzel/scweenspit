@@ -79,17 +79,20 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     public void Reposition()
     {
+        int inset = settings.Floating ? settings.FloatMargin : 0;
+
         if (zones.BarStrip(monitor, settings) is { } strip)
         {
             // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
             // part of an edge cannot be expressed that way. The zone is shortened for it instead.
-            SetWindowPos(Handle, HWND_TOPMOST, strip.Left, strip.Top, strip.Width, strip.Height,
+            var placed = AppBar.Deflate(strip, inset);
+            SetWindowPos(Handle, HWND_TOPMOST, placed.Left, placed.Top, placed.Width, placed.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {strip}");
+            Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {placed}");
             return;
         }
 
-        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness);
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness, inset);
     }
 
     protected override CreateParams CreateParams
@@ -115,13 +118,17 @@ public sealed class TaskbarWindow : Form
         const int radius = 10;
         int w = Width + 1, h = Height + 1, r = radius * 2;
 
-        var region = Edge switch
-        {
-            BarEdge.Bottom => CreateRoundRectRgn(0, 0, w, h + radius, r, r),
-            BarEdge.Top    => CreateRoundRectRgn(0, -radius, w, h, r, r),
-            BarEdge.Left   => CreateRoundRectRgn(-radius, 0, w, h, r, r),
-            _              => CreateRoundRectRgn(0, 0, w + radius, h, r, r),
-        };
+        // A floating bar is a free surface, so every corner rounds. A docked one keeps the corners
+        // against the screen edge square, which is how Windows 11 treats a docked surface.
+        var region = settings.Floating
+            ? CreateRoundRectRgn(0, 0, w, h, r, r)
+            : Edge switch
+            {
+                BarEdge.Bottom => CreateRoundRectRgn(0, 0, w, h + radius, r, r),
+                BarEdge.Top    => CreateRoundRectRgn(0, -radius, w, h, r, r),
+                BarEdge.Left   => CreateRoundRectRgn(-radius, 0, w, h, r, r),
+                _              => CreateRoundRectRgn(0, 0, w + radius, h, r, r),
+            };
 
         // SetWindowRgn takes ownership; the previous region is released by the system.
         if (region != IntPtr.Zero) SetWindowRgn(Handle, region, true);

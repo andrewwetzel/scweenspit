@@ -22,12 +22,20 @@ internal static partial class Program
     private const string RuntimeUrl = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
     private const string Caption = "ScweenSpit";
 
+    /// <summary>Told by an updating instance to wait for it to exit before taking over.</summary>
+    private const string ReplacingFlag = "--replacing";
+
     [STAThread]
     private static int Main(string[] args)
     {
         try
         {
             if (!HasDesktopRuntime(RequiredMajor) && !InstallRuntime()) return 1;
+
+            // An update hands over to us while the old app is still running - out of the very file
+            // we are about to replace. Unpacking or launching before it goes leaves the new version
+            // on disk and the old one in memory, and then nothing running at all.
+            WaitForHandover(args);
 
             var exe = Unpack();
             if (exe is null)
@@ -38,13 +46,14 @@ internal static partial class Program
 
             // Already running: say nothing and get out of the way. The app keeps a single-instance
             // mutex of its own, but it would exit silently and look like nothing happened.
-            if (AlreadyRunning(exe)) return 0;
+            if (AlreadyRunning(exe) && !WaitFor(() => !AlreadyRunning(exe), UnannouncedHandover))
+                return 0;
 
             var start = new ProcessStartInfo(exe)
             {
                 UseShellExecute = false,
                 WorkingDirectory = Path.GetDirectoryName(exe)!,
-                Arguments = string.Join(' ', args.Select(Quote)),
+                Arguments = string.Join(' ', Forwarded(args).Select(Quote)),
             };
 
             // So "Start with Windows" registers this file rather than the unpacked copy: this is
@@ -62,6 +71,53 @@ internal static partial class Program
     }
 
     private static string Quote(string a) => a.Contains(' ') ? $"\"{a}\"" : a;
+
+    private static readonly TimeSpan AnnouncedHandover = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan UnannouncedHandover = TimeSpan.FromSeconds(8);
+
+    /// <summary>Our own flags are consumed here, not passed on to the application.</summary>
+    private static IEnumerable<string> Forwarded(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (!args[i].Equals(ReplacingFlag, StringComparison.OrdinalIgnoreCase)) { yield return args[i]; continue; }
+            i++;   // skip the pid that follows
+        }
+    }
+
+    /// <summary>
+    /// Waits for the instance that launched us to exit. An updater names its own process id; an
+    /// older one predating that flag does not, so a running copy is given a short grace period
+    /// before we assume it means to stay.
+    /// </summary>
+    private static void WaitForHandover(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (!args[i].Equals(ReplacingFlag, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!int.TryParse(args[i + 1], out int pid)) continue;
+
+            WaitFor(() => !IsAlive(pid), AnnouncedHandover);
+            return;
+        }
+    }
+
+    private static bool IsAlive(int pid)
+    {
+        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
+        catch { return false; }   // already gone
+    }
+
+    private static bool WaitFor(Func<bool> condition, TimeSpan limit)
+    {
+        var deadline = DateTime.UtcNow + limit;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return true;
+            Thread.Sleep(150);
+        }
+        return condition();
+    }
 
     private static bool AlreadyRunning(string exe)
     {

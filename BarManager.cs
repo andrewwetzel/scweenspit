@@ -10,7 +10,8 @@ namespace ScweenSpit;
 public sealed class BarManager : IDisposable
 {
     private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
-                                           bool IconsOnly, bool ShowStatus, int? Zone);
+                                           bool IconsOnly, bool ShowStatus, int? Zone,
+                                           bool Floating, int FloatMargin);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
@@ -37,7 +38,8 @@ public sealed class BarManager : IDisposable
             if (!monitors.TryGetValue(device, out var monitor)) continue;
 
             var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
-                                     settings.IconsOnly, settings.ShowStatus, settings.Zone);
+                                     settings.IconsOnly, settings.ShowStatus, settings.Zone,
+                                     settings.Floating, settings.FloatMargin);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 

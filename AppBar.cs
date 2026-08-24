@@ -47,7 +47,7 @@ public sealed class AppBar : IDisposable
     /// out of the way of other appbars, so the answer to ABM_QUERYPOS is authoritative, not our
     /// request — and the window has to be placed where the answer says.
     /// </summary>
-    public void Reserve(RECT monitor, BarEdge edge, int thickness)
+    public void Reserve(RECT monitor, BarEdge edge, int thickness, int inset = 0)
     {
         if (!registered) return;
 
@@ -63,12 +63,14 @@ public sealed class AppBar : IDisposable
         data.rc = Squeeze(data.rc, edge);   // QUERYPOS only adjusts the docking axis
         SHAppBarMessage(ABM_SETPOS, ref data);
 
-        var r = data.rc;
+        // Windows keeps the whole strip reserved; only the visible bar moves inside it, which is
+        // what makes a floating bar float without applications creeping under it.
+        var r = Deflate(data.rc, inset);
         SetWindowPos(owner.Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
         SHAppBarMessage(ABM_WINDOWPOSCHANGED, ref data);
-        Log.Write($"appbar reserved {edge} {r} on {monitor}");
+        Log.Write($"appbar reserved {edge} {data.rc} on {monitor}, bar at {r}");
     }
 
     /// <summary>The strip we would like, spanning the chosen edge of this display.</summary>
@@ -91,6 +93,15 @@ public sealed class AppBar : IDisposable
             default:             r.Top = r.Bottom - Thickness; break;
         }
         return r;
+    }
+
+    /// <summary>Shrinks a rectangle on all sides, refusing to collapse it.</summary>
+    public static RECT Deflate(RECT r, int by)
+    {
+        if (by <= 0) return r;
+        if (r.Width <= 2 * by + 8 || r.Height <= 2 * by + 8) return r;
+
+        return new RECT { Left = r.Left + by, Top = r.Top + by, Right = r.Right - by, Bottom = r.Bottom - by };
     }
 
     /// <summary>Call from the owning window's WndProc. Returns true when the message was ours.</summary>
