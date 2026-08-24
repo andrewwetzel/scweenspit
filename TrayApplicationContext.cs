@@ -73,6 +73,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         BuildMenu();
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) OpenSettings(); };
 
+        bars.PinsChanged += () => config.Save();
+
         bars.MenuRequested += at =>
         {
             BuildMenu();
@@ -89,6 +91,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         ApplySnapSuppression();
         ApplyTaskbarVisibility();
+        ApplyAnimationPreference();
         bars.Apply(config, zones);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
@@ -142,6 +145,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // Order matters: free the shell taskbar's reserved strip first, then let our bars claim it.
         ApplyTaskbarVisibility();
+        ApplyAnimationPreference();
         bars.Apply(config, zones);
         bars.Reposition();
 
@@ -266,6 +270,26 @@ public sealed class TrayApplicationContext : ApplicationContext
             // Only zone-scoped bars need this. A full-display bar is an appbar, so Windows shrinks
             // the work area and applications move themselves.
             if (zones.BarStrip(geo, bar) is { } strip) hook.ArrangeOverlapping(strip);
+        }
+    }
+
+    /// <summary>Same bookkeeping as the snap and taskbar settings: remember, change, put back.</summary>
+    private void ApplyAnimationPreference()
+    {
+        if (config.StopMinimiseAnimation)
+        {
+            if (config.AnimationRestore is null)
+            {
+                config.AnimationRestore = Taskbar.MinimiseAnimation;
+                config.Save();
+            }
+            Taskbar.MinimiseAnimation = false;
+        }
+        else if (config.AnimationRestore is { } wasOn)
+        {
+            Taskbar.MinimiseAnimation = wasOn;
+            config.AnimationRestore = null;
+            config.Save();
         }
     }
 
@@ -421,6 +445,13 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             taskbarWatch.Dispose();
             reflow.Dispose();
+
+            if (config.AnimationRestore is { } animationWasOn)
+            {
+                Taskbar.MinimiseAnimation = animationWasOn;
+                config.AnimationRestore = null;
+                config.Save();
+            }
             if (config.TaskbarRestore is { } wasAutoHidden)
             {
                 Taskbar.SetHidden(false);

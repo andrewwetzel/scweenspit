@@ -233,6 +233,54 @@ public static class Native
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
 
+    public const uint WM_CLOSE = 0x0010;
+
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, uint flags,
+                                                         System.Text.StringBuilder name, ref uint size);
+
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+
+    /// <summary>
+    /// Full path of the executable behind a window. Uses the limited-information right rather than
+    /// Process.MainModule, which is refused across integrity levels for exactly the applications a
+    /// taskbar most needs to identify.
+    /// </summary>
+    public static string ExecutablePath(IntPtr hWnd)
+    {
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        if (pid == 0) return string.Empty;
+
+        var handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero) return string.Empty;
+
+        try
+        {
+            var buffer = new System.Text.StringBuilder(1024);
+            uint size = (uint)buffer.Capacity;
+            return QueryFullProcessImageName(handle, 0, buffer, ref size) ? buffer.ToString() : string.Empty;
+        }
+        finally { CloseHandle(handle); }
+    }
+
+    // ---- animation ---------------------------------------------------------
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ANIMATIONINFO { public uint cbSize; public int iMinAnimate; }
+
+    public const uint SPI_GETANIMATION = 0x0048, SPI_SETANIMATION = 0x0049;
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
+    public static extern bool SystemParametersInfoAnimation(uint action, uint param,
+                                                            ref ANIMATIONINFO info, uint winIni);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 

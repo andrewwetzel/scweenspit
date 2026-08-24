@@ -24,8 +24,19 @@ public sealed class TaskbarWindow : Form
     private readonly BarSettings settings;
     private readonly ZoneManager zones;
 
+    /// <summary>A slot on the bar: a running window, a pinned application, or a pinned one running.</summary>
+    private sealed record Button(string Path, TaskWindow? Window, bool Pinned);
+
     private List<TaskWindow> windows = [];
+    private List<Button> buttons = [];
+
+    // Arrival order, kept across rebuilds. EnumWindows returns z-order, which changes every time
+    // anything is activated or minimised, so using it directly makes the buttons reshuffle
+    // underneath the pointer.
+    private readonly List<IntPtr> order = [];
+
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
+    private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
     private int hovered = -1, hoveredStatus = -1;
     private long lastStatusPoll;
 
@@ -42,6 +53,9 @@ public sealed class TaskbarWindow : Form
     /// unreachable.
     /// </summary>
     public event Action<Point>? MenuRequested;
+
+    /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
+    public event Action? PinsChanged;
 
     public TaskbarWindow(MonitorGeometry monitor, BarSettings settings, ZoneManager zones)
     {
@@ -157,9 +171,19 @@ public sealed class TaskbarWindow : Form
     {
         windows = WindowList.Enumerate(settings.ThisDisplayOnly ? monitor.Device : null);
 
+        order.RemoveAll(h => windows.All(w => w.Handle != h));
+        foreach (var w in windows)
+            if (!order.Contains(w.Handle)) order.Add(w.Handle);
+
+        buttons = LayOutButtons();
+
         foreach (var w in windows)
             if (!icons.ContainsKey(w.Handle))
                 icons[w.Handle] = WindowList.IconFor(w.Handle) ?? new Bitmap(32, 32);
+
+        foreach (var button in buttons)
+            if (button.Window is null && !fileIcons.ContainsKey(button.Path))
+                fileIcons[button.Path] = WindowList.IconForFile(button.Path) ?? new Bitmap(32, 32);
 
         foreach (var stale in icons.Keys.Where(h => !IsWindow(h)).ToList())
         {
@@ -212,6 +236,39 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, Height - ClockExtent, Width, ClockExtent)
         : new Rectangle(Width - ClockExtent, 0, ClockExtent, Height);
 
+    /// <summary>
+    /// Pinned applications hold their positions whether or not they are running; everything else
+    /// follows in the order it appeared. This is what makes the bar stop moving under the pointer.
+    /// </summary>
+    private List<Button> LayOutButtons()
+    {
+        var live = order.Select(h => windows.FirstOrDefault(w => w.Handle == h))
+                        .Where(w => w is not null).Select(w => w!).ToList();
+
+        var laid = new List<Button>();
+        var placed = new HashSet<IntPtr>();
+
+        foreach (var pin in settings.Pinned)
+        {
+            var running = live.Where(w => Same(w.Path, pin)).ToList();
+            if (running.Count == 0) { laid.Add(new Button(pin, null, true)); continue; }
+
+            foreach (var w in running) { laid.Add(new Button(pin, w, true)); placed.Add(w.Handle); }
+        }
+
+        foreach (var w in live)
+            if (!placed.Contains(w.Handle)) laid.Add(new Button(w.Path, w, false));
+
+        return laid;
+    }
+
+    private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    private static string NameOf(string path)
+    {
+        try { return Path.GetFileNameWithoutExtension(path); } catch { return path; }
+    }
+
     private Rectangle SlotAt(int index) => Vertical
         ? new Rectangle(0, index * Slot, Width, Slot)
         : new Rectangle(index * Slot, 0, Slot, Height);
@@ -220,7 +277,7 @@ public sealed class TaskbarWindow : Form
 
     private int SlotUnder(Point p)
     {
-        for (int i = 0; i < Math.Min(windows.Count, Capacity); i++)
+        for (int i = 0; i < Math.Min(buttons.Count, Capacity); i++)
             if (SlotAt(i).Contains(p)) return i;
         return -1;
     }
@@ -248,10 +305,14 @@ public sealed class TaskbarWindow : Form
 
         // An icons-only bar is unreadable without these.
         tips.SetToolTip(this, tray >= 0 ? TrayTip(TrayItems()[tray])
-                            : under >= 0 && under < windows.Count ? windows[under].Title
+                            : under >= 0 && under < buttons.Count ? Describe(buttons[under])
                             : string.Empty);
         Invalidate();
     }
+
+    private static string Describe(Button b) => b.Window is { } w
+        ? (w.Minimised ? $"{w.Title}  (minimised)" : w.Title)
+        : $"{NameOf(b.Path)}  (not running)";
 
     private string TrayTip(Tray item) => item switch
     {
@@ -293,10 +354,56 @@ public sealed class TaskbarWindow : Form
         if (ClockArea.Contains(e.Location)) { SystemStatus.Open("ms-settings:dateandtime"); return; }
 
         int under = SlotUnder(e.Location);
-        if (under < 0 || under >= windows.Count) return;
+        if (under < 0 || under >= buttons.Count) return;
 
-        WindowList.Toggle(windows[under].Handle);
+        var button = buttons[under];
+        if (e.Button == MouseButtons.Right) { ShowButtonMenu(button, Cursor.Position); return; }
+        if (e.Button != MouseButtons.Left) return;
+
+        if (button.Window is { } window) WindowList.Toggle(window.Handle);
+        else Launch(button.Path);
+
         Rebuild();
+    }
+
+    private static void Launch(string path)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex) { Log.Write($"could not launch {path}: {ex.Message}"); }
+    }
+
+    /// <summary>Right-click: pin, unpin, or close — the three things a taskbar button owes you.</summary>
+    private void ShowButtonMenu(Button button, Point at)
+    {
+        var menu = new ContextMenuStrip();
+        bool pinned = settings.Pinned.Any(p => Same(p, button.Path));
+
+        if (!string.IsNullOrWhiteSpace(button.Path))
+        {
+            menu.Items.Add(new ToolStripMenuItem(pinned ? "Unpin from bar" : "Pin to bar", null, (_, _) =>
+            {
+                if (pinned) settings.Pinned.RemoveAll(p => Same(p, button.Path));
+                else settings.Pinned.Add(button.Path);
+
+                PinsChanged?.Invoke();
+                Rebuild();
+            }));
+        }
+
+        if (button.Window is { } window)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem("Close window", null, (_, _) =>
+            {
+                WindowList.Close(window.Handle);
+                Rebuild();
+            }));
+        }
+
+        if (menu.Items.Count > 0) menu.Show(at);
     }
 
     // ---- painting ----------------------------------------------------------
@@ -317,49 +424,69 @@ public sealed class TaskbarWindow : Form
         using var text = new SolidBrush(Theme.Text);
         using var dim = new SolidBrush(Theme.Muted);
 
-        int shown = Math.Min(windows.Count, Capacity);
+        int shown = Math.Min(buttons.Count, Capacity);
         for (int i = 0; i < shown; i++)
         {
             var slot = SlotAt(i);
-            var w = windows[i];
+            var button = buttons[i];
+            var w = button.Window;
 
-            if (w.Handle == foreground) g.FillRectangle(active, slot);
+            bool front = w is not null && w.Handle == foreground;
+            if (front) g.FillRectangle(active, slot);
             else if (i == hovered) g.FillRectangle(hot, slot);
 
-            if (w.Handle == foreground || !w.Minimised)
+            // Three states worth telling apart at a glance: in front, running, and merely pinned.
+            if (w is not null)
             {
-                // Running windows get an underline; the foreground one gets a brighter, longer one.
-                int len = w.Handle == foreground ? Slot / 2 : Slot / 5;
+                int len = front ? Slot / 2 : Slot / 5;
                 var mark = Vertical
                     ? new Rectangle(Edge == BarEdge.Left ? 0 : Width - 3, slot.Y + (slot.Height - len) / 2, 3, len)
                     : new Rectangle(slot.X + (slot.Width - len) / 2, Edge == BarEdge.Top ? 0 : Height - 3, len, 3);
-                g.FillRectangle(w.Handle == foreground ? accent : dim, mark);
+                g.FillRectangle(front ? accent : dim, mark);
             }
 
-            if (icons.TryGetValue(w.Handle, out var icon))
+            var icon = w is not null
+                ? icons.GetValueOrDefault(w.Handle)
+                : fileIcons.GetValueOrDefault(button.Path);
+
+            if (icon is not null)
             {
                 int size = IconSize;
                 var box = settings.IconsOnly
                     ? new Rectangle(slot.X + (slot.Width - size) / 2, slot.Y + (slot.Height - size) / 2, size, size)
                     : new Rectangle(slot.X + 8, slot.Y + (slot.Height - size) / 2, size, size);
-                g.DrawImage(icon, box);
+
+                // A pinned app that is not running, and a minimised window, are both "not here";
+                // fading the icon says so without needing a legend.
+                float opacity = w is null ? 0.45f : w.Minimised ? 0.62f : 1f;
+                DrawIcon(g, icon, box, opacity);
             }
 
             if (settings.IconsOnly) continue;
 
-            var caption = Vertical
-                ? new Rectangle(slot.X + IconSize + 14, slot.Y, slot.Width - IconSize - 20, slot.Height)
-                : new Rectangle(slot.X + IconSize + 14, slot.Y, slot.Width - IconSize - 20, slot.Height);
+            var caption = new Rectangle(slot.X + IconSize + 14, slot.Y, slot.Width - IconSize - 20, slot.Height);
             using var format = new StringFormat
             {
                 LineAlignment = StringAlignment.Center,
                 Trimming = StringTrimming.EllipsisCharacter,
                 FormatFlags = StringFormatFlags.NoWrap,
             };
-            g.DrawString(w.Title, label, w.Minimised ? dim : text, caption, format);
+            g.DrawString(w?.Title ?? NameOf(button.Path), label, w is null || w.Minimised ? dim : text,
+                         caption, format);
         }
 
         PaintTray(g);
+    }
+
+    private static void DrawIcon(Graphics g, Bitmap icon, Rectangle box, float opacity)
+    {
+        if (opacity >= 1f) { g.DrawImage(icon, box); return; }
+
+        var matrix = new System.Drawing.Imaging.ColorMatrix { Matrix33 = opacity };
+        using var attributes = new System.Drawing.Imaging.ImageAttributes();
+        attributes.SetColorMatrix(matrix);
+
+        g.DrawImage(icon, box, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, attributes);
     }
 
     private void PaintTray(Graphics g)
@@ -426,6 +553,8 @@ public sealed class TaskbarWindow : Form
             appBar.Dispose();          // must happen, or the desktop stays short of the strip
             foreach (var icon in icons.Values) icon.Dispose();
             icons.Clear();
+            foreach (var icon in fileIcons.Values) icon.Dispose();
+            fileIcons.Clear();
         }
         base.Dispose(disposing);
     }

@@ -87,6 +87,12 @@ public sealed class BarSettings
     /// <summary>How far a floating bar sits from the edges of its reserved strip, in pixels.</summary>
     public int FloatMargin { get; set; } = 10;
 
+    /// <summary>
+    /// Applications kept on the bar whether or not they are running, in the order they appear.
+    /// Stored as full executable paths.
+    /// </summary>
+    public List<string> Pinned { get; set; } = new();
+
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
 
@@ -138,6 +144,15 @@ public sealed class SplitConfig
 
     /// <summary>Whether the taskbar was set to auto-hide before we hid it. Bookkeeping, not a preference.</summary>
     public bool? TaskbarRestore { get; set; }
+
+    /// <summary>
+    /// Stop Windows animating windows into the taskbar. With the taskbar hidden the animation flies
+    /// them at a corner where nothing is, which reads as a glitch.
+    /// </summary>
+    public bool StopMinimiseAnimation { get; set; }
+
+    /// <summary>Whether the animation was on before we turned it off. Bookkeeping, not a preference.</summary>
+    public bool? AnimationRestore { get; set; }
 
     /// <summary>Disable Windows' own Aero Snap while we run, so it stops competing with our zones.</summary>
     public bool SuppressWindowsSnap { get; set; }
@@ -414,6 +429,7 @@ public sealed class SplitConfig
         Padding = o.Padding;
         SuppressWindowsSnap = o.SuppressWindowsSnap;
         HideWindowsTaskbar = o.HideWindowsTaskbar;
+        StopMinimiseAnimation = o.StopMinimiseAnimation;
         // SnapRestore is deliberately NOT copied: it records what this process changed on the
         // system, and the disk copy may be older than what we are currently holding.
         DragToZone = o.DragToZone;

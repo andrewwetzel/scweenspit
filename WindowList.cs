@@ -3,7 +3,7 @@ using static ScweenSpit.Native;
 
 namespace ScweenSpit;
 
-public sealed record TaskWindow(IntPtr Handle, string Title, string Process, bool Minimised);
+public sealed record TaskWindow(IntPtr Handle, string Title, string Process, string Path, bool Minimised);
 
 /// <summary>
 /// Works out which windows belong on a taskbar. This is the same judgement Alt+Tab makes, and it is
@@ -42,7 +42,8 @@ public static class WindowList
             var title = WindowTitle(hWnd);
             if (title.Length == 0) return true;                 // nothing to label a button with
 
-            found.Add(new TaskWindow(hWnd, title, WinEventHookService.OwnerProcessOf(hWnd), IsIconic(hWnd)));
+            found.Add(new TaskWindow(hWnd, title, WinEventHookService.OwnerProcessOf(hWnd),
+                                     ExecutablePath(hWnd), IsIconic(hWnd)));
             return true;
         }, IntPtr.Zero);
 
@@ -109,6 +110,25 @@ public static class WindowList
     private static IntPtr Ask(IntPtr hWnd, int which) =>
         SendMessageTimeout(hWnd, WM_GETICON, new IntPtr(which), IntPtr.Zero, SMTO_ABORTIFHUNG, 120, out var result) != IntPtr.Zero
             ? result : IntPtr.Zero;
+
+    /// <summary>Asks a window to close, the way its own close button would.</summary>
+    public static void Close(IntPtr hWnd) => PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+
+    /// <summary>The icon of an application that is not running, taken from its executable.</summary>
+    public static Bitmap? IconForFile(string path)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(path)) return null;
+
+            using var icon = Icon.ExtractAssociatedIcon(path);
+            if (icon is null) return null;
+
+            using var bitmap = icon.ToBitmap();
+            return new Bitmap(bitmap, 32, 32);
+        }
+        catch { return null; }
+    }
 
     /// <summary>Brings a window forward, or puts it away if it is already in front.</summary>
     public static void Toggle(IntPtr hWnd)

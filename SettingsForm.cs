@@ -390,6 +390,19 @@ public sealed class SettingsForm : Form
             "the system tray — go with it. The indicators below are ours; the tray itself belongs to " +
             "Explorer and cannot be borrowed."));
 
+        var animation = Theme.Toggle("Stop windows flying into the taskbar when minimised",
+                                     config.StopMinimiseAnimation);
+        animation.CheckedChanged += (_, _) =>
+        {
+            config.StopMinimiseAnimation = animation.Checked;
+            Save();
+        };
+        page.Controls.Add(animation);
+        page.Controls.Add(Theme.Caption(
+            "With the taskbar hidden, Windows still animates a minimised window towards where its " +
+            "button would have been — a corner with nothing in it. This turns that animation off. " +
+            "It is a system setting and is restored when ScweenSpit exits."));
+
         if (!Taskbar.CanMove)
         {
             page.Controls.Add(new Label

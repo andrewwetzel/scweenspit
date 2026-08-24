@@ -177,9 +177,19 @@ gap all round and every corner rounded. The space stays reserved either way — 
 so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
-It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
+It shows running windows as icons, accents the foreground one, underlines the rest, and fades the
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
+
+**Right-click any button to pin it.** A pinned application keeps its place whether or not it is
+running: faded and unmarked when it is not, and clicking launches it. Everything unpinned follows in
+the order it appeared, and stays there — `EnumWindows` reports z-order, which changes every time
+anything is activated, so using it directly makes the buttons reshuffle under the pointer. Right-click
+also closes a window.
+
+**Stop windows flying into the taskbar when minimised** is on the same page. With the taskbar hidden
+Windows still animates a minimised window towards where its button would have been — a corner with
+nothing in it — which reads as a glitch. It is a system setting, so it is restored on exit.
 
 The status cluster at the far end carries the **ScweenSpit button**, then **volume, network, battery
 and a clock**. Each opens the matching Windows settings page; ScweenSpit opens its own menu, which

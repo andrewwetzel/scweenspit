@@ -21,6 +21,9 @@ public sealed class BarManager : IDisposable
     /// <summary>Raised when a bar's ScweenSpit button is clicked, with the screen position to open at.</summary>
     public event Action<System.Drawing.Point>? MenuRequested;
 
+    /// <summary>Raised when a bar's pinned list changes and needs saving.</summary>
+    public event Action? PinsChanged;
+
     private ZoneManager? zones;
 
     public void Apply(SplitConfig config, ZoneManager zoneManager)
@@ -49,6 +52,7 @@ public sealed class BarManager : IDisposable
             {
                 var bar = new TaskbarWindow(monitor, settings, zoneManager);
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
+                bar.PinsChanged += () => PinsChanged?.Invoke();
 
                 // Give it its rectangle before the handle exists, so it is created on the display it
                 // belongs to rather than being born on the primary and moved afterwards.

@@ -117,6 +117,33 @@ public static class Taskbar
         foreach (var bar in secondary) yield return bar;
     }
 
+    /// <summary>
+    /// Whether Windows animates windows into and out of the taskbar.
+    ///
+    /// With the taskbar hidden the animation still plays, flying the window toward where its button
+    /// would have been — usually the bottom-left corner — which looks like a glitch because there is
+    /// nothing there. Turning it off is a per-user system setting, so it is restored on exit.
+    /// </summary>
+    public static bool MinimiseAnimation
+    {
+        get
+        {
+            var info = new ANIMATIONINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<ANIMATIONINFO>() };
+            return SystemParametersInfoAnimation(SPI_GETANIMATION, info.cbSize, ref info, 0) && info.iMinAnimate != 0;
+        }
+        set
+        {
+            var info = new ANIMATIONINFO
+            {
+                cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<ANIMATIONINFO>(),
+                iMinAnimate = value ? 1 : 0,
+            };
+            if (!SystemParametersInfoAnimation(SPI_SETANIMATION, info.cbSize, ref info, SPIF_SENDCHANGE))
+                Log.Write($"could not set minimise animation: err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            else Log.Write($"minimise animation set to {value}");
+        }
+    }
+
     /// <summary>Where the taskbar actually is right now, via the documented shell API.</summary>
     public static TaskbarEdge? Current()
     {
