@@ -9,7 +9,7 @@ namespace ScweenSpit;
 /// </summary>
 public sealed class BarManager : IDisposable
 {
-    private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly);
+    private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly, bool IconsOnly, bool ShowStatus);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
@@ -29,7 +29,8 @@ public sealed class BarManager : IDisposable
         {
             if (!monitors.TryGetValue(device, out var monitor)) continue;
 
-            var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly);
+            var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
+                                     settings.IconsOnly, settings.ShowStatus);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 
@@ -37,8 +38,7 @@ public sealed class BarManager : IDisposable
 
             try
             {
-                var bar = new TaskbarWindow(monitor, SplitConfig.ParseEdge(settings.Edge),
-                                            settings.Thickness, settings.ThisDisplayOnly);
+                var bar = new TaskbarWindow(monitor, settings);
                 bars[device] = bar;
                 applied[device] = wanted;
                 bar.Show();
@@ -48,6 +48,20 @@ public sealed class BarManager : IDisposable
             {
                 Log.Write($"could not create bar on {device}: {ex}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Re-negotiates every bar's strip. Called when the space available changes for reasons the
+    /// appbar protocol will not tell us about — hiding the shell's taskbar, most of all, which frees
+    /// its reservation and would otherwise leave our bar floating above the gap it left behind.
+    /// </summary>
+    public void Reposition()
+    {
+        foreach (var bar in bars.Values)
+        {
+            try { bar.Reposition(); }
+            catch (Exception ex) { Log.Write($"reposition failed on {bar.Device}: {ex.Message}"); }
         }
     }
 

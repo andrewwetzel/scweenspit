@@ -76,7 +76,13 @@ public sealed class BarSettings
     public string Edge { get; set; } = "Right";
 
     /// <summary>Width of a side bar, or height of a top/bottom one, in pixels.</summary>
-    public int Thickness { get; set; } = 210;
+    public int Thickness { get; set; } = 50;
+
+    /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
+    public bool IconsOnly { get; set; } = true;
+
+    /// <summary>Show battery, network, volume and the clock.</summary>
+    public bool ShowStatus { get; set; } = true;
 
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
@@ -104,6 +110,15 @@ public sealed class SplitConfig
 
     /// <summary>Gap in pixels left around every zone. 0 makes zones touch edge to edge.</summary>
     public int Padding { get; set; }
+
+    /// <summary>
+    /// Hide the shell's taskbars entirely while we run. Restored on exit, and on the next launch if
+    /// this one is killed — the same bookkeeping as <see cref="SnapRestore"/>, for the same reason.
+    /// </summary>
+    public bool HideWindowsTaskbar { get; set; }
+
+    /// <summary>Whether the taskbar was set to auto-hide before we hid it. Bookkeeping, not a preference.</summary>
+    public bool? TaskbarRestore { get; set; }
 
     /// <summary>Disable Windows' own Aero Snap while we run, so it stops competing with our zones.</summary>
     public bool SuppressWindowsSnap { get; set; }
@@ -366,6 +381,7 @@ public sealed class SplitConfig
         DebounceMs = o.DebounceMs;
         Padding = o.Padding;
         SuppressWindowsSnap = o.SuppressWindowsSnap;
+        HideWindowsTaskbar = o.HideWindowsTaskbar;
         // SnapRestore is deliberately NOT copied: it records what this process changed on the
         // system, and the disk copy may be older than what we are currently holding.
         DragToZone = o.DragToZone;

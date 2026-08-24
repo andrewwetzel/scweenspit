@@ -155,17 +155,39 @@ What does work on Windows 11:
 Windows will not put *its* taskbar anywhere but the bottom. Nothing stops us docking one of ours to
 any edge — which is exactly how the commercial tools do it.
 
-Turn one on per display under **Taskbar**, pick an edge and a thickness. It registers as a Win32
-**appbar**, the same mechanism the shell's own taskbar uses, so Windows shrinks the work area and
-every application on the machine keeps clear of it — not just windows ScweenSpit manages. Zones
-follow automatically, because they are measured from the work area.
+Turn one on per display under **Taskbar** — each display is a separate switch, so you can have a bar
+on one screen and nothing on the others. Pick an edge and a thickness; it defaults to 50px of icons,
+the proportions of a real taskbar.
 
-It lists application windows with their icons, marks the active one, dims the minimised ones, and
-carries a clock. Clicking a button brings that window forward, or minimises it if it is already in
-front. By default it lists only windows on its own display.
+It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar uses, so Windows
+shrinks the work area and every application on the machine keeps clear of it — not just windows
+ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
-Pair it with **auto-hide** and you have a vertical bar on the right and nothing along the bottom —
-the arrangement Windows 11 removed.
+It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
+minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
+front. Turn off *Icons only* for titles as well, and give it more room to put them in.
+
+The status area carries **volume, network, battery and a clock**, each opening the matching Windows
+settings page when clicked. They are drawn as vector shapes rather than glyph-font characters,
+because which icon font exists and which code point means what varies by Windows version, and a
+missing glyph renders as a hollow box with no warning.
+
+**Hide the Windows taskbar entirely** is on the same page. It takes the shell's bars off screen and
+gives their reserved strip back, so a bar of yours on the same edge sits flush rather than floating
+above a dead band — and it re-asserts, because Explorer puts an auto-hidden taskbar back whenever the
+pointer reaches its edge. Everything is restored when ScweenSpit exits, and on the next launch if
+this one is killed.
+
+### What our bar cannot do
+
+**Third-party notification icons.** Discord, Steam, backup agents — anything that calls
+`Shell_NotifyIcon` — send their icons to the window of class `Shell_TrayWnd`, which belongs to
+Explorer. There is no supported way for another process to receive them; a program can only have
+them by *being* the shell, which means replacing Explorer outright. So hiding the Windows taskbar
+hides those icons with it.
+
+If you need them, use **auto-hide** instead of **hide**: the shell bar stays one mouse-move away at
+its edge, while your bar owns the space the rest of the time.
 
 Deciding what belongs on a taskbar is the same judgement Alt+Tab makes, and it is fiddlier than it
 looks: owned dialogs, tool windows, and the cloaked husks suspended UWP apps leave behind all have

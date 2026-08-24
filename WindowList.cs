@@ -84,17 +84,20 @@ public static class WindowList
     /// </summary>
     public static Bitmap? IconFor(IntPtr hWnd)
     {
-        IntPtr handle = Ask(hWnd, ICON_SMALL2);
+        IntPtr handle = Ask(hWnd, ICON_BIG);
+        if (handle == IntPtr.Zero) handle = Ask(hWnd, ICON_SMALL2);
         if (handle == IntPtr.Zero) handle = Ask(hWnd, ICON_SMALL);
-        if (handle == IntPtr.Zero) handle = Ask(hWnd, ICON_BIG);
-        if (handle == IntPtr.Zero) handle = GetClassLongPtr(hWnd, GCLP_HICONSM);
         if (handle == IntPtr.Zero) handle = GetClassLongPtr(hWnd, GCLP_HICON);
+        if (handle == IntPtr.Zero) handle = GetClassLongPtr(hWnd, GCLP_HICONSM);
         if (handle == IntPtr.Zero) return null;
 
         try
         {
+            // Kept at 32px and scaled down when drawn: a 16px source looks smeared on a taskbar
+            // sized for touch, and the caller decides how large the buttons are.
             using var icon = Icon.FromHandle(handle);
-            return new Bitmap(icon.ToBitmap(), 16, 16);
+            using var bitmap = icon.ToBitmap();
+            return new Bitmap(bitmap, 32, 32);
         }
         catch { return null; }
     }

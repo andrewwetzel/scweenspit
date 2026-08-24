@@ -55,6 +55,44 @@ public static class Taskbar
         }
     }
 
+    /// <summary>
+    /// Hides or restores the shell's taskbars — the primary one and any on secondary displays.
+    ///
+    /// Hiding the window on its own is not enough: the taskbar's appbar registration still reserves
+    /// its strip, so the desktop would keep a dead band along the bottom. Auto-hide shrinks that
+    /// reservation to a couple of pixels, so the two are done together.
+    /// </summary>
+    public static void SetHidden(bool hidden)
+    {
+        int shown = 0;
+        foreach (var bar in ShellBars())
+        {
+            ShowWindow(bar, hidden ? 0 /* SW_HIDE */ : 5 /* SW_SHOW */);
+            shown++;
+        }
+
+        // Order matters on the way back: restore the reservation before revealing the window, or
+        // the bar reappears over content that has not been given room for it yet.
+        if (hidden) AutoHide = true;
+
+        Log.Write($"shell taskbars {(hidden ? "hidden" : "restored")} ({shown} found)");
+    }
+
+    private static IEnumerable<IntPtr> ShellBars()
+    {
+        var primary = FindWindow("Shell_TrayWnd", null);
+        if (primary != IntPtr.Zero) yield return primary;
+
+        var secondary = new List<IntPtr>();
+        EnumWindows((hWnd, _) =>
+        {
+            if (ClassNameOf(hWnd) == "Shell_SecondaryTrayWnd") secondary.Add(hWnd);
+            return true;
+        }, IntPtr.Zero);
+
+        foreach (var bar in secondary) yield return bar;
+    }
+
     /// <summary>Where the taskbar actually is right now, via the documented shell API.</summary>
     public static TaskbarEdge? Current()
     {

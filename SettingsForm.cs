@@ -337,6 +337,22 @@ public sealed class SettingsForm : Form
             "works on Windows 11. Paired with a zone set to cover the taskbar, it gives you the " +
             "whole display and the bar on demand."));
 
+        var hide = Theme.Toggle("Hide the Windows taskbar entirely", config.HideWindowsTaskbar);
+        hide.CheckedChanged += (_, _) =>
+        {
+            config.HideWindowsTaskbar = hide.Checked;
+            Save();
+            ShowTaskbar();
+        };
+        page.Controls.Add(hide);
+        page.Controls.Add(Theme.Caption(
+            "Takes the shell's taskbars off screen and gives their reserved strip back, so a bar of " +
+            "yours docked to the same edge sits flush against it rather than above a gap. Restored " +
+            "when ScweenSpit exits, and on the next launch if this one is killed.\n\n" +
+            "Note that third-party notification icons — Discord, Steam, and anything else living in " +
+            "the system tray — go with it. The indicators below are ours; the tray itself belongs to " +
+            "Explorer and cannot be borrowed."));
+
         if (!Taskbar.CanMove)
         {
             page.Controls.Add(new Label
@@ -412,6 +428,14 @@ public sealed class SettingsForm : Form
             var onlyHere = Theme.Toggle("List only windows on this display", settings.ThisDisplayOnly);
             onlyHere.CheckedChanged += (_, _) => { settings.ThisDisplayOnly = onlyHere.Checked; Save(); };
             page.Controls.Add(onlyHere);
+
+            var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
+            iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };
+            page.Controls.Add(iconsOnly);
+
+            var status = Theme.Toggle("Show volume, network, battery and the clock", settings.ShowStatus);
+            status.CheckedChanged += (_, _) => { settings.ShowStatus = status.Checked; Save(); };
+            page.Controls.Add(status);
         }
     }
 

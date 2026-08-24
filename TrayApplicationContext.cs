@@ -21,6 +21,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     // it continuously instead.
     private readonly System.Windows.Forms.Timer foregroundWatch = new() { Interval = 400 };
     private IntPtr lastForeground;
+
+    // Explorer puts an auto-hidden taskbar back on screen whenever the pointer reaches its edge,
+    // so keeping it hidden means saying so repeatedly rather than once.
+    private readonly System.Windows.Forms.Timer taskbarWatch = new() { Interval = 2000 };
     private readonly SplitConfig config;
     private SettingsForm? settings;
 
@@ -67,7 +71,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         foregroundWatch.Tick += (_, _) => TrackForeground();
         foregroundWatch.Start();
 
+        taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.SetHidden(true); };
+
         ApplySnapSuppression();
+        ApplyTaskbarVisibility();
         bars.Apply(config);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
@@ -109,7 +116,11 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void ApplyChanges()
     {
         ApplySnapSuppression();
+
+        // Order matters: free the shell taskbar's reserved strip first, then let our bars claim it.
+        ApplyTaskbarVisibility();
         bars.Apply(config);
+        bars.Reposition();
 
         // Drag-to-zone rides the same hooks as clamping, so the hooks must stay up for either.
         if (config.AutoClamp || config.DragToZone) hook.Start(); else hook.Stop();
@@ -190,6 +201,32 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (!WinEventHookService.IsClampTarget(fg)) return;
 
         lastForeground = fg;
+    }
+
+    /// <summary>
+    /// Reconciles the shell taskbar with the preference, remembering its previous auto-hide state so
+    /// it can be put back — including after a launch that was killed rather than closed.
+    /// </summary>
+    private void ApplyTaskbarVisibility()
+    {
+        if (config.HideWindowsTaskbar)
+        {
+            if (config.TaskbarRestore is null)
+            {
+                config.TaskbarRestore = Taskbar.AutoHide;
+                config.Save();          // persisted before we change anything, not after
+            }
+            Taskbar.SetHidden(true);
+            taskbarWatch.Start();
+        }
+        else if (config.TaskbarRestore is { } wasAutoHidden)
+        {
+            taskbarWatch.Stop();
+            Taskbar.SetHidden(false);
+            Taskbar.AutoHide = wasAutoHidden;
+            config.TaskbarRestore = null;
+            config.Save();
+        }
     }
 
     private void ExcludeActiveApp()
@@ -314,6 +351,15 @@ public sealed class TrayApplicationContext : ApplicationContext
             hook.Dispose();
             overlay.Dispose();
             settings?.Dispose();
+
+            taskbarWatch.Dispose();
+            if (config.TaskbarRestore is { } wasAutoHidden)
+            {
+                Taskbar.SetHidden(false);
+                Taskbar.AutoHide = wasAutoHidden;
+                config.TaskbarRestore = null;
+                config.Save();
+            }
 
             if (config.SnapRestore is { } saved)
             {
