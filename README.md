@@ -193,6 +193,15 @@ above a dead band — and it re-asserts, because Explorer puts an auto-hidden ta
 pointer reaches its edge. Everything is restored when ScweenSpit exits, and on the next launch if
 this one is killed.
 
+Hiding the Windows taskbar also hands its space to the zones. Windows keeps reporting a reduced work
+area even with the bar hidden — the appbar registration outlives the window — so ScweenSpit measures
+against the full display instead once you have hidden it. Otherwise a bar docked to the bottom would
+float above a strip of dead space where the taskbar used to be.
+
+Growing a bar takes room from its zone, and windows already sitting there do not move on their own,
+so ScweenSpit re-places the ones the bar would cover. It waits until you stop adjusting first — a
+thickness spinner fires on every step, and re-placing everything on each one is unpleasant to watch.
+
 ### Why "fill over the taskbar" sometimes does nothing
 
 That setting grows a zone into the space the taskbar reserves. If nothing is reserving space — the

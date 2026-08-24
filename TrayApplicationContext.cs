@@ -25,6 +25,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     // Explorer puts an auto-hidden taskbar back on screen whenever the pointer reaches its edge,
     // so keeping it hidden means saying so repeatedly rather than once.
     private readonly System.Windows.Forms.Timer taskbarWatch = new() { Interval = 2000 };
+
+    // Debounced: a thickness spinner fires on every step, and re-placing every window under the bar
+    // on each one would be both slow and unpleasant to watch.
+    private readonly System.Windows.Forms.Timer reflow = new() { Interval = 600 };
     private readonly SplitConfig config;
     private SettingsForm? settings;
 
@@ -80,6 +84,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         // Re-assert only the hide. Re-applying auto-hide here would make Explorer re-lay-out every
         // two seconds, which is itself what puts the taskbar back.
         taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.Hide(true); };
+        reflow.Tick += (_, _) => { reflow.Stop(); ReflowAroundBars(); };
 
         ApplySnapSuppression();
         ApplyTaskbarVisibility();
@@ -130,6 +135,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplyTaskbarVisibility();
         bars.Apply(config, zones);
         bars.Reposition();
+
+        // A bar that just grew is now drawn over whatever was already there.
+        reflow.Stop();
+        reflow.Start();
 
         // Drag-to-zone rides the same hooks as clamping, so the hooks must stay up for either.
         if (config.AutoClamp || config.DragToZone) hook.Start(); else hook.Stop();
@@ -235,6 +244,19 @@ public sealed class TrayApplicationContext : ApplicationContext
             Taskbar.AutoHide = wasAutoHidden;
             config.TaskbarRestore = null;
             config.Save();
+        }
+    }
+
+    /// <summary>Moves windows out from under any bar that has taken space they were occupying.</summary>
+    private void ReflowAroundBars()
+    {
+        foreach (var geo in ZoneManager.AllMonitors())
+        {
+            if (!config.Bars.TryGetValue(geo.Device, out var bar)) continue;
+
+            // Only zone-scoped bars need this. A full-display bar is an appbar, so Windows shrinks
+            // the work area and applications move themselves.
+            if (zones.BarStrip(geo, bar) is { } strip) hook.ArrangeOverlapping(strip);
         }
     }
 
@@ -362,6 +384,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             settings?.Dispose();
 
             taskbarWatch.Dispose();
+            reflow.Dispose();
             if (config.TaskbarRestore is { } wasAutoHidden)
             {
                 Taskbar.SetHidden(false);

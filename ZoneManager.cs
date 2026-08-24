@@ -172,18 +172,30 @@ public sealed class ZoneManager(SplitConfig config)
     /// </summary>
     public RECT EffectiveWork(MonitorGeometry geo)
     {
-        var m = Config.LayoutFor(geo.Device).Margins;
-        if (m is null || !m.Any) return geo.Work;
+        var basis = Basis(geo);
 
-        var fit = m.Fitted(geo.Work.Width, geo.Work.Height);
+        var m = Config.LayoutFor(geo.Device).Margins;
+        if (m is null || !m.Any) return basis;
+
+        var fit = m.Fitted(basis.Width, basis.Height);
         return new RECT
         {
-            Left = geo.Work.Left + fit.Left,
-            Top = geo.Work.Top + fit.Top,
-            Right = geo.Work.Right - fit.Right,
-            Bottom = geo.Work.Bottom - fit.Bottom,
+            Left = basis.Left + fit.Left,
+            Top = basis.Top + fit.Top,
+            Right = basis.Right - fit.Right,
+            Bottom = basis.Bottom - fit.Bottom,
         };
     }
+
+    /// <summary>
+    /// The area zones are measured against, before margins.
+    ///
+    /// Normally the work area, so the taskbar is avoided. But with the shell taskbar hidden its
+    /// reservation is dead space: the appbar registration survives the window being hidden, so
+    /// Windows keeps reporting a reduced work area for a strip nothing is drawn in. Reclaiming it
+    /// is the entire point of having hidden the thing.
+    /// </summary>
+    public RECT Basis(MonitorGeometry geo) => Config.HideWindowsTaskbar ? geo.Bounds : geo.Work;
 
     private RECT Pad(RECT r)
     {
@@ -201,13 +213,14 @@ public sealed class ZoneManager(SplitConfig config)
         bool wholeArea = frac.Count == 1 && frac[0].L <= 0.001 && frac[0].T <= 0.001
                                          && frac[0].R >= 0.999 && frac[0].B >= 0.999;
 
-        // "One full-size zone" only means "leave it alone" if that zone really is the whole work
-        // area. With margins reserved there is still work to do, and claiming otherwise would let
-        // a maximize be restored and re-placed at the identical rect - silently losing the
+        // "One full-size zone" only means "leave it alone" if that zone really is the whole area we
+        // lay out in. With margins reserved there is still work to do, and claiming otherwise would
+        // let a maximize be restored and re-placed at the identical rect - silently losing the
         // maximized state for no visible change.
         var eff = EffectiveWork(geo);
-        bool untouched = eff.Left == geo.Work.Left && eff.Top == geo.Work.Top
-                      && eff.Right == geo.Work.Right && eff.Bottom == geo.Work.Bottom;
+        var basis = Basis(geo);
+        bool untouched = eff.Left == basis.Left && eff.Top == basis.Top
+                      && eff.Right == basis.Right && eff.Bottom == basis.Bottom;
 
         return wholeArea && untouched;
     }

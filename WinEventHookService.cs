@@ -306,7 +306,16 @@ public sealed class WinEventHookService : IDisposable
     /// this at startup or on every settings change would restore maximized windows and drag a
     /// fullscreen game out of its display the moment anyone touched a spinner.
     /// </summary>
-    public int ArrangeAll()
+    public int ArrangeAll() => Arrange(null);
+
+    /// <summary>
+    /// Re-places only the windows sitting in <paramref name="area"/>. Used when a bar grows into
+    /// space a window already occupies: the zone shrinks, but the windows in it do not follow of
+    /// their own accord, so the bar ends up drawn over them.
+    /// </summary>
+    public int ArrangeOverlapping(RECT area) => Arrange(area);
+
+    private int Arrange(RECT? within)
     {
         int moved = 0;
 
@@ -316,6 +325,7 @@ public sealed class WinEventHookService : IDisposable
             if (!IsClampTarget(hWnd)) continue;
             if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
             if (!GetWindowRect(hWnd, out var rect)) continue;
+            if (within is { } area && ZoneManager.OverlapArea(rect, area) <= 0) continue;
             if (!ZoneManager.TryGetMonitor(hWnd, out var geo) || zones.IsOptedOut(geo)) continue;
 
             var rects = zones.ZonesFor(geo);
@@ -325,7 +335,7 @@ public sealed class WinEventHookService : IDisposable
             moved++;
         }
 
-        Log.Write($"arrange: {moved} window(s) placed");
+        Log.Write($"arrange{(within is null ? "" : " (overlapping)")}: {moved} window(s) placed");
         return moved;
     }
 
