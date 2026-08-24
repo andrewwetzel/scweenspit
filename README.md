@@ -199,6 +199,11 @@ also closes a window.
 Windows still animates a minimised window towards where its button would have been — a corner with
 nothing in it — which reads as a glitch. It is a system setting, so it is restored on exit.
 
+**Show Claude usage bars** puts the claude.ai usage strip at the near end of the status cluster. It
+appears as soon as you tick it, showing an empty track until usage tracking is switched on and a
+session key is saved under Settings → Claude usage — hiding it until then made the toggle look
+broken. Clicking it goes to the settings page while it is unconfigured, and to claude.ai once it is.
+
 The status cluster at the far end carries the **ScweenSpit button**, then **volume, network, battery
 and a clock**. Each opens the matching Windows settings page; ScweenSpit opens its own menu, which
 matters once the Windows taskbar is hidden — our tray icon goes with it, and without this there

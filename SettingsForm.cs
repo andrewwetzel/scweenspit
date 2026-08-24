@@ -30,6 +30,7 @@ public sealed class SettingsForm : Form
     };
     private readonly System.Windows.Forms.Timer statusFade = new() { Interval = 9000 };
     private readonly List<Button> navButtons = [];
+    private readonly Dictionary<string, Button> navByTitle = new(StringComparer.OrdinalIgnoreCase);
 
     private ListBox? excludeList;
 
@@ -126,7 +127,14 @@ public sealed class SettingsForm : Form
         b.Click += (_, _) => { show(); Select(b); };
 
         navButtons.Add(b);
+        navByTitle[title] = b;
         nav.Controls.Add(b);
+    }
+
+    /// <summary>Opens one of the pages as though its nav entry had been clicked.</summary>
+    public void GoTo(string title)
+    {
+        if (navByTitle.TryGetValue(title, out var button)) button.PerformClick();
     }
 
     private void Select(Button active)
@@ -582,8 +590,26 @@ public sealed class SettingsForm : Form
             page.Controls.Add(status);
 
             var usage = Theme.Toggle("Show Claude usage bars", settings.ShowUsage);
-            usage.CheckedChanged += (_, _) => { settings.ShowUsage = usage.Checked; Save(); };
+            usage.CheckedChanged += (_, _) => { settings.ShowUsage = usage.Checked; Save(); BeginInvoke(ShowTaskbar); };
             page.Controls.Add(usage);
+
+            // A toggle that appears to do nothing is worse than one that is not there. Say what is
+            // still missing, and offer the page that fixes it.
+            if (settings.ShowUsage && !ClaudeUsage.Enabled)
+            {
+                page.Controls.Add(new Label
+                {
+                    Text = "⚠  The strip is on the bar, but has nothing to show until usage tracking "
+                         + "is switched on and a session key is saved.",
+                    AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                    Font = Theme.Face(9f), Margin = new Padding(0, 2, 0, 4),
+                });
+
+                var setUp = Theme.Action("Set up Claude usage", primary: true);
+                setUp.AutoSize = true;
+                setUp.Click += (_, _) => BeginInvoke(() => GoTo("Claude usage"));
+                page.Controls.Add(setUp);
+            }
 
             if (!config.Claude.Enabled || string.IsNullOrWhiteSpace(config.Claude.SessionKey))
                 page.Controls.Add(Theme.Caption(

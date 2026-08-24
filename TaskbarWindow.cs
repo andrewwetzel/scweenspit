@@ -228,7 +228,12 @@ public sealed class TaskbarWindow : Form
     /// Whether the claude.ai strip is drawn here: this bar has to want it, and the account has to be
     /// configured. An enabled-but-keyless strip would be a permanent placeholder taking up room.
     /// </summary>
-    private bool UsageVisible => settings.ShowUsage && ClaudeUsage.Enabled;
+    /// <summary>
+    /// Shown whenever the bar is set to show it. Deliberately not also gated on usage tracking being
+    /// configured: hiding it until a session key exists means ticking the box appears to do nothing,
+    /// with no hint that anything further is needed. The strip renders its own unconfigured state.
+    /// </summary>
+    private bool UsageVisible => settings.ShowUsage;
 
     private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
 
@@ -359,7 +364,10 @@ public sealed class TaskbarWindow : Form
 
         if (UsageVisible && UsageArea.Contains(e.Location))
         {
-            SystemStatus.Open(ClaudeUsage.UsagePage);
+            // Not set up yet: the useful destination is our own settings, not the website that
+            // cannot tell you anything until a key is in place.
+            if (ClaudeUsage.Enabled) SystemStatus.Open(ClaudeUsage.UsagePage);
+            else MenuRequested?.Invoke(Cursor.Position);
             return;
         }
 
