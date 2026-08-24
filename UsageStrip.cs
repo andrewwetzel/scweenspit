@@ -80,7 +80,7 @@ internal static class UsageStrip
         // which reads as a rendering fault rather than as a prompt.
         var (text, colour) = headline is not null
             ? ($"{headline.Percent}%", Fill(headline.Percent))
-            : reading is { NeedsKey: true } ? ("set up", Theme.Accent)
+            : reading is { NeedsKey: true } ? (ClaudeUsage.HasKey ? "expired" : "set up", Theme.Accent)
             : reading is { Error: not null } ? ("error", High)
             : ("···", Theme.Muted);
 
@@ -137,7 +137,11 @@ internal static class UsageStrip
     public static string Tip(UsageReading? reading)
     {
         if (reading is null) return "Claude usage — starting up";
-        if (reading.NeedsKey) return "Claude usage — a session key is needed (Settings ▸ Claude usage)";
+        // The specific reason first: "expired" and "never entered" are the same symptom with very
+        // different answers, and collapsing them sends people to re-paste a key that is already there.
+        if (reading.NeedsKey)
+            return $"Claude usage — {reading.Error ?? "a session key is needed"} (Settings ▸ Claude usage)";
+
         if (reading.Error is not null) return $"Claude usage — {reading.Error}";
         if (reading.Limits.Count == 0) return "Claude usage — no limits reported";
 

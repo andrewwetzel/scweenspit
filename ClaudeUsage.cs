@@ -77,11 +77,20 @@ public static class ClaudeUsage
     /// </summary>
     private static volatile bool enabled;
 
+    /// <summary>Mirrors whether a key is stored, for the same reason.</summary>
+    private static volatile bool hasKey;
+
     /// <summary>The latest reading, or null when usage tracking is off or has never run.</summary>
     public static UsageReading? Current => current;
 
     /// <summary>True when the feature is switched on and has a key worth sending.</summary>
     public static bool Enabled => enabled;
+
+    /// <summary>
+    /// True when a key is stored. Distinguishes "nothing has been entered" from "what was entered is
+    /// no longer accepted" — the same symptom otherwise, and very different answers.
+    /// </summary>
+    public static bool HasKey => hasKey;
 
     /// <summary>True if a value looks like a session key rather than a cleared or bogus cookie.</summary>
     public static bool Plausible(string? key) =>
@@ -97,7 +106,8 @@ public static class ClaudeUsage
         {
             settings = config;
             persist = save;
-            enabled = config.Enabled && !string.IsNullOrWhiteSpace(config.SessionKey);
+            hasKey = !string.IsNullOrWhiteSpace(config.SessionKey);
+            enabled = config.Enabled && hasKey;
 
             if (!config.Enabled)
             {
@@ -143,6 +153,7 @@ public static class ClaudeUsage
             {
                 settings.SessionKey = null;
                 settings.OrgId = null;
+                hasKey = false;
                 enabled = false;
                 current = null;
                 persist?.Invoke();
@@ -156,6 +167,7 @@ public static class ClaudeUsage
 
             settings.SessionKey = stored;
             settings.OrgId = null;                 // a different key may be a different account
+            hasKey = true;
             enabled = settings.Enabled;
             current = null;
             persist?.Invoke();
@@ -224,7 +236,11 @@ public static class ClaudeUsage
         {
             // Nothing worth sending. Say so rather than spending a request every interval on a 401
             // whose answer is already known.
-            current = new UsageReading([], "Session key needed", true);
+            Log.WriteOnce("usage-nokey", hasKey
+                ? "usage: a key is stored but could not be decrypted or no longer looks like a key"
+                : "usage: no session key stored");
+
+            current = new UsageReading([], hasKey ? "Stored key is unreadable" : "Session key needed", true);
             return;
         }
 
@@ -246,6 +262,7 @@ public static class ClaudeUsage
 
         if (reply.Status is 401 or 403)
         {
+            Log.WriteOnce($"usage-{reply.Status}", $"usage: claude.ai rejected the key ({reply.Status})");
             current = new UsageReading([], "Session key expired", true);
             return;
         }
