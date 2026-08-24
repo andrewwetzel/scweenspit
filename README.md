@@ -178,6 +178,14 @@ it, so a 50px bar is 50px whether it floats or not. The space stays reserved eit
 bar moves in, so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
+Applications are told apart by the id their windows declare, not by their executable — which is how
+a Chrome PWA gets its own icon rather than disappearing into the browser's, despite both being
+`chrome.exe`. It is the same mechanism the Windows taskbar groups by. Where a window declares no id,
+the executable is used instead.
+
+ScweenSpit's own settings window is listed like any other application, which matters once the Windows
+taskbar is hidden: it would otherwise be the one window with no way back to it.
+
 It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
 thing you switch to, not six. The underline splits into a segment per open window, so a glance says
 both *running* and *how many*, and clicking walks through them rather than always raising the same

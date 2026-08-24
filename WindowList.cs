@@ -1,9 +1,19 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using static ScweenSpit.Native;
 
 namespace ScweenSpit;
 
-public sealed record TaskWindow(IntPtr Handle, string Title, string Process, string Path, bool Minimised);
+public sealed record TaskWindow(IntPtr Handle, string Title, string Process, string Path,
+                               string AppId, bool Minimised)
+{
+    /// <summary>
+    /// What decides which button this window belongs to. Windows' own application id when the
+    /// window carries one, which is how a Chrome PWA is a separate application from the browser
+    /// despite both being chrome.exe — the shell groups the real taskbar exactly this way.
+    /// </summary>
+    public string GroupId => AppId.Length > 0 ? AppId : Path;
+}
 
 /// <summary>
 /// Works out which windows belong on a taskbar. This is the same judgement Alt+Tab makes, and it is
@@ -24,14 +34,9 @@ public static class WindowList
     public static List<TaskWindow> Enumerate(string? device = null)
     {
         var found = new List<TaskWindow>();
-        uint self = (uint)Environment.ProcessId;
-
         EnumWindows((hWnd, _) =>
         {
             if (!IsTaskWindow(hWnd)) return true;
-
-            GetWindowThreadProcessId(hWnd, out uint pid);
-            if (pid == self) return true;                       // our own bar and overlays
 
             if (device is not null)
             {
@@ -43,7 +48,7 @@ public static class WindowList
             if (title.Length == 0) return true;                 // nothing to label a button with
 
             found.Add(new TaskWindow(hWnd, title, WinEventHookService.OwnerProcessOf(hWnd),
-                                     ExecutablePath(hWnd), IsIconic(hWnd)));
+                                     ExecutablePath(hWnd), AppIdOf(hWnd), IsIconic(hWnd)));
             return true;
         }, IntPtr.Zero);
 
@@ -110,6 +115,74 @@ public static class WindowList
     private static IntPtr Ask(IntPtr hWnd, int which) =>
         SendMessageTimeout(hWnd, WM_GETICON, new IntPtr(which), IntPtr.Zero, SMTO_ABORTIFHUNG, 120, out var result) != IntPtr.Zero
             ? result : IntPtr.Zero;
+
+    // ---- application identity ----------------------------------------------
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropertyKey { public Guid FormatId; public uint PropertyId; }
+
+    // Only the first field is read, and only when it says the value is a string.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropVariant { public ushort Type; ushort a, b, c; public IntPtr Value, Value2; }
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        void GetCount(out uint count);
+        void GetAt(uint index, out PropertyKey key);
+        void GetValue(ref PropertyKey key, out PropVariant value);
+    }
+
+    [DllImport("shell32.dll")]
+    private static extern int SHGetPropertyStoreForWindow(IntPtr hWnd, ref Guid iid, out IPropertyStore store);
+
+    [DllImport("ole32.dll")]
+    private static extern int PropVariantClear(ref PropVariant value);
+
+    private static readonly Guid PropertyStoreId = new("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99");
+
+    private static readonly PropertyKey AppUserModelId = new()
+    {
+        FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),
+        PropertyId = 5,
+    };
+
+    private const ushort VariantString = 31;   // VT_LPWSTR
+
+    /// <summary>
+    /// The application id a window declares, or empty when it declares none.
+    ///
+    /// This is how Windows tells one application from another when several share an executable: a
+    /// Chrome PWA sets its own id, so the shell lists it separately from the browser. Grouping on
+    /// the executable alone puts them under one icon, which is exactly wrong for a PWA.
+    /// </summary>
+    public static string AppIdOf(IntPtr hWnd)
+    {
+        IPropertyStore? store = null;
+        var value = new PropVariant();
+
+        try
+        {
+            var iid = PropertyStoreId;
+            if (SHGetPropertyStoreForWindow(hWnd, ref iid, out store) != 0 || store is null) return "";
+
+            var key = AppUserModelId;
+            store.GetValue(ref key, out value);
+
+            return value.Type == VariantString ? Marshal.PtrToStringUni(value.Value) ?? "" : "";
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce("appid", $"could not read an application id: {ex.Message}");
+            return "";
+        }
+        finally
+        {
+            try { PropVariantClear(ref value); } catch { }
+            if (store is not null) Marshal.ReleaseComObject(store);
+        }
+    }
 
     /// <summary>Asks a window to close, the way its own close button would.</summary>
     public static void Close(IntPtr hWnd) => PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);

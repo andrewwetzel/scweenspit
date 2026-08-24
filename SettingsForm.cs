@@ -48,6 +48,8 @@ public sealed class SettingsForm : Form
         this.hooksUp = hooksUp;
 
         Text = "ScweenSpit";
+        Icon = Theme.AppIcon();
+        ShowInTaskbar = true;
         // Laid out in raw pixels while Theme sizes fonts in points: without this the text grows at
         // high DPI but the window does not, and button captions clip.
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -108,8 +110,13 @@ public sealed class SettingsForm : Form
     {
         Show();
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+
         BringToFront();
         Activate();
+
+        // Activate() is not always enough: the click that asked for this came from the tray or from
+        // a bar that never takes focus, so this process may not hold the foreground right.
+        Native.SetForegroundWindow(Handle);
     }
 
     // ---- nav ---------------------------------------------------------------
@@ -631,9 +638,9 @@ public sealed class SettingsForm : Form
         int added = 0;
         foreach (var pin in pins)
         {
-            if (bar.Pinned.Any(p => string.Equals(p, pin.Path, StringComparison.OrdinalIgnoreCase))) continue;
+            if (bar.Pinned.Any(p => string.Equals(p, pin.Id, StringComparison.OrdinalIgnoreCase))) continue;
 
-            bar.Pinned.Add(pin.Path);
+            bar.Pinned.Add(pin.Id);
             added++;
         }
 

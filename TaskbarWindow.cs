@@ -29,10 +29,13 @@ public sealed class TaskbarWindow : Form
     /// application rather than by window is what keeps a bar of icons readable — six Chrome windows
     /// are one thing you switch to, not six.
     /// </summary>
-    private sealed record Button(string Path, List<TaskWindow> Windows, bool Pinned)
+    private sealed record Button(string Id, List<TaskWindow> Windows, bool Pinned)
     {
         public TaskWindow? First => Windows.Count > 0 ? Windows[0] : null;
         public bool Running => Windows.Count > 0;
+
+        /// <summary>A name for a person. An application id is not one, so prefer the process.</summary>
+        public string Label => First?.Process is { Length: > 0 } name ? name : NameOf(Id);
     }
 
     private List<TaskWindow> windows = [];
@@ -196,8 +199,8 @@ public sealed class TaskbarWindow : Form
                 icons[w.Handle] = WindowList.IconFor(w.Handle) ?? new Bitmap(32, 32);
 
         foreach (var button in buttons)
-            if (!button.Running && !fileIcons.ContainsKey(button.Path))
-                fileIcons[button.Path] = WindowList.IconForFile(button.Path) ?? new Bitmap(32, 32);
+            if (!button.Running && !fileIcons.ContainsKey(button.Id))
+                fileIcons[button.Id] = WindowList.IconForFile(button.Id) ?? new Bitmap(32, 32);
 
         foreach (var stale in icons.Keys.Where(h => !IsWindow(h)).ToList())
         {
@@ -282,17 +285,17 @@ public sealed class TaskbarWindow : Form
 
         foreach (var pin in settings.Pinned)
         {
-            laid.Add(new Button(pin, live.Where(w => Same(w.Path, pin)).ToList(), true));
+            laid.Add(new Button(pin, live.Where(w => Same(w.GroupId, pin)).ToList(), true));
             placed.Add(pin);
         }
 
         // Everything else, one button per application, positioned where its first window appeared.
         foreach (var w in live)
         {
-            if (placed.Contains(w.Path)) continue;
+            if (placed.Contains(w.GroupId)) continue;
 
-            placed.Add(w.Path);
-            laid.Add(new Button(w.Path, live.Where(o => Same(o.Path, w.Path)).ToList(), false));
+            placed.Add(w.GroupId);
+            laid.Add(new Button(w.GroupId, live.Where(o => Same(o.GroupId, w.GroupId)).ToList(), false));
         }
 
         return laid;
@@ -352,9 +355,9 @@ public sealed class TaskbarWindow : Form
 
     private static string Describe(Button b) => b.Windows.Count switch
     {
-        0 => $"{NameOf(b.Path)}  (not running)",
+        0 => $"{b.Label}  (not running)",
         1 => b.Windows[0].Minimised ? $"{b.Windows[0].Title}  (minimised)" : b.Windows[0].Title,
-        _ => $"{NameOf(b.Path)} — {b.Windows.Count} windows\n" +
+        _ => $"{b.Label} — {b.Windows.Count} windows\n" +
              string.Join("\n", b.Windows.Take(6).Select(w => "  " + w.Title)),
     };
 
@@ -425,7 +428,7 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private void Activate(Button button)
     {
-        if (!button.Running) { Launch(button.Path); return; }
+        if (!button.Running) { Launch(button.Id); return; }
         if (button.Windows.Count == 1) { WindowList.Toggle(button.Windows[0].Handle); return; }
 
         var foreground = GetForegroundWindow();
@@ -433,36 +436,42 @@ public sealed class TaskbarWindow : Form
 
         int next = current >= 0
             ? (current + 1) % button.Windows.Count
-            : cycle.TryGetValue(button.Path, out var last) ? last % button.Windows.Count : 0;
+            : cycle.TryGetValue(button.Id, out var last) ? last % button.Windows.Count : 0;
 
-        cycle[button.Path] = next;
+        cycle[button.Id] = next;
 
         var target = button.Windows[next].Handle;
         if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
         SetForegroundWindow(target);
     }
 
-    private static void Launch(string path)
+    /// <summary>
+    /// Starts a pinned entry. It is a file for an ordinary application, and an application id for
+    /// something like a PWA — which the shell can start from its apps folder, where a bare path
+    /// would only launch the browser it happens to live in.
+    /// </summary>
+    private static void Launch(string id)
     {
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            var target = File.Exists(id) ? id : $"shell:AppsFolder\\{id}";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true });
         }
-        catch (Exception ex) { Log.Write($"could not launch {path}: {ex.Message}"); }
+        catch (Exception ex) { Log.Write($"could not launch {id}: {ex.Message}"); }
     }
 
     /// <summary>Right-click: pin, unpin, or close — the three things a taskbar button owes you.</summary>
     private void ShowButtonMenu(Button button, Point at)
     {
         var menu = new ContextMenuStrip();
-        bool pinned = settings.Pinned.Any(p => Same(p, button.Path));
+        bool pinned = settings.Pinned.Any(p => Same(p, button.Id));
 
-        if (!string.IsNullOrWhiteSpace(button.Path))
+        if (!string.IsNullOrWhiteSpace(button.Id))
         {
             menu.Items.Add(new ToolStripMenuItem(pinned ? "Unpin from bar" : "Pin to bar", null, (_, _) =>
             {
-                if (pinned) settings.Pinned.RemoveAll(p => Same(p, button.Path));
-                else settings.Pinned.Add(button.Path);
+                if (pinned) settings.Pinned.RemoveAll(p => Same(p, button.Id));
+                else settings.Pinned.Add(button.Id);
 
                 PinsChanged?.Invoke();
                 Rebuild();
@@ -519,7 +528,7 @@ public sealed class TaskbarWindow : Form
 
             var icon = button.Running
                 ? icons.GetValueOrDefault(w!.Handle)
-                : fileIcons.GetValueOrDefault(button.Path);
+                : fileIcons.GetValueOrDefault(button.Id);
 
             if (icon is not null)
             {
@@ -546,8 +555,8 @@ public sealed class TaskbarWindow : Form
                 FormatFlags = StringFormatFlags.NoWrap,
             };
             var caption2 = button.Windows.Count > 1
-                ? $"{NameOf(button.Path)} ({button.Windows.Count})"
-                : w?.Title ?? NameOf(button.Path);
+                ? $"{button.Label} ({button.Windows.Count})"
+                : w?.Title ?? button.Label;
 
             g.DrawString(caption2, label, !button.Running || w!.Minimised ? dim : text, caption, format);
         }

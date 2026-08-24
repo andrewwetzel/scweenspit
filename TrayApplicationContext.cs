@@ -64,7 +64,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         tray = new NotifyIcon
         {
-            Icon = MakeIcon(),
+            Icon = Theme.AppIcon(),
             Text = "ScweenSpit",
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip(),
@@ -470,19 +470,6 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // ---- plumbing ----------------------------------------------------------
-
-    /// <summary>A 70/30 split drawn at runtime, so there is no .ico asset to ship.</summary>
-    private static Icon MakeIcon()
-    {
-        using var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.Clear(Color.Transparent);
-            g.FillRectangle(Brushes.DodgerBlue, 2, 6, 19, 20);
-            g.FillRectangle(Brushes.Gainsboro, 23, 6, 7, 20);
-        }
-        return Icon.FromHandle(bmp.GetHicon()); // process-lifetime handle
-    }
 
     protected override void Dispose(bool disposing)
     {

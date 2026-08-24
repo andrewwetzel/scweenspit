@@ -16,7 +16,12 @@ public static class WindowsPins
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
 
-    public sealed record Pin(string Path, string Name);
+    /// <summary>
+    /// A pinned application. <see cref="Id"/> is what the bar groups on: the shortcut's own
+    /// application id when it declares one, because that is what its windows will report — a Chrome
+    /// PWA's shortcut and its windows agree on an id, while both are just chrome.exe by path.
+    /// </summary>
+    public sealed record Pin(string Id, string Path, string Name);
 
     /// <summary>
     /// Every pinned application that resolves to a real executable, in the order Windows shows them.
@@ -36,10 +41,11 @@ public static class WindowsPins
 
             foreach (var shortcut in Directory.GetFiles(Folder, "*.lnk"))
             {
-                var target = ShellLink.TargetOf(shortcut);
+                var (target, appId) = ShellLink.IdentityOf(shortcut);
                 if (string.IsNullOrWhiteSpace(target) || !File.Exists(target)) { skipped++; continue; }
 
-                found.Add(new Pin(target, Path.GetFileNameWithoutExtension(shortcut)));
+                found.Add(new Pin(appId.Length > 0 ? appId : target, target,
+                                  Path.GetFileNameWithoutExtension(shortcut)));
             }
 
             found = found.OrderBy(p => PinOrder.Rank(order, p.Path)).ThenBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
@@ -128,6 +134,32 @@ internal static class ShellLink
     [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
     private class ShellLinkObject { }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropertyKey { public Guid FormatId; public uint PropertyId; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropVariant { public ushort Type; ushort a, b, c; public IntPtr Value, Value2; }
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        void GetCount(out uint count);
+        void GetAt(uint index, out PropertyKey key);
+        void GetValue(ref PropertyKey key, out PropVariant value);
+    }
+
+    [DllImport("ole32.dll")]
+    private static extern int PropVariantClear(ref PropVariant value);
+
+    private static readonly PropertyKey AppUserModelId = new()
+    {
+        FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),
+        PropertyId = 5,
+    };
+
+    private const ushort VariantString = 31;
+
     // Only GetPath is called, and it is the first slot, so the rest of the vtable is not declared.
     [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
     private interface IShellLinkW
@@ -146,6 +178,42 @@ internal static class ShellLink
 
     private const uint STGM_READ = 0;
     private const uint SLGP_RAWPATH = 0x4;
+
+    /// <summary>The file a shortcut points at, and the application id it declares, if any.</summary>
+    public static (string Path, string AppId) IdentityOf(string shortcut)
+    {
+        object? link = null;
+        var value = new PropVariant();
+
+        try
+        {
+            link = new ShellLinkObject();
+            ((IPersistFile)link).Load(shortcut, STGM_READ);
+
+            var path = new StringBuilder(1024);
+            ((IShellLinkW)link).GetPath(path, path.Capacity, IntPtr.Zero, SLGP_RAWPATH);
+
+            var appId = "";
+            if (link is IPropertyStore store)
+            {
+                var key = AppUserModelId;
+                store.GetValue(ref key, out value);
+                if (value.Type == VariantString) appId = Marshal.PtrToStringUni(value.Value) ?? "";
+            }
+
+            return (Environment.ExpandEnvironmentVariables(path.ToString()), appId);
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce($"lnk:{shortcut}", $"could not read {shortcut}: {ex.Message}");
+            return ("", "");
+        }
+        finally
+        {
+            try { PropVariantClear(ref value); } catch { }
+            if (link is not null) Marshal.ReleaseComObject(link);
+        }
+    }
 
     public static string TargetOf(string shortcut)
     {
