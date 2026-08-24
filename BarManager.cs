@@ -16,6 +16,9 @@ public sealed class BarManager : IDisposable
 
     public int Count => bars.Count;
 
+    /// <summary>Raised when a bar's ScweenSpit button is clicked, with the screen position to open at.</summary>
+    public event Action<System.Drawing.Point>? MenuRequested;
+
     public void Apply(SplitConfig config)
     {
         var monitors = ZoneManager.AllMonitors().ToDictionary(m => m.Device, m => m);
@@ -39,6 +42,13 @@ public sealed class BarManager : IDisposable
             try
             {
                 var bar = new TaskbarWindow(monitor, settings);
+                bar.MenuRequested += p => MenuRequested?.Invoke(p);
+
+                // Give it its rectangle before the handle exists, so it is created on the display it
+                // belongs to rather than being born on the primary and moved afterwards.
+                bar.Bounds = new System.Drawing.Rectangle(
+                    monitor.Bounds.Left, monitor.Bounds.Top, monitor.Bounds.Width, monitor.Bounds.Height);
+
                 bars[device] = bar;
                 applied[device] = wanted;
                 bar.Show();

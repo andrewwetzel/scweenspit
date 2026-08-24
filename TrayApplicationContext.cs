@@ -68,10 +68,18 @@ public sealed class TrayApplicationContext : ApplicationContext
         BuildMenu();
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) OpenSettings(); };
 
+        bars.MenuRequested += at =>
+        {
+            BuildMenu();
+            tray.ContextMenuStrip!.Show(at);
+        };
+
         foregroundWatch.Tick += (_, _) => TrackForeground();
         foregroundWatch.Start();
 
-        taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.SetHidden(true); };
+        // Re-assert only the hide. Re-applying auto-hide here would make Explorer re-lay-out every
+        // two seconds, which is itself what puts the taskbar back.
+        taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.Hide(true); };
 
         ApplySnapSuppression();
         ApplyTaskbarVisibility();

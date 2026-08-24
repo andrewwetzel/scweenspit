@@ -2,7 +2,12 @@ using static ScweenSpit.Native;
 
 namespace ScweenSpit;
 
-public readonly record struct MonitorGeometry(string Device, RECT Work, RECT Bounds);
+public readonly record struct MonitorGeometry(string Device, RECT Work, RECT Bounds, bool IsPrimary = false)
+{
+    /// <summary>Something a person can match to a physical screen: "primary", or where it sits.</summary>
+    public string Describe() =>
+        IsPrimary ? "primary" : $"at {Bounds.Left},{Bounds.Top}";
+}
 
 /// <summary>A materialised zone: where it is, and whether windows in it sit over the taskbar.</summary>
 public readonly record struct Zone(RECT Rect, bool CoverTaskbar)
@@ -69,7 +74,7 @@ public sealed class ZoneManager(SplitConfig config)
             return false;
         }
 
-        geo = new MonitorGeometry(mi.szDevice, mi.rcWork, mi.rcMonitor);
+        geo = new MonitorGeometry(mi.szDevice, mi.rcWork, mi.rcMonitor, (mi.dwFlags & 1) != 0);
         return true;
     }
 

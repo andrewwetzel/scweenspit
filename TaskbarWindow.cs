@@ -26,6 +26,7 @@ public sealed class TaskbarWindow : Form
     private List<TaskWindow> windows = [];
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
     private int hovered = -1, hoveredStatus = -1;
+    private bool hoveredHome;
     private long lastStatusPoll;
 
     private (int Percent, bool Charging)? battery;
@@ -34,6 +35,13 @@ public sealed class TaskbarWindow : Form
 
     public BarEdge Edge { get; }
     public string Device => monitor.Device;
+
+    /// <summary>
+    /// Raised when the ScweenSpit button is clicked. Hiding the Windows taskbar takes our own tray
+    /// icon with it, so the bar has to carry a way back to Settings and Exit or the app becomes
+    /// unreachable.
+    /// </summary>
+    public event Action<Point>? MenuRequested;
 
     public TaskbarWindow(MonitorGeometry monitor, BarSettings settings)
     {
@@ -132,12 +140,15 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, index * Slot, Width, Slot)
         : new Rectangle(index * Slot, 0, Slot, Height);
 
-    private int Capacity => Math.Max(0, ((Vertical ? Height : Width) - StatusExtent) / Math.Max(1, Slot));
+    /// <summary>Slot zero is ours, the way the Start button owns the corner of the real taskbar.</summary>
+    private Rectangle HomeSlot => SlotAt(0);
+
+    private int Capacity => Math.Max(0, ((Vertical ? Height : Width) - StatusExtent) / Math.Max(1, Slot) - 1);
 
     private int SlotUnder(Point p)
     {
         for (int i = 0; i < Math.Min(windows.Count, Capacity); i++)
-            if (SlotAt(i).Contains(p)) return i;
+            if (SlotAt(i + 1).Contains(p)) return i;
         return -1;
     }
 
@@ -165,14 +176,17 @@ public sealed class TaskbarWindow : Form
         base.OnMouseMove(e);
 
         int under = SlotUnder(e.Location), status = StatusUnder(e.Location);
-        if (under == hovered && status == hoveredStatus) return;
+        bool home = HomeSlot.Contains(e.Location);
+        if (under == hovered && status == hoveredStatus && home == hoveredHome) return;
 
         hovered = under;
         hoveredStatus = status;
-        Cursor = under >= 0 || status >= 0 ? Cursors.Hand : Cursors.Default;
+        hoveredHome = home;
+        Cursor = under >= 0 || status >= 0 || home ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these.
-        tips.SetToolTip(this, under >= 0 && under < windows.Count ? windows[under].Title
+        tips.SetToolTip(this, home ? "ScweenSpit — settings"
+                            : under >= 0 && under < windows.Count ? windows[under].Title
                             : status >= 0 ? StatusTip(status)
                             : string.Empty);
         Invalidate();
@@ -194,12 +208,19 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseLeave(e);
         hovered = hoveredStatus = -1;
+        hoveredHome = false;
         Invalidate();
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+
+        if (HomeSlot.Contains(e.Location))
+        {
+            MenuRequested?.Invoke(Cursor.Position);
+            return;
+        }
 
         int status = StatusUnder(e.Location);
         if (status >= 0)
@@ -233,10 +254,12 @@ public sealed class TaskbarWindow : Form
         using var text = new SolidBrush(Theme.Text);
         using var dim = new SolidBrush(Theme.Muted);
 
+        PaintHome(g, hot);
+
         int shown = Math.Min(windows.Count, Capacity);
         for (int i = 0; i < shown; i++)
         {
-            var slot = SlotAt(i);
+            var slot = SlotAt(i + 1);
             var w = windows[i];
 
             if (w.Handle == foreground) g.FillRectangle(active, slot);
@@ -276,6 +299,23 @@ public sealed class TaskbarWindow : Form
         }
 
         if (settings.ShowStatus) PaintStatus(g);
+    }
+
+    /// <summary>The ScweenSpit button: our own zone glyph, in the corner slot.</summary>
+    private void PaintHome(Graphics g, Brush hot)
+    {
+        var slot = HomeSlot;
+        if (hoveredHome) g.FillRectangle(hot, slot);
+
+        int size = Math.Clamp(Math.Min(slot.Width, slot.Height) / 2, 14, 28);
+        var box = new Rectangle(slot.X + (slot.Width - size) / 2, slot.Y + (slot.Height - size) / 2, size, size);
+
+        int split = (int)Math.Round(box.Width * 0.68);
+        using var major = new SolidBrush(Theme.Accent);
+        using var minor = new SolidBrush(Theme.Muted);
+
+        g.FillRectangle(major, box.X, box.Y, split - 1, box.Height);
+        g.FillRectangle(minor, box.X + split + 1, box.Y, box.Width - split - 1, box.Height);
     }
 
     private void PaintStatus(Graphics g)

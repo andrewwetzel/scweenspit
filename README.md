@@ -163,6 +163,10 @@ It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar u
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
+The first slot is the **ScweenSpit button** — it opens the same menu as the tray icon. That matters
+once the Windows taskbar is hidden, because our tray icon goes with it, and without this the app
+would have no way back to Settings or Exit.
+
 It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
@@ -171,6 +175,10 @@ The status area carries **volume, network, battery and a clock**, each opening t
 settings page when clicked. They are drawn as vector shapes rather than glyph-font characters,
 because which icon font exists and which code point means what varies by Windows version, and a
 missing glyph renders as a hollow box with no warning.
+
+Two identical screens look the same in a list of device names, so each display is labelled with its
+position and there is an **Identify displays** button that flashes a big number on each — the same
+idea as the one in Windows' own display settings.
 
 **Hide the Windows taskbar entirely** is on the same page. It takes the shell's bars off screen and
 gives their reserved strip back, so a bar of yours on the same edge sits flush rather than floating

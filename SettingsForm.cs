@@ -208,7 +208,8 @@ public sealed class SettingsForm : Form
             var rects = zones.ZonesFor(geo);
             page.Controls.Add(new Label
             {
-                Text = $"{geo.Device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}   ·   {rects.Count} zones",
+                Text = $"{geo.Device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}   ·   " +
+                       $"{geo.Describe()}   ·   {rects.Count} zones",
                 AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(11f, FontStyle.Bold),
                 Margin = new Padding(0, 14, 0, 6),
             });
@@ -311,6 +312,11 @@ public sealed class SettingsForm : Form
         show.Click += (_, _) => overlay.Flash(zones, 2500);
         buttons.Controls.Add(show);
 
+        var which = Theme.Action("Identify displays");
+        which.AutoSize = true;
+        which.Click += (_, _) => DisplayIdentifier.Flash();
+        buttons.Controls.Add(which);
+
         page.Controls.Add(buttons);
     }
 
@@ -390,8 +396,13 @@ public sealed class SettingsForm : Form
         page.Controls.Add(Theme.Caption(
             "Windows will not put its taskbar anywhere but the bottom — but nothing stops us docking " +
             "one of ours to any edge. It registers as a Win32 appbar, so Windows reserves the space " +
-            "and every application keeps clear of it, exactly as it does for the real taskbar. Pair it " +
-            "with auto-hide above to get a vertical bar on the side."));
+            "and every application keeps clear of it, exactly as it does for the real taskbar. Each " +
+            "display is a separate switch, so a bar on one screen and nothing on the others is fine."));
+
+        var identify = Theme.Action("Identify displays", primary: true);
+        identify.AutoSize = true;
+        identify.Click += (_, _) => DisplayIdentifier.Flash();
+        page.Controls.Add(identify);
 
         foreach (var geo in ZoneManager.AllMonitors())
         {
@@ -400,7 +411,7 @@ public sealed class SettingsForm : Form
 
             page.Controls.Add(new Label
             {
-                Text = $"{device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}",
+                Text = $"{device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}   ·   {geo.Describe()}",
                 AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(11f, FontStyle.Bold),
                 Margin = new Padding(0, 14, 0, 6),
             });

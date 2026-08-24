@@ -64,18 +64,42 @@ public static class Taskbar
     /// </summary>
     public static void SetHidden(bool hidden)
     {
-        int shown = 0;
-        foreach (var bar in ShellBars())
-        {
-            ShowWindow(bar, hidden ? 0 /* SW_HIDE */ : 5 /* SW_SHOW */);
-            shown++;
-        }
-
-        // Order matters on the way back: restore the reservation before revealing the window, or
-        // the bar reappears over content that has not been given room for it yet.
+        // Auto-hide FIRST. Changing the state makes Explorer re-lay-out its taskbar, which puts it
+        // straight back on screen — so doing it after the hide simply undoes the hide.
         if (hidden) AutoHide = true;
 
-        Log.Write($"shell taskbars {(hidden ? "hidden" : "restored")} ({shown} found)");
+        Hide(hidden);
+    }
+
+    /// <summary>
+    /// Shows or hides the shell's taskbar windows, and reports what actually happened. Separate from
+    /// <see cref="SetHidden"/> so the watchdog can re-assert the hide without touching the auto-hide
+    /// state again — repeating that would make Explorer re-lay-out, and re-show the bar, every time.
+    /// </summary>
+    public static void Hide(bool hidden)
+    {
+        int found = 0, changed = 0, refused = 0;
+
+        foreach (var bar in ShellBars())
+        {
+            found++;
+            if (IsWindowVisible(bar) != hidden) continue;   // already in the state we want
+
+            ShowWindow(bar, hidden ? 0 /* SW_HIDE */ : 5 /* SW_SHOW */);
+
+            if (IsWindowVisible(bar) == hidden)
+            {
+                refused++;
+                Log.WriteOnce($"taskbar-refused:{bar}",
+                    $"ShowWindow was ignored for 0x{bar:X} ({ClassNameOf(bar)}) — " +
+                    $"err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            }
+            else changed++;
+        }
+
+        if (found == 0) Log.WriteOnce("taskbar-missing", "no Shell_TrayWnd found");
+        if (changed > 0 || refused > 0)
+            Log.Write($"shell taskbars: {found} found, {changed} {(hidden ? "hidden" : "shown")}, {refused} refused");
     }
 
     private static IEnumerable<IntPtr> ShellBars()
