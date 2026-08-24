@@ -32,22 +32,22 @@ internal static partial class Program
         {
             if (!HasDesktopRuntime(RequiredMajor) && !InstallRuntime()) return 1;
 
-            // An update hands over to us while the old app is still running - out of the very file
-            // we are about to replace. Unpacking or launching before it goes leaves the new version
-            // on disk and the old one in memory, and then nothing running at all.
-            WaitForHandover(args);
+            var exe = UnpackedPath();
 
-            var exe = Unpack();
-            if (exe is null)
+            // Before touching the file, not after: an update hands over while the old app is still
+            // running out of the very copy we are about to replace, and Windows refuses to overwrite
+            // a running image.
+            WaitForHandover(args, exe);
+
+            if (!Unpack(exe) && !File.Exists(exe))
             {
-                Warn("This build has no application inside it — the payload was not embedded.");
+                Warn($"Could not unpack the application to:\n{exe}\n\nSee {LogPath}");
                 return 1;
             }
 
             // Already running: say nothing and get out of the way. The app keeps a single-instance
             // mutex of its own, but it would exit silently and look like nothing happened.
-            if (AlreadyRunning(exe) && !WaitFor(() => !AlreadyRunning(exe), UnannouncedHandover))
-                return 0;
+            if (AlreadyRunning(exe)) return 0;
 
             var start = new ProcessStartInfo(exe)
             {
@@ -65,12 +65,31 @@ internal static partial class Program
         }
         catch (Exception ex)
         {
-            Warn($"Could not start ScweenSpit.\n\n{ex.Message}");
+            Note($"fatal: {ex}");
+            Warn($"Could not start ScweenSpit.\n\n{ex.GetType().Name}: {ex.Message}"
+               + $"\n\nDetails were written to:\n{LogPath}");
             return 1;
         }
     }
 
     private static string Quote(string a) => a.Contains(' ') ? $"\"{a}\"" : a;
+
+    private static string LogPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ScweenSpit", "launcher.log");
+
+    /// <summary>
+    /// Records what went wrong. The launcher has no window and no console, so without this the only
+    /// evidence of a failure is whatever the user manages to read off a message box.
+    /// </summary>
+    private static void Note(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+            File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+        }
+        catch { /* nothing left to try */ }
+    }
 
     private static readonly TimeSpan AnnouncedHandover = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan UnannouncedHandover = TimeSpan.FromSeconds(8);
@@ -86,11 +105,11 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Waits for the instance that launched us to exit. An updater names its own process id; an
-    /// older one predating that flag does not, so a running copy is given a short grace period
-    /// before we assume it means to stay.
+    /// Waits for the instance that launched us to exit. An updater names its own process id; one
+    /// predating that flag does not, so a running copy is given a short grace period before we
+    /// assume it means to stay.
     /// </summary>
-    private static void WaitForHandover(string[] args)
+    private static void WaitForHandover(string[] args, string exe)
     {
         for (int i = 0; i < args.Length - 1; i++)
         {
@@ -100,6 +119,8 @@ internal static partial class Program
             WaitFor(() => !IsAlive(pid), AnnouncedHandover);
             return;
         }
+
+        if (AlreadyRunning(exe)) WaitFor(() => !AlreadyRunning(exe), UnannouncedHandover);
     }
 
     private static bool IsAlive(int pid)
@@ -262,41 +283,53 @@ internal static partial class Program
 
     // ---- unpacking ---------------------------------------------------------
 
+    /// <summary>Where the application is kept once unpacked. No I/O, so it is safe to ask early.</summary>
+    private static string UnpackedPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ScweenSpit", "bin", "ScweenSpit.exe");
+
     /// <summary>
-    /// Writes the embedded application beside the user's settings, and only when it differs from
-    /// what is already there. Comparing content hashes rather than file lengths means an update
-    /// that happens to produce the same size still replaces the unpacked copy.
+    /// Writes the embedded application out, and only when it differs from what is already there.
+    /// Comparing content hashes rather than file lengths means an update that happens to produce the
+    /// same size still replaces the unpacked copy.
+    ///
+    /// Returns false when it could not be written. That is not necessarily fatal: an existing copy
+    /// is worth running, and the caller decides.
     /// </summary>
-    private static string? Unpack()
+    private static bool Unpack(string exe)
     {
         using var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("ScweenSpit.exe");
-        if (payload is null) return null;
+        if (payload is null)
+        {
+            Warn("This build has no application inside it — the payload was not embedded.");
+            return false;
+        }
 
-        var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScweenSpit", "bin");
-        Directory.CreateDirectory(dir);
-
-        var exe = Path.Combine(dir, "ScweenSpit.exe");
         var stampFile = exe + ".stamp";
-
         var stamp = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload));
         payload.Position = 0;
 
-        if (File.Exists(exe) && ReadStamp(stampFile) == stamp) return exe;
+        if (File.Exists(exe) && ReadStamp(stampFile) == stamp) return true;
 
         var staging = exe + ".new";
-        using (var file = File.Create(staging)) payload.CopyTo(file);
-
         try
         {
-            // Replacing a running executable fails, and that is fine: the copy already there is
-            // the one running, and the next launch will find it stale and try again.
+            Directory.CreateDirectory(Path.GetDirectoryName(exe)!);
+
+            using (var file = File.Create(staging)) payload.CopyTo(file);
+
+            // Windows refuses to overwrite a running image, and reports it as access denied rather
+            // than a sharing violation - so both have to be caught, or this surfaces as a crash.
             File.Move(staging, exe, overwrite: true);
             File.WriteAllText(stampFile, stamp);
+            return true;
         }
-        catch (IOException) { try { File.Delete(staging); } catch { } }
-
-        return exe;
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Note($"could not replace {exe}: {ex.GetType().Name}: {ex.Message}");
+            try { File.Delete(staging); } catch { }
+            return false;
+        }
     }
 
     private static string? ReadStamp(string path)

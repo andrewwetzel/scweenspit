@@ -402,12 +402,16 @@ The download is checked against a SHA-256 published beside it in the release. Th
 truncated or corrupted transfer. It is **not** a signature and does not prove the release is genuine
 — there is no code signing here.
 
-Installing hands the new launcher this process's id, and it waits for us to exit before taking over.
+Installing hands the new launcher this process's id, and it waits for us to exit **before unpacking
+anything** — Windows refuses to overwrite a running executable image, and reports that refusal as
+access denied rather than a sharing violation, so both have to be handled or it surfaces as a crash.
 That matters more than it sounds: the app runs from the unpacked copy the new launcher needs to
 replace, so a launcher that pressed on regardless would find the file locked, keep the old payload,
 see an instance already running, and quietly exit — leaving the update on disk and nothing running.
-A launcher that is handed no process id still waits a few seconds before assuming a running copy
-means to stay, so an update from a version predating this still lands.
+A launcher handed no process id still waits a few seconds before assuming a running copy means to
+stay, so an update from a version predating this still lands. If the unpacked copy cannot be replaced
+at all, an existing one is run rather than failing outright, and the reason is written to
+`%APPDATA%\ScweenSpit\launcher.log`.
 
 On startup it looks for a newer release at most once a day and, if it finds one, says so and stops
 there. It never installs anything on its own.

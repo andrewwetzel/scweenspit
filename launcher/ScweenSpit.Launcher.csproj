@@ -22,11 +22,13 @@
 
     <InvariantGlobalization>true</InvariantGlobalization>
     <StackTraceSupport>false</StackTraceSupport>
-    <UseSystemResourceKeys>true</UseSystemResourceKeys>
     <EventSourceSupport>false</EventSourceSupport>
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
     <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
-    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+
+    <!-- Left on: stripping exception messages turns the launcher's only error channel into
+         resource keys like "UnauthorizedAccess_IODenied_NoPathName", which tells a user nothing. -->
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
   </PropertyGroup>
 
   <ItemGroup>
