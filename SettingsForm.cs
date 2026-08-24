@@ -20,6 +20,15 @@ public sealed class SettingsForm : Form
 
     private readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Window, Padding = new Padding(28, 24, 28, 24), AutoScroll = true };
     private readonly FlowLayoutPanel nav = new() { Dock = DockStyle.Left, Width = 172, BackColor = Theme.Panel, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 20, 12, 12), WrapContents = false };
+
+    // Results belong in the window, not in a dialog. An unowned message box lands behind whatever
+    // has focus, which reads as the app having frozen rather than as a message waiting.
+    private readonly Label status = new()
+    {
+        Dock = DockStyle.Bottom, Height = 34, BackColor = Theme.Panel, ForeColor = Theme.Muted,
+        TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(16, 0, 16, 0), Text = "",
+    };
+    private readonly System.Windows.Forms.Timer statusFade = new() { Interval = 9000 };
     private readonly List<Button> navButtons = [];
 
     private ListBox? excludeList;
@@ -49,8 +58,13 @@ public sealed class SettingsForm : Form
         ForeColor = Theme.Text;
         Font = Theme.Face();
 
+        status.Font = Theme.Face(9.5f);
+        statusFade.Tick += (_, _) => { statusFade.Stop(); status.Text = ""; };
+
+        // Added last so it is laid out first and spans the full width, beneath the nav as well.
         Controls.Add(content);
         Controls.Add(nav);
+        Controls.Add(status);
 
         AddNav("General", ShowGeneral);
         AddNav("Layouts", ShowLayouts);
@@ -72,6 +86,12 @@ public sealed class SettingsForm : Form
     }
 
     /// <summary>Closing means "get out of my way", not "quit". Exit lives in the tray menu.</summary>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) statusFade.Dispose();
+        base.Dispose(disposing);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)
@@ -146,6 +166,16 @@ public sealed class SettingsForm : Form
             Margin = new Padding(0, 8, 0, 2),
         });
         page.Controls.Add(control);
+    }
+
+    /// <summary>Reports the outcome of an action in the window itself.</summary>
+    private void Say(string message, bool problem = false)
+    {
+        status.ForeColor = problem ? Color.FromArgb(235, 140, 140) : Theme.Accent;
+        status.Text = message;
+
+        statusFade.Stop();
+        statusFade.Start();
     }
 
     private void Save()
@@ -345,8 +375,7 @@ public sealed class SettingsForm : Form
         arrange.Click += (_, _) =>
         {
             int moved = arrangeWindows();
-            MessageBox.Show($"Placed {moved} window{(moved == 1 ? "" : "s")}.", "ScweenSpit",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Say($"Placed {moved} window{(moved == 1 ? "" : "s")}.");
         };
         buttons.Controls.Add(arrange);
 
@@ -592,7 +621,7 @@ public sealed class SettingsForm : Form
                              + "they are pinned as an application id rather than a file, so there is "
                              + "nothing to launch or take an icon from." : ".");
 
-        MessageBox.Show(summary, "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        Say(summary.Replace("\n\n", "  "));
         BeginInvoke(ShowTaskbar);
     }
 
@@ -652,10 +681,8 @@ public sealed class SettingsForm : Form
             }
             else
             {
-                MessageBox.Show(
-                    "That does not look like a session key. It starts with sk-ant- and is a long " +
-                    "string — copy the whole value of the sessionKey cookie.",
-                    "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Say("That does not look like a session key — it starts with sk-ant- and is a long "
+                  + "string. Copy the whole value of the sessionKey cookie.", problem: true);
             }
         };
         keyButtons.Controls.Add(save);
@@ -719,7 +746,8 @@ public sealed class SettingsForm : Form
     private void MoveTaskbar(TaskbarEdge edge)
     {
         var before = Taskbar.Current();
-        var answer = MessageBox.Show(
+        // Owned by this window: an unowned dialog can be raised behind it and look like a hang.
+        var answer = MessageBox.Show(this,
             $"Move the taskbar to the {edge.ToString().ToLowerInvariant()} edge?\n\n" +
             "This restarts Windows Explorer: the desktop will blank for a moment and open File " +
             "Explorer windows will close." +
@@ -730,15 +758,13 @@ public sealed class SettingsForm : Form
 
         if (!Taskbar.Move(edge))
         {
-            MessageBox.Show("Could not write the taskbar setting — see the log.", "ScweenSpit",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Say("Could not write the taskbar setting — see the log.", problem: true);
         }
         else if (Taskbar.Current() is { } now && now != edge)
         {
             // Say so rather than leaving a button that looks like it worked.
-            MessageBox.Show($"The setting was written, but the taskbar is still docked {now}. " +
-                            "Windows ignored it — this is expected on Windows 11.",
-                "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Say($"The setting was written, but the taskbar is still docked {now} — Windows ignored "
+              + "it, which is expected on Windows 11.", problem: true);
         }
 
         _ = before;
@@ -1076,7 +1102,7 @@ public sealed class SettingsForm : Form
             {
                 install.Enabled = true;
                 install.Text = "Install and restart";
-                MessageBox.Show(ex.Message, "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Say(ex.Message, problem: true);
                 Log.Write($"update install failed: {ex}");
             }
         };

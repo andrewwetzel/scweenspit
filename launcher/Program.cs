@@ -341,11 +341,18 @@ internal static partial class Program
     // ---- messages ----------------------------------------------------------
 
     private const uint MbYesNo = 0x00000004, MbIconQuestion = 0x00000020, MbIconWarning = 0x00000030;
+
+    // The launcher owns no window, so an ordinary message box can open behind whatever has focus
+    // and look like nothing happened — which is exactly how a failed update presents itself.
+    private const uint MbTopMost = 0x00040000, MbSetForeground = 0x00010000;
     private const int IdYes = 6;
 
     [LibraryImport("user32.dll", EntryPoint = "MessageBoxW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int MessageBox(IntPtr hWnd, string text, string caption, uint type);
 
-    private static int Ask(string text) => MessageBox(IntPtr.Zero, text, Caption, MbYesNo | MbIconQuestion);
-    private static void Warn(string text) => MessageBox(IntPtr.Zero, text, Caption, MbIconWarning);
+    private static int Ask(string text) =>
+        MessageBox(IntPtr.Zero, text, Caption, MbYesNo | MbIconQuestion | MbTopMost | MbSetForeground);
+
+    private static void Warn(string text) =>
+        MessageBox(IntPtr.Zero, text, Caption, MbIconWarning | MbTopMost | MbSetForeground);
 }
