@@ -31,10 +31,10 @@ jobs:
 
           New-Item -ItemType Directory -Force launcher/payload | Out-Null
           Copy-Item publish/app/ScweenSpit.exe launcher/payload/ScweenSpit.exe -Force
-          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 -o publish/setup
+          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 -o publish/ship
 
-          Copy-Item publish/setup/ScweenSpit-Setup.exe "ScweenSpit-Setup-${env:TAG}.exe"
-          Copy-Item publish/app/ScweenSpit.exe        "ScweenSpit-${env:TAG}-win-x64.exe"
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item publish/ship/ScweenSpit.exe release/ScweenSpit.exe
 
       - name: Create release
-        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes ScweenSpit-Setup-*.exe ScweenSpit-*-win-x64.exe
+        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes release/ScweenSpit.exe

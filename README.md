@@ -6,33 +6,29 @@ YouTube, VLC), fills only the sub-screen the window is in instead of the whole d
 
 ## Get a binary
 
-Every push to `main` builds on `windows-latest` and attaches the executables to the run; tagging
-`v*` publishes them to a GitHub Release. Two of them:
+Every push to `main` builds on `windows-latest`; tagging `v*` publishes a release. There is one
+download, **`ScweenSpit.exe`**, about 1.9 MB. Run it and you are done — it installs the .NET Desktop
+Runtime first if your machine does not have it.
 
-| Download | Size | Use it when |
-| --- | --- | --- |
-| `ScweenSpit-Setup.exe` | ~1.9 MB | you are not sure whether you have .NET — it checks, offers to install the runtime, then runs the app |
-| `ScweenSpit.exe` | ~250 KB | you already have the .NET 8 Desktop Runtime |
+That size is the point. The app is ~250 KB; bundling the runtime with it costs **63 MB**, almost
+none of which is ours. `Microsoft.WindowsDesktop.App` ships WinForms and WPF as one indivisible
+pack, so 37 MB of that is WPF this app never touches, and `NETSDK1175` forbids trimming for Windows
+Forms outright. So the runtime is shared instead, and the download carries only what is missing.
 
-The app itself is a couple of hundred kilobytes. Bundling the runtime with it costs **63 MB**, almost
-none of which is ours: `Microsoft.WindowsDesktop.App` ships WinForms and WPF as one indivisible pack,
-so 37 MB of that is WPF this app never touches. Trimming would cut it right down, but `NETSDK1175`
-forbids trimming for Windows Forms outright.
-
-So the runtime is shared instead. `ScweenSpit-Setup.exe` is compiled ahead of time to native code —
-it has to start on a machine with no .NET at all, which is the one thing the app itself cannot do.
-It looks for `Microsoft.WindowsDesktop.App` 8.x in the shared-framework folder — rather than shelling
-out to `dotnet`, which is exactly what may be missing — and if it is absent, asks first, downloads
-the official installer from Microsoft, runs it (UAC will prompt), then unpacks the app to
-`%LOCALAPPDATA%\ScweenSpit\bin` and starts it. On every later launch it finds the runtime, skips
-straight to the end, and costs nothing.
+The exe you run is compiled ahead of time to native code, because an app that needs the runtime
+cannot be the thing that checks for it. On launch it looks for `Microsoft.WindowsDesktop.App` 8.x in
+the shared-framework folder — rather than shelling out to `dotnet`, which is exactly what may be
+absent — and if it is missing, asks first, downloads Microsoft's official installer, and runs it
+(Windows will prompt for permission). Then it unpacks the app to `%LOCALAPPDATA%\ScweenSpit\bin`
+and starts it. Every later launch finds the runtime, finds the unpacked copy already current, and
+goes straight through.
 
 It downloads through `curl.exe` (in System32 since Windows 10 1803), falling back to urlmon. Using
-`HttpClient` would have linked the managed socket and TLS stack into the binary statically — 5.1 MB
-instead of 1.9 MB, for one download that happens at most once per machine.
+`HttpClient` would have linked the managed socket and TLS stack in statically — 5.1 MB rather than
+1.9 MB, for a download that happens at most once per machine.
 
-If you would rather have the old no-dependencies build, it is one commented-out line in
-`scripts/publish.sh`.
+Keep the file wherever you like: **Start with Windows** registers *it*, not the unpacked copy, so it
+re-checks the runtime and repairs the unpacked app on every login.
 
 ## Build
 
@@ -46,8 +42,8 @@ dotnet build -c Release          # typechecks anywhere
 dotnet run -c Release            # Windows only
 ```
 
-`ScweenSpit-Setup.exe` is the exception: Native AOT cannot be cross-compiled, so only the Windows
-CI job builds it.
+The shipping exe is the exception: Native AOT cannot be cross-compiled, so only the Windows CI job
+builds it. `scripts/publish.sh` produces the inner app alone.
 
 ## Use
 

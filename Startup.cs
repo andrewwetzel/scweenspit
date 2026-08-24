@@ -8,7 +8,21 @@ internal static class Startup
     private const string Key = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string Name = "ScweenSpit";
 
-    private static string ExePath => Environment.ProcessPath ?? "";
+    /// <summary>
+    /// What to run at login. When started through the single-file launcher that is the launcher
+    /// itself: it is the file the user actually downloaded, it repairs the unpacked copy, and it
+    /// re-checks the runtime — none of which the unpacked copy can do for itself.
+    /// </summary>
+    private static string ExePath
+    {
+        get
+        {
+            var launcher = Environment.GetEnvironmentVariable("SCWEENSPIT_LAUNCHER");
+            return !string.IsNullOrWhiteSpace(launcher) && File.Exists(launcher)
+                ? launcher
+                : Environment.ProcessPath ?? "";
+        }
+    }
 
     public static bool Enabled
     {

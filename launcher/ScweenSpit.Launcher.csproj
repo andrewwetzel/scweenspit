@@ -6,7 +6,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ScweenSpit.Launcher</RootNamespace>
-    <AssemblyName>ScweenSpit-Setup</AssemblyName>
+    <!-- This IS ScweenSpit as far as anyone downloading it is concerned. -->
+    <AssemblyName>ScweenSpit</AssemblyName>
     <!-- LibraryImport source generation emits unsafe marshalling code -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 

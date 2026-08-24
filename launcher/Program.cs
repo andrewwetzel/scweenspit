@@ -5,12 +5,16 @@ using System.Runtime.InteropServices;
 namespace ScweenSpit.Launcher;
 
 /// <summary>
-/// A tiny native launcher for the framework-dependent build of ScweenSpit.
+/// ScweenSpit's front door: one file you can hand to anyone.
 ///
-/// The app itself is ~190 KB but needs the .NET Desktop Runtime, and an app that needs the runtime
-/// cannot be the thing that checks for it. So this is compiled ahead of time to native code: it
-/// runs anywhere, works out whether the runtime is present, offers to install it if not, unpacks
-/// the app and starts it.
+/// The app is ~250 KB against the shared .NET Desktop Runtime, but an app that needs the runtime
+/// cannot be the thing that checks for it. So this is compiled ahead of time to native code — it
+/// starts on a machine with no .NET at all, installs the runtime if it is missing, then unpacks the
+/// app beside your settings and runs it.
+///
+/// Hosting the runtime in-process (via hostfxr) would keep it to literally one process rather than
+/// two, but it is a great deal of interop to get wrong for no visible difference, so the app is
+/// started as a child instead.
 /// </summary>
 internal static partial class Program
 {
@@ -28,17 +32,26 @@ internal static partial class Program
             var exe = Unpack();
             if (exe is null)
             {
-                Warn("This launcher was built without the application inside it. "
-                   + "Download ScweenSpit.exe directly instead.");
+                Warn("This build has no application inside it — the payload was not embedded.");
                 return 1;
             }
 
-            Process.Start(new ProcessStartInfo(exe)
+            // Already running: say nothing and get out of the way. The app keeps a single-instance
+            // mutex of its own, but it would exit silently and look like nothing happened.
+            if (AlreadyRunning(exe)) return 0;
+
+            var start = new ProcessStartInfo(exe)
             {
-                UseShellExecute = true,
+                UseShellExecute = false,
                 WorkingDirectory = Path.GetDirectoryName(exe)!,
                 Arguments = string.Join(' ', args.Select(Quote)),
-            });
+            };
+
+            // So "Start with Windows" registers this file rather than the unpacked copy: this is
+            // the one the user actually has, and it repairs the unpacked copy on every launch.
+            start.Environment["SCWEENSPIT_LAUNCHER"] = Environment.ProcessPath ?? "";
+
+            Process.Start(start);
             return 0;
         }
         catch (Exception ex)
@@ -49,6 +62,22 @@ internal static partial class Program
     }
 
     private static string Quote(string a) => a.Contains(' ') ? $"\"{a}\"" : a;
+
+    private static bool AlreadyRunning(string exe)
+    {
+        foreach (var p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe)))
+        {
+            try
+            {
+                if (p.Id != Environment.ProcessId &&
+                    string.Equals(p.MainModule?.FileName, exe, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            catch { /* another user's process, or exited while we looked */ }
+            finally { p.Dispose(); }
+        }
+        return false;
+    }
 
     // ---- runtime detection -------------------------------------------------
 
@@ -178,8 +207,9 @@ internal static partial class Program
     // ---- unpacking ---------------------------------------------------------
 
     /// <summary>
-    /// Writes the embedded application next to the user's data, and only when it differs from what
-    /// is already there, so repeat launches are a file-length comparison rather than a copy.
+    /// Writes the embedded application beside the user's settings, and only when it differs from
+    /// what is already there. Comparing content hashes rather than file lengths means an update
+    /// that happens to produce the same size still replaces the unpacked copy.
     /// </summary>
     private static string? Unpack()
     {
@@ -191,16 +221,32 @@ internal static partial class Program
         Directory.CreateDirectory(dir);
 
         var exe = Path.Combine(dir, "ScweenSpit.exe");
-        if (File.Exists(exe) && new FileInfo(exe).Length == payload.Length) return exe;
+        var stampFile = exe + ".stamp";
+
+        var stamp = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload));
+        payload.Position = 0;
+
+        if (File.Exists(exe) && ReadStamp(stampFile) == stamp) return exe;
 
         var staging = exe + ".new";
         using (var file = File.Create(staging)) payload.CopyTo(file);
 
-        // Replacing a running executable fails; that is fine - the copy already there will do.
-        try { File.Move(staging, exe, overwrite: true); }
+        try
+        {
+            // Replacing a running executable fails, and that is fine: the copy already there is
+            // the one running, and the next launch will find it stale and try again.
+            File.Move(staging, exe, overwrite: true);
+            File.WriteAllText(stampFile, stamp);
+        }
         catch (IOException) { try { File.Delete(staging); } catch { } }
 
         return exe;
+    }
+
+    private static string? ReadStamp(string path)
+    {
+        try { return File.Exists(path) ? File.ReadAllText(path).Trim() : null; }
+        catch { return null; }
     }
 
     // ---- messages ----------------------------------------------------------
