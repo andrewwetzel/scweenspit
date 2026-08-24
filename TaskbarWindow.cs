@@ -180,7 +180,28 @@ public sealed class TaskbarWindow : Form
     private bool Vertical => Edge is BarEdge.Left or BarEdge.Right;
     private int Breadth => Vertical ? Width : Height;
     private int Slot => Math.Max(MinSlot, Math.Min(Breadth, settings.IconsOnly ? Breadth : 200));
-    private int IconSize => Math.Clamp(Breadth / 2, 16, 32);
+    /// <summary>Thin strip at the docked edge that the window marks live in.</summary>
+    private const int MarkStrip = 5;
+
+    /// <summary>
+    /// Icons take most of the bar rather than half of it. Half leaves as much empty space as icon,
+    /// which reads as a gap rather than as breathing room, and the marks at the docked edge tip the
+    /// balance further towards that edge.
+    /// </summary>
+    private int IconSize => Math.Clamp((Breadth - MarkStrip) * 5 / 8, 16, 40);
+
+    /// <summary>
+    /// The part of a slot the icon is centred in: everything except the mark strip. Centring on the
+    /// whole slot pushes the icon towards the docked edge visually, because the marks fill the space
+    /// on that side and nothing fills it on the other.
+    /// </summary>
+    private Rectangle IconArea(Rectangle slot) => Edge switch
+    {
+        BarEdge.Bottom => slot with { Height = slot.Height - MarkStrip },
+        BarEdge.Top => new Rectangle(slot.X, slot.Y + MarkStrip, slot.Width, slot.Height - MarkStrip),
+        BarEdge.Right => slot with { Width = slot.Width - MarkStrip },
+        _ => new Rectangle(slot.X + MarkStrip, slot.Y, slot.Width - MarkStrip, slot.Height),
+    };
 
     // ---- contents ----------------------------------------------------------
 
@@ -531,9 +552,10 @@ public sealed class TaskbarWindow : Form
             if (icon is not null)
             {
                 int size = IconSize;
+                var within = IconArea(slot);
                 var box = settings.IconsOnly
-                    ? new Rectangle(slot.X + (slot.Width - size) / 2, slot.Y + (slot.Height - size) / 2, size, size)
-                    : new Rectangle(slot.X + 8, slot.Y + (slot.Height - size) / 2, size, size);
+                    ? new Rectangle(within.X + (within.Width - size) / 2, within.Y + (within.Height - size) / 2, size, size)
+                    : new Rectangle(within.X + 8, within.Y + (within.Height - size) / 2, size, size);
 
                 // A pinned app that is not running, and a minimised window, are both "not here";
                 // fading the icon says so without needing a legend.
@@ -545,7 +567,9 @@ public sealed class TaskbarWindow : Form
 
             if (settings.IconsOnly) continue;
 
-            var caption = new Rectangle(slot.X + IconSize + 14, slot.Y, slot.Width - IconSize - 20, slot.Height);
+            var within2 = IconArea(slot);
+            var caption = new Rectangle(within2.X + IconSize + 14, within2.Y,
+                                        within2.Width - IconSize - 20, within2.Height);
             using var format = new StringFormat
             {
                 LineAlignment = StringAlignment.Center,
