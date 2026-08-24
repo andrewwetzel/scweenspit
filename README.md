@@ -181,6 +181,14 @@ It shows running windows as icons, accents the foreground one, underlines the re
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
 
+**Import from the Windows taskbar** (Settings → Taskbar) copies whatever is pinned there onto the
+bar, in the same order. The pins themselves are ordinary shortcuts in the Quick Launch folder, so
+reading them is straightforward; the order is not, since Explorer keeps it in an undocumented blob of
+shell item identifiers. Rather than parse that, ScweenSpit looks for each executable's name inside it
+and sorts by where it first appears — close enough, and it degrades to alphabetical when a name is
+not found. Store apps are skipped and counted: they are pinned as an application id rather than a
+file, so there is nothing to launch or take an icon from.
+
 **Right-click any button to pin it.** A pinned application keeps its place whether or not it is
 running: faded and unmarked when it is not, and clicking launches it. Everything unpinned follows in
 the order it appeared, and stays there — `EnumWindows` reports z-order, which changes every time

@@ -236,7 +236,7 @@ public sealed class SettingsForm : Form
                     config.SetZones(geo.Device, make());
                     applyChanges();
                     overlay.Flash(zones);
-                    ShowLayouts();
+                    BeginInvoke(ShowLayouts);
                 };
                 presets.Controls.Add(b);
             }
@@ -381,7 +381,7 @@ public sealed class SettingsForm : Form
         {
             config.HideWindowsTaskbar = hide.Checked;
             Save();
-            ShowTaskbar();
+            BeginInvoke(ShowTaskbar);
         };
         page.Controls.Add(hide);
         page.Controls.Add(Theme.Caption(
@@ -468,7 +468,7 @@ public sealed class SettingsForm : Form
                 if (enabled.Checked) config.Bars[device] = settings ?? new BarSettings();
                 else config.Bars.Remove(device);
                 Save();
-                ShowTaskbar();
+                BeginInvoke(ShowTaskbar);
             };
             page.Controls.Add(enabled);
 
@@ -518,6 +518,32 @@ public sealed class SettingsForm : Form
                 Row(page, "Gap from the edges (pixels)", gap);
             }
 
+            var barSettings = settings;
+            page.Controls.Add(new Label
+            {
+                Text = barSettings.Pinned.Count == 0
+                    ? "No pinned applications — right-click any button on the bar to pin it."
+                    : $"{barSettings.Pinned.Count} pinned application{(barSettings.Pinned.Count == 1 ? "" : "s")}",
+                AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+                Margin = new Padding(0, 12, 0, 4),
+            });
+
+            var pinButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 500 };
+
+            var import = Theme.Action("Import from the Windows taskbar");
+            import.AutoSize = true;
+            import.Click += (_, _) => ImportWindowsPins(barSettings);
+            pinButtons.Controls.Add(import);
+
+            if (barSettings.Pinned.Count > 0)
+            {
+                var clear = Theme.Action("Unpin all");
+                clear.AutoSize = true;
+                clear.Click += (_, _) => { barSettings.Pinned.Clear(); Save(); BeginInvoke(ShowTaskbar); };
+                pinButtons.Controls.Add(clear);
+            }
+            page.Controls.Add(pinButtons);
+
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };
             page.Controls.Add(iconsOnly);
@@ -537,6 +563,38 @@ public sealed class SettingsForm : Form
     }
 
     // ---- claude usage ------------------------------------------------------
+
+    /// <summary>
+    /// Copies the Windows taskbar's pinned applications onto this bar, keeping anything already
+    /// pinned. Store apps are counted rather than imported: they are pinned as an application id
+    /// rather than a file, so there is no executable to launch or take an icon from.
+    /// </summary>
+    private void ImportWindowsPins(BarSettings bar)
+    {
+        var pins = WindowsPins.Read(out int skipped);
+
+        int added = 0;
+        foreach (var pin in pins)
+        {
+            if (bar.Pinned.Any(p => string.Equals(p, pin.Path, StringComparison.OrdinalIgnoreCase))) continue;
+
+            bar.Pinned.Add(pin.Path);
+            added++;
+        }
+
+        if (added > 0) Save();
+
+        var summary = pins.Count == 0
+            ? "Found nothing pinned to the Windows taskbar."
+            : $"Added {added} of {pins.Count} pinned application{(pins.Count == 1 ? "" : "s")}"
+              + (added < pins.Count ? " — the rest were already there" : "")
+              + (skipped > 0 ? $".\n\n{skipped} Store app{(skipped == 1 ? " was" : "s were")} skipped: "
+                             + "they are pinned as an application id rather than a file, so there is "
+                             + "nothing to launch or take an icon from." : ".");
+
+        MessageBox.Show(summary, "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        BeginInvoke(ShowTaskbar);
+    }
 
     private void ShowClaude()
     {
@@ -684,7 +742,7 @@ public sealed class SettingsForm : Form
         }
 
         _ = before;
-        ShowTaskbar();
+        BeginInvoke(ShowTaskbar);
     }
 
     /// <summary>
@@ -702,7 +760,7 @@ public sealed class SettingsForm : Form
         {
             overlay.Closed -= back!;
             Reveal();
-            ShowLayouts();   // reflect whatever was just dragged
+            BeginInvoke(ShowLayouts);   // reflect whatever was just dragged
         };
         overlay.Closed += back;
     }
@@ -801,7 +859,7 @@ public sealed class SettingsForm : Form
         var reload = Theme.Action("Reload config from disk", primary: true);
         reload.Width = 220;
         reload.Margin = new Padding(0, 16, 0, 0);
-        reload.Click += (_, _) => { reloadFromDisk(); ShowDiagnostics(); };
+        reload.Click += (_, _) => { reloadFromDisk(); BeginInvoke(ShowDiagnostics); };
         page.Controls.Add(reload);
     }
 
@@ -844,7 +902,7 @@ public sealed class SettingsForm : Form
             profile.Name = string.IsNullOrWhiteSpace(name.Text) ? null : name.Text.Trim();
             config.Profiles[signature] = profile;
             Save();
-            ShowDisplays();
+            BeginInvoke(ShowDisplays);
         };
         page.Controls.Add(save);
         page.Controls.Add(Theme.Caption(
@@ -876,7 +934,7 @@ public sealed class SettingsForm : Form
             var forget = Theme.Action("Forget");
             forget.AutoSize = true;
             var doomed = key;
-            forget.Click += (_, _) => { config.Profiles.Remove(doomed); Save(); ShowDisplays(); };
+            forget.Click += (_, _) => { config.Profiles.Remove(doomed); Save(); BeginInvoke(ShowDisplays); };
             row.Controls.Add(forget);
 
             page.Controls.Add(row);
