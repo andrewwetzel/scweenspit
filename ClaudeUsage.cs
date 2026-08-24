@@ -472,15 +472,23 @@ public static class ClaudeUsage
         var cookie = string.IsNullOrWhiteSpace(org)
             ? $"sessionKey={key}"
             : $"sessionKey={key}; lastActiveOrg={org}";
-        var direct = ViaHttpClient(url, cookie);
 
-        if (direct is { Status: 403 } && direct.Body.Length < 4096 && !direct.Body.TrimStart().StartsWith('{'))
-        {
-            Log.WriteOnce("claude-tls", "claude.ai challenged the direct request; falling back to curl");
-            return ViaCurl(url, cookie) ?? direct;
-        }
+        // curl first, deliberately, and not as a fallback.
+        //
+        // claude.ai sits behind Cloudflare, which fingerprints the TLS handshake itself to spot
+        // clients that are not browsers. No amount of browser-shaped headers helps: what gives it
+        // away is the handshake. curl on Windows uses schannel — the same TLS stack Edge and Chrome
+        // use — so its fingerprint matches a real browser, while .NET's does not. The challenge
+        // that comes back is a 401 or 403, which is indistinguishable from a rejected key, and is
+        // why a perfectly good session key reported as expired.
+        var viaCurl = ViaCurl(url, cookie);
+        if (viaCurl is not null) return viaCurl;
 
-        return direct ?? ViaCurl(url, cookie);
+        Log.WriteOnce("claude-transport",
+            "curl was unavailable or failed; falling back to the .NET client, which Cloudflare "
+          + "may challenge regardless of the key");
+
+        return ViaHttpClient(url, cookie);
     }
 
     private static Response? ViaHttpClient(string url, string cookie)
@@ -544,7 +552,6 @@ public static class ClaudeUsage
                 .AppendLine($"--url \"{Escape(url)}\"")
                 .AppendLine($"-H \"User-Agent: {Escape(BrowserAgent)}\"")
                 .AppendLine("-H \"anthropic-client-platform: web_claude_ai\"")
-                .AppendLine("-H \"Accept: application/json\"")
                 .AppendLine($"-H \"Cookie: {Escape(cookie)}\"")
                 .ToString();
 
