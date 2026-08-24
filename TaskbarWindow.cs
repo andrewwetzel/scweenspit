@@ -24,8 +24,16 @@ public sealed class TaskbarWindow : Form
     private readonly BarSettings settings;
     private readonly ZoneManager zones;
 
-    /// <summary>A slot on the bar: a running window, a pinned application, or a pinned one running.</summary>
-    private sealed record Button(string Path, TaskWindow? Window, bool Pinned);
+    /// <summary>
+    /// A slot on the bar: one application, with however many windows it has open. Grouping by
+    /// application rather than by window is what keeps a bar of icons readable — six Chrome windows
+    /// are one thing you switch to, not six.
+    /// </summary>
+    private sealed record Button(string Path, List<TaskWindow> Windows, bool Pinned)
+    {
+        public TaskWindow? First => Windows.Count > 0 ? Windows[0] : null;
+        public bool Running => Windows.Count > 0;
+    }
 
     private List<TaskWindow> windows = [];
     private List<Button> buttons = [];
@@ -36,6 +44,10 @@ public sealed class TaskbarWindow : Form
     private readonly List<IntPtr> order = [];
 
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
+
+    // Which window of each group is next. Clicking a grouped icon walks its windows, the way a
+    // Plasma task manager does, rather than always raising the same one.
+    private readonly Dictionary<string, int> cycle = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
     private int hovered = -1, hoveredStatus = -1;
     private bool hoveredUsage;
@@ -107,7 +119,8 @@ public sealed class TaskbarWindow : Form
             return;
         }
 
-        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness, inset);
+        // Reserve the bar plus its gap; the window is then inset back to the thickness asked for.
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + 2 * inset, inset);
     }
 
     protected override CreateParams CreateParams
@@ -183,7 +196,7 @@ public sealed class TaskbarWindow : Form
                 icons[w.Handle] = WindowList.IconFor(w.Handle) ?? new Bitmap(32, 32);
 
         foreach (var button in buttons)
-            if (button.Window is null && !fileIcons.ContainsKey(button.Path))
+            if (!button.Running && !fileIcons.ContainsKey(button.Path))
                 fileIcons[button.Path] = WindowList.IconForFile(button.Path) ?? new Bitmap(32, 32);
 
         foreach (var stale in icons.Keys.Where(h => !IsWindow(h)).ToList())
@@ -265,18 +278,22 @@ public sealed class TaskbarWindow : Form
                         .Where(w => w is not null).Select(w => w!).ToList();
 
         var laid = new List<Button>();
-        var placed = new HashSet<IntPtr>();
+        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var pin in settings.Pinned)
         {
-            var running = live.Where(w => Same(w.Path, pin)).ToList();
-            if (running.Count == 0) { laid.Add(new Button(pin, null, true)); continue; }
-
-            foreach (var w in running) { laid.Add(new Button(pin, w, true)); placed.Add(w.Handle); }
+            laid.Add(new Button(pin, live.Where(w => Same(w.Path, pin)).ToList(), true));
+            placed.Add(pin);
         }
 
+        // Everything else, one button per application, positioned where its first window appeared.
         foreach (var w in live)
-            if (!placed.Contains(w.Handle)) laid.Add(new Button(w.Path, w, false));
+        {
+            if (placed.Contains(w.Path)) continue;
+
+            placed.Add(w.Path);
+            laid.Add(new Button(w.Path, live.Where(o => Same(o.Path, w.Path)).ToList(), false));
+        }
 
         return laid;
     }
@@ -333,9 +350,13 @@ public sealed class TaskbarWindow : Form
         Invalidate();
     }
 
-    private static string Describe(Button b) => b.Window is { } w
-        ? (w.Minimised ? $"{w.Title}  (minimised)" : w.Title)
-        : $"{NameOf(b.Path)}  (not running)";
+    private static string Describe(Button b) => b.Windows.Count switch
+    {
+        0 => $"{NameOf(b.Path)}  (not running)",
+        1 => b.Windows[0].Minimised ? $"{b.Windows[0].Title}  (minimised)" : b.Windows[0].Title,
+        _ => $"{NameOf(b.Path)} — {b.Windows.Count} windows\n" +
+             string.Join("\n", b.Windows.Take(6).Select(w => "  " + w.Title)),
+    };
 
     private string TrayTip(Tray item) => item switch
     {
@@ -393,10 +414,32 @@ public sealed class TaskbarWindow : Form
         if (e.Button == MouseButtons.Right) { ShowButtonMenu(button, Cursor.Position); return; }
         if (e.Button != MouseButtons.Left) return;
 
-        if (button.Window is { } window) WindowList.Toggle(window.Handle);
-        else Launch(button.Path);
-
+        Activate(button);
         Rebuild();
+    }
+
+    /// <summary>
+    /// One window behaves like a taskbar button — raise it, or put it away if it is already in
+    /// front. Several, and each click moves to the next: minimising the group on every second click
+    /// would make cycling through three windows take six.
+    /// </summary>
+    private void Activate(Button button)
+    {
+        if (!button.Running) { Launch(button.Path); return; }
+        if (button.Windows.Count == 1) { WindowList.Toggle(button.Windows[0].Handle); return; }
+
+        var foreground = GetForegroundWindow();
+        int current = button.Windows.FindIndex(w => w.Handle == foreground);
+
+        int next = current >= 0
+            ? (current + 1) % button.Windows.Count
+            : cycle.TryGetValue(button.Path, out var last) ? last % button.Windows.Count : 0;
+
+        cycle[button.Path] = next;
+
+        var target = button.Windows[next].Handle;
+        if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+        SetForegroundWindow(target);
     }
 
     private static void Launch(string path)
@@ -426,12 +469,14 @@ public sealed class TaskbarWindow : Form
             }));
         }
 
-        if (button.Window is { } window)
+        if (button.Running)
         {
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(new ToolStripMenuItem("Close window", null, (_, _) =>
+
+            var label = button.Windows.Count == 1 ? "Close window" : $"Close all {button.Windows.Count} windows";
+            menu.Items.Add(new ToolStripMenuItem(label, null, (_, _) =>
             {
-                WindowList.Close(window.Handle);
+                foreach (var w in button.Windows) WindowList.Close(w.Handle);
                 Rebuild();
             }));
         }
@@ -462,24 +507,18 @@ public sealed class TaskbarWindow : Form
         {
             var slot = SlotAt(i);
             var button = buttons[i];
-            var w = button.Window;
+            var w = button.First;
 
-            bool front = w is not null && w.Handle == foreground;
+            bool front = button.Windows.Any(x => x.Handle == foreground);
             if (front) g.FillRectangle(active, slot);
             else if (i == hovered) g.FillRectangle(hot, slot);
 
-            // Three states worth telling apart at a glance: in front, running, and merely pinned.
-            if (w is not null)
-            {
-                int len = front ? Slot / 2 : Slot / 5;
-                var mark = Vertical
-                    ? new Rectangle(Edge == BarEdge.Left ? 0 : Width - 3, slot.Y + (slot.Height - len) / 2, 3, len)
-                    : new Rectangle(slot.X + (slot.Width - len) / 2, Edge == BarEdge.Top ? 0 : Height - 3, len, 3);
-                g.FillRectangle(front ? accent : dim, mark);
-            }
+            // One mark per window, up to four: a glance says both "running" and "how many", which
+            // is the whole point of grouping them behind one icon.
+            if (button.Running) PaintWindowMarks(g, slot, button, front, accent, dim);
 
-            var icon = w is not null
-                ? icons.GetValueOrDefault(w.Handle)
+            var icon = button.Running
+                ? icons.GetValueOrDefault(w!.Handle)
                 : fileIcons.GetValueOrDefault(button.Path);
 
             if (icon is not null)
@@ -491,7 +530,9 @@ public sealed class TaskbarWindow : Form
 
                 // A pinned app that is not running, and a minimised window, are both "not here";
                 // fading the icon says so without needing a legend.
-                float opacity = w is null ? 0.45f : w.Minimised ? 0.62f : 1f;
+                float opacity = !button.Running ? 0.45f
+                              : button.Windows.All(x => x.Minimised) ? 0.62f
+                              : 1f;
                 DrawIcon(g, icon, box, opacity);
             }
 
@@ -504,11 +545,40 @@ public sealed class TaskbarWindow : Form
                 Trimming = StringTrimming.EllipsisCharacter,
                 FormatFlags = StringFormatFlags.NoWrap,
             };
-            g.DrawString(w?.Title ?? NameOf(button.Path), label, w is null || w.Minimised ? dim : text,
-                         caption, format);
+            var caption2 = button.Windows.Count > 1
+                ? $"{NameOf(button.Path)} ({button.Windows.Count})"
+                : w?.Title ?? NameOf(button.Path);
+
+            g.DrawString(caption2, label, !button.Running || w!.Minimised ? dim : text, caption, format);
         }
 
         PaintTray(g);
+    }
+
+    /// <summary>
+    /// The underline, split into one segment per open window. Plasma does this and it reads
+    /// instantly: a single bar is one window, three stubs are three.
+    /// </summary>
+    private void PaintWindowMarks(Graphics g, Rectangle slot, Button button, bool front,
+                                  Brush accent, Brush dim)
+    {
+        int count = Math.Min(button.Windows.Count, 4);
+        int total = front ? Slot / 2 : Slot / 3;
+        int gap = count > 1 ? 3 : 0;
+        int each = Math.Max(3, (total - gap * (count - 1)) / count);
+        int span = each * count + gap * (count - 1);
+
+        for (int i = 0; i < count; i++)
+        {
+            int offset = i * (each + gap);
+            var mark = Vertical
+                ? new Rectangle(Edge == BarEdge.Left ? 0 : Width - 3,
+                                slot.Y + (slot.Height - span) / 2 + offset, 3, each)
+                : new Rectangle(slot.X + (slot.Width - span) / 2 + offset,
+                                Edge == BarEdge.Top ? 0 : Height - 3, each, 3);
+
+            g.FillRectangle(front ? accent : dim, mark);
+        }
     }
 
     private static void DrawIcon(Graphics g, Bitmap icon, Rectangle box, float opacity)

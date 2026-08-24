@@ -173,12 +173,17 @@ shrinks the work area and every application on the machine keeps clear of it —
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
 **Float clear of the edges** makes it a free-standing dock: it sits inside its reserved strip with a
-gap all round and every corner rounded. The space stays reserved either way — only the bar moves in,
-so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
+gap all round and every corner rounded. The gap is added to the thickness rather than taken out of
+it, so a 50px bar is 50px whether it floats or not. The space stays reserved either way — only the
+bar moves in, so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
-It shows running windows as icons, accents the foreground one, underlines the rest, and fades the
-minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
+It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
+thing you switch to, not six. The underline splits into a segment per open window, so a glance says
+both *running* and *how many*, and clicking walks through them rather than always raising the same
+one. A single window still toggles: raise it, click again to put it away.
+
+It accents the foreground application and fades one whose windows are all minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
 
 **Import from the Windows taskbar** (Settings → Taskbar) copies whatever is pinned there onto the
@@ -199,7 +204,9 @@ also closes a window.
 Windows still animates a minimised window towards where its button would have been — a corner with
 nothing in it — which reads as a glitch. It is a system setting, so it is restored on exit.
 
-**Show Claude usage bars** puts the claude.ai usage strip at the near end of the status cluster. It
+**Show Claude usage bars** puts the claude.ai usage strip at the near end of the status cluster, a
+row per limit with its own figure beside it — one headline percentage cannot say which limit it
+belongs to, and bars without numbers cannot say how full they are. It
 appears as soon as you tick it, showing an empty track until usage tracking is switched on and a
 session key is saved under Settings → Claude usage — hiding it until then made the toggle look
 broken. Clicking it goes to the settings page while it is unconfigured, and to claude.ai once it is.

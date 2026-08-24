@@ -85,7 +85,7 @@ public sealed class BarSettings
     public bool Floating { get; set; }
 
     /// <summary>How far a floating bar sits from the edges of its reserved strip, in pixels.</summary>
-    public int FloatMargin { get; set; } = 10;
+    public int FloatMargin { get; set; } = 6;
 
     /// <summary>
     /// Applications kept on the bar whether or not they are running, in the order they appear.
@@ -399,7 +399,9 @@ public sealed class SplitConfig
             // A bar thinner than this cannot show anything; a bar wider than a third of a display is
             // almost certainly a typo, and it eats the work area for every app on that screen.
             bar.Thickness = Math.Clamp(bar.Thickness, 28, 600);
-            bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, Math.Max(0, bar.Thickness / 2 - 8));
+            // The gap is added to the thickness rather than taken out of it, so it only needs a
+            // sane upper bound of its own.
+            bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, 40);
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
 

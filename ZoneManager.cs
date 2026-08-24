@@ -125,7 +125,10 @@ public sealed class ZoneManager(SplitConfig config)
 
     private static RECT? Strip(RECT zone, BarSettings bar)
     {
-        int thickness = Math.Min(bar.Thickness, Math.Min(zone.Width, zone.Height) / 2);
+        // A floating bar needs room for its gap on top of its own thickness, or setting 50px would
+        // give a 30px bar in a 50px strip - thinner than asked for, and surrounded by dead space.
+        int wanted = bar.Thickness + (bar.Floating ? 2 * bar.FloatMargin : 0);
+        int thickness = Math.Min(wanted, Math.Min(zone.Width, zone.Height) / 2);
         if (thickness <= 0) return null;
 
         return SplitConfig.ParseEdge(bar.Edge) switch
