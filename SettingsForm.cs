@@ -365,6 +365,54 @@ public sealed class SettingsForm : Form
             "Moving the taskbar restarts Windows Explorer, which briefly blanks the desktop and closes " +
             "any open File Explorer windows. Only the primary display's taskbar is moved; secondary " +
             "displays keep their own. Per-display reserved space lives on the Layouts page."));
+
+        page.Controls.Add(new Label
+        {
+            Text = "A bar of our own", AutoSize = true, ForeColor = Theme.Text,
+            Font = Theme.Face(13f, FontStyle.Bold), Margin = new Padding(0, 22, 0, 2),
+        });
+        page.Controls.Add(Theme.Caption(
+            "Windows will not put its taskbar anywhere but the bottom — but nothing stops us docking " +
+            "one of ours to any edge. It registers as a Win32 appbar, so Windows reserves the space " +
+            "and every application keeps clear of it, exactly as it does for the real taskbar. Pair it " +
+            "with auto-hide above to get a vertical bar on the side."));
+
+        foreach (var geo in ZoneManager.AllMonitors())
+        {
+            var device = geo.Device;
+            config.Bars.TryGetValue(device, out var settings);
+
+            page.Controls.Add(new Label
+            {
+                Text = $"{device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}",
+                AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(11f, FontStyle.Bold),
+                Margin = new Padding(0, 14, 0, 6),
+            });
+
+            var enabled = Theme.Toggle("Show a ScweenSpit bar on this display", settings is not null);
+            enabled.CheckedChanged += (_, _) =>
+            {
+                if (enabled.Checked) config.Bars[device] = settings ?? new BarSettings();
+                else config.Bars.Remove(device);
+                Save();
+                ShowTaskbar();
+            };
+            page.Controls.Add(enabled);
+
+            if (settings is null) continue;
+
+            var edge = Theme.Choice(SplitConfig.EdgeNames, settings.Edge);
+            edge.SelectedIndexChanged += (_, _) => { settings.Edge = (string)edge.SelectedItem!; Save(); };
+            Row(page, "Docked to", edge);
+
+            var thickness = Theme.Number(settings.Thickness, 28, 600, 10);
+            thickness.ValueChanged += (_, _) => { settings.Thickness = (int)thickness.Value; Save(); };
+            Row(page, "Thickness (pixels)", thickness);
+
+            var onlyHere = Theme.Toggle("List only windows on this display", settings.ThisDisplayOnly);
+            onlyHere.CheckedChanged += (_, _) => { settings.ThisDisplayOnly = onlyHere.Checked; Save(); };
+            page.Controls.Add(onlyHere);
+        }
     }
 
     private void MoveTaskbar(TaskbarEdge edge)

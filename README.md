@@ -150,10 +150,35 @@ What does work on Windows 11:
   zone set to cover the taskbar and you get the whole display, with the bar on demand.
 - **Reserved margins** (Layouts) to keep a strip clear on any edge, for a third-party dock.
 
-If you genuinely need a vertical taskbar, it takes a shell modification — ExplorerPatcher, a Windhawk
-mod, StartAllBack, or a replacement bar such as RetroBar. Those patch or replace Explorer, so they
-tend to break on feature updates; that is the trade, and it is outside what this tool should be
-doing to your machine.
+### A bar of our own
+
+Windows will not put *its* taskbar anywhere but the bottom. Nothing stops us docking one of ours to
+any edge — which is exactly how the commercial tools do it.
+
+Turn one on per display under **Taskbar**, pick an edge and a thickness. It registers as a Win32
+**appbar**, the same mechanism the shell's own taskbar uses, so Windows shrinks the work area and
+every application on the machine keeps clear of it — not just windows ScweenSpit manages. Zones
+follow automatically, because they are measured from the work area.
+
+It lists application windows with their icons, marks the active one, dims the minimised ones, and
+carries a clock. Clicking a button brings that window forward, or minimises it if it is already in
+front. By default it lists only windows on its own display.
+
+Pair it with **auto-hide** and you have a vertical bar on the right and nothing along the bottom —
+the arrangement Windows 11 removed.
+
+Deciding what belongs on a taskbar is the same judgement Alt+Tab makes, and it is fiddlier than it
+looks: owned dialogs, tool windows, and the cloaked husks suspended UWP apps leave behind all have
+to be filtered out. A window qualifies when it is the last active popup of its own root owner.
+
+The reservation is released when ScweenSpit exits. That matters more than it sounds — an appbar
+registration that outlives its process leaves the desktop permanently short of that strip until you
+sign out.
+
+If you want the *Windows* taskbar itself moved, that still takes a shell modification —
+ExplorerPatcher, a Windhawk mod, StartAllBack, or a replacement such as RetroBar. Those patch or
+replace Explorer and tend to break on feature updates; that is the trade, and it is outside what
+this tool should be doing to your machine.
 
 ## Keeping Windows out of the way
 
@@ -241,7 +266,10 @@ fitted independently, so an absurd left margin cannot void a perfectly good top 
 | `SettingsForm.cs` / `Theme.cs` | the settings window and its dark palette |
 | `WindowsSnap.cs` | suppressing Windows' own snap behaviour |
 | `Startup.cs` | run-at-login registry entry |
-| `Taskbar.cs` | reading and relocating the Windows taskbar |
+| `Taskbar.cs` | reading, relocating and auto-hiding the Windows taskbar |
+| `AppBar.cs` | Win32 appbar registration — reserving screen space system-wide |
+| `TaskbarWindow.cs` / `BarManager.cs` | our own dockable taskbar |
+| `WindowList.cs` | deciding which windows belong on a taskbar |
 | `Program.cs` | DPI awareness, single-instance guard, message loop |
 | `launcher/` | the native self-installing launcher (separate project) |
 

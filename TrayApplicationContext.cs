@@ -14,6 +14,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ZoneManager zones;
     private readonly WinEventHookService hook;
     private readonly ZoneOverlay overlay = new();
+    private readonly BarManager bars = new();
 
     // Sampling the foreground window when the menu item is clicked always returns our own window:
     // NotifyIcon calls SetForegroundWindow on its hidden window before showing the menu. So track
@@ -67,6 +68,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         foregroundWatch.Start();
 
         ApplySnapSuppression();
+        bars.Apply(config);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
         UpdateTrayText();
@@ -107,6 +109,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void ApplyChanges()
     {
         ApplySnapSuppression();
+        bars.Apply(config);
 
         // Drag-to-zone rides the same hooks as clamping, so the hooks must stay up for either.
         if (config.AutoClamp || config.DragToZone) hook.Start(); else hook.Stop();
@@ -307,6 +310,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeySpan);
 
             foregroundWatch.Dispose();
+            bars.Dispose();          // releases the appbar reservations
             hook.Dispose();
             overlay.Dispose();
             settings?.Dispose();

@@ -76,6 +76,14 @@ public static class Native
     public const uint VK_RIGHT = 0x27;
     public const uint VK_Z     = 0x5A;
     public const uint VK_S     = 0x53;
+    public const uint WM_APP = 0x8000;
+    public const uint WM_GETICON = 0x007F;
+    public const int  ICON_SMALL2 = 2, ICON_SMALL = 0, ICON_BIG = 1;
+    public const int  GCLP_HICON = -14, GCLP_HICONSM = -34;
+    public const uint GA_ROOTOWNER = 3;
+    public const uint GW_OWNER = 4;
+    public const int  SW_MINIMIZE = 6, SW_SHOWNA = 8;
+
     public const int  VK_SHIFT   = 0x10;
     public const int  VK_CONTROL = 0x11;
     public const int  VK_MENU    = 0x12;   // Alt
@@ -142,6 +150,16 @@ public static class Native
         public IntPtr lParam;   // LPARAM: 8 bytes on x64, so IntPtr rather than int
     }
 
+    public const uint ABM_NEW               = 0x00000000;
+    public const uint ABM_REMOVE            = 0x00000001;
+    public const uint ABM_QUERYPOS          = 0x00000002;
+    public const uint ABM_SETPOS            = 0x00000003;
+    public const uint ABM_ACTIVATE          = 0x00000006;
+    public const uint ABM_WINDOWPOSCHANGED  = 0x00000009;
+    public const int  ABN_STATECHANGE       = 0x0000000;
+    public const int  ABN_POSCHANGED        = 0x0000001;
+    public const int  ABN_FULLSCREENAPP     = 0x0000002;
+    public const int  ABN_WINDOWARRANGE     = 0x0000003;
     public const uint ABM_GETTASKBARPOS = 0x00000005;
     public const uint ABM_GETSTATE       = 0x00000004;
     public const uint ABM_SETSTATE       = 0x0000000A;
@@ -200,6 +218,35 @@ public static class Native
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+    [DllImport("user32.dll")] public static extern IntPtr GetLastActivePopup(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    private static extern IntPtr GetClassLongPtr64(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongW")]
+    private static extern uint GetClassLong32(IntPtr hWnd, int index);
+
+    public static IntPtr GetClassLongPtr(IntPtr hWnd, int index) =>
+        IntPtr.Size == 8 ? GetClassLongPtr64(hWnd, index) : new IntPtr(GetClassLong32(hWnd, index));
+
+    public static string WindowTitle(IntPtr hWnd)
+    {
+        int length = GetWindowTextLength(hWnd);
+        if (length <= 0) return string.Empty;
+
+        var sb = new System.Text.StringBuilder(length + 1);
+        return GetWindowText(hWnd, sb, sb.Capacity) > 0 ? sb.ToString() : string.Empty;
+    }
 
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);

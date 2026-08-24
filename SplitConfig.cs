@@ -69,6 +69,19 @@ public sealed class Margins
     }
 }
 
+/// <summary>A ScweenSpit taskbar docked to one edge of one display.</summary>
+public sealed class BarSettings
+{
+    /// <summary>Left, Top, Right or Bottom.</summary>
+    public string Edge { get; set; } = "Right";
+
+    /// <summary>Width of a side bar, or height of a top/bottom one, in pixels.</summary>
+    public int Thickness { get; set; } = 210;
+
+    /// <summary>List only windows on this display, rather than every window everywhere.</summary>
+    public bool ThisDisplayOnly { get; set; } = true;
+}
+
 public sealed class MonitorLayout
 {
     public List<FracRect> Zones { get; set; } = new();
@@ -121,6 +134,13 @@ public sealed class SplitConfig
     /// <summary>Keyed by Win32 device name (\\.\DISPLAY1); "*" is the fallback for unlisted monitors.</summary>
     public Dictionary<string, MonitorLayout> Monitors { get; set; } = new();
 
+    /// <summary>
+    /// Our own taskbars, keyed by device name. An entry means a bar on that display; no entry means
+    /// none. Deliberately not subject to the "*" fallback — a bar appearing on a display you never
+    /// asked about would be a surprise, and it reserves screen space.
+    /// </summary>
+    public Dictionary<string, BarSettings> Bars { get; set; } = new();
+
     public const string Fallback = "*";
 
     /// <summary>Virtual-key for a modifier name, or null for "no modifier required".</summary>
@@ -133,6 +153,16 @@ public sealed class SplitConfig
     };
 
     public static readonly string[] ModifierNames = ["None", "Shift", "Control", "Alt"];
+
+    public static readonly string[] EdgeNames = ["Left", "Top", "Right", "Bottom"];
+
+    public static BarEdge ParseEdge(string? name) => name?.Trim().ToLowerInvariant() switch
+    {
+        "left" => BarEdge.Left,
+        "top" => BarEdge.Top,
+        "bottom" => BarEdge.Bottom,
+        _ => BarEdge.Right,
+    };
 
     /// <summary>True when this window belongs to something the user has opted out of.</summary>
     public bool IsExcluded(string process, string windowClass)
@@ -244,6 +274,14 @@ public sealed class SplitConfig
         if (Padding < 0) Padding = 0;
         Exclude = Exclude.Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => e.Trim()).Distinct().ToList();
 
+        foreach (var bar in Bars.Values)
+        {
+            // A bar thinner than this cannot show anything; a bar wider than a third of a display is
+            // almost certainly a typo, and it eats the work area for every app on that screen.
+            bar.Thickness = Math.Clamp(bar.Thickness, 28, 600);
+            if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
+        }
+
         foreach (var layout in Monitors.Values)
         {
             // Fractions outside [0,1] would place a zone off the monitor entirely - a window sent
@@ -335,6 +373,7 @@ public sealed class SplitConfig
         SpanModifier = o.SpanModifier;
         Exclude = o.Exclude;
         Monitors = o.Monitors;
+        Bars = o.Bars;
     }
 
     public void SetZones(string device, List<FracRect> zones)
