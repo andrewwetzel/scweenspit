@@ -390,15 +390,18 @@ public sealed class ZoneManager(SplitConfig config)
         if (!GetWindowRect(hWnd, out var win)) return false;
 
         bool maximized = IsMaximized(hWnd);
-        if (!maximized && Near(win, zone)) return false;
+        if (!maximized && Near(win, AllowForInvisibleBorder(hWnd, zone))) return false;
 
         if (maximized && !ShowWindow(hWnd, SW_RESTORE))
             Log.Write($"  ShowWindow(SW_RESTORE) returned false for 0x{hWnd:X}");
 
+        // Measured after any restore: a maximized window reports a different frame to a normal one.
+        var target = AllowForInvisibleBorder(hWnd, zone);
+
         // The BOOL matters: UIPI refuses cross-integrity moves (an elevated window from an
         // unelevated us) and returns FALSE. Treating that as success would report a healthy
         // clamp in the log while nothing on screen moved.
-        if (!SetWindowPos(hWnd, HWND_TOP, zone.Left, zone.Top, zone.Width, zone.Height,
+        if (!SetWindowPos(hWnd, HWND_TOP, target.Left, target.Top, target.Width, target.Height,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOZORDER))
         {
             int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
@@ -407,8 +410,54 @@ public sealed class ZoneManager(SplitConfig config)
             return false;
         }
 
-        Log.Write($"clamp {hWnd:X} -> {zone} (maximized={maximized})");
+        Log.Write($"clamp {hWnd:X} -> {zone} placed at {target} (maximized={maximized})");
         return true;
+    }
+
+    /// <summary>Largest invisible border we will believe in, per side.</summary>
+    private const int MaxBorder = 24;
+
+    /// <summary>
+    /// Grows a target rectangle by a window's invisible resize border.
+    ///
+    /// GetWindowRect includes a border that DWM does not paint — roughly 7px at the left, right and
+    /// bottom of an ordinary Windows 10/11 window. Place a window at a zone's rectangle and the
+    /// visible edges land that far inside it, which is why tiled windows sit in a moat of unused
+    /// pixels and never quite touch the screen edge or each other.
+    /// </summary>
+    public static RECT AllowForInvisibleBorder(IntPtr hWnd, RECT zone)
+    {
+        if (!GetWindowRect(hWnd, out var outer)) return zone;
+
+        if (DwmGetWindowRect(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out var painted,
+                             System.Runtime.InteropServices.Marshal.SizeOf<RECT>()) != 0)
+            return zone;
+
+        return Expanded(zone, outer, painted);
+    }
+
+    /// <summary>
+    /// The arithmetic behind <see cref="AllowForInvisibleBorder"/>, separated so it can be tested
+    /// without a window. Returns the zone unchanged when the two rectangles do not describe a
+    /// plausible border — mid-animation, or a shell surface we should not be second-guessing.
+    /// </summary>
+    public static RECT Expanded(RECT zone, RECT outer, RECT painted)
+    {
+        int left = painted.Left - outer.Left;
+        int top = painted.Top - outer.Top;
+        int right = outer.Right - painted.Right;
+        int bottom = outer.Bottom - painted.Bottom;
+
+        if (left < 0 || top < 0 || right < 0 || bottom < 0) return zone;
+        if (left > MaxBorder || top > MaxBorder || right > MaxBorder || bottom > MaxBorder) return zone;
+
+        return new RECT
+        {
+            Left = zone.Left - left,
+            Top = zone.Top - top,
+            Right = zone.Right + right,
+            Bottom = zone.Bottom + bottom,
+        };
     }
 
     /// <summary>

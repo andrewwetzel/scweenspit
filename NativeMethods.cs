@@ -99,6 +99,9 @@ public static class Native
 
     // ---- DWM ---------------------------------------------------------------
     public const int DWMWA_CLOAKED = 14;
+
+    /// <summary>The rectangle the window is actually PAINTED in, without its invisible resize border.</summary>
+    public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1 = 19;
 
@@ -287,6 +290,17 @@ public static class Native
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    /// <summary>Distinctly named: an overload differing only by out-parameter type is ambiguous
+    /// at any call site using "out var".</summary>
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    public static extern int DwmGetWindowRect(IntPtr hwnd, int attr, out RECT value, int size);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int w, int h);
+
+    [DllImport("user32.dll")]
+    public static extern int SetWindowRgn(IntPtr hWnd, IntPtr region, bool redraw);
 
     /// <summary>Reading form: pvParam is a pointer to the value.</summary>
     [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]

@@ -105,6 +105,34 @@ public sealed class TaskbarWindow : Form
     /// <summary>Clicking a button must not steal focus from the window it is about to activate.</summary>
     protected override bool ShowWithoutActivation => true;
 
+    /// <summary>
+    /// Rounds the corners facing the desktop, leaving the ones against the screen edge square — the
+    /// region is built oversized on the docked side so that rounding falls outside the window.
+    /// Windows 11 rounds free-floating surfaces, not ones flush against an edge.
+    /// </summary>
+    private void RoundCorners()
+    {
+        const int radius = 10;
+        int w = Width + 1, h = Height + 1, r = radius * 2;
+
+        var region = Edge switch
+        {
+            BarEdge.Bottom => CreateRoundRectRgn(0, 0, w, h + radius, r, r),
+            BarEdge.Top    => CreateRoundRectRgn(0, -radius, w, h, r, r),
+            BarEdge.Left   => CreateRoundRectRgn(-radius, 0, w, h, r, r),
+            _              => CreateRoundRectRgn(0, 0, w + radius, h, r, r),
+        };
+
+        // SetWindowRgn takes ownership; the previous region is released by the system.
+        if (region != IntPtr.Zero) SetWindowRgn(Handle, region, true);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (IsHandleCreated) RoundCorners();
+    }
+
     protected override void WndProc(ref Message m)
     {
         if (appBar.HandleMessage(ref m)) return;

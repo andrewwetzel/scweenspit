@@ -172,6 +172,9 @@ It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar u
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
 
+Its corners are rounded on the sides facing the desktop and left square against the screen edge,
+matching how Windows 11 treats a docked surface.
+
 It shows running windows as icons, accents the foreground one, underlines the rest, and dims the
 minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
@@ -197,6 +200,13 @@ Hiding the Windows taskbar also hands its space to the zones. Windows keeps repo
 area even with the bar hidden — the appbar registration outlives the window — so ScweenSpit measures
 against the full display instead once you have hidden it. Otherwise a bar docked to the bottom would
 float above a strip of dead space where the taskbar used to be.
+
+Windows are placed so their **visible** edges land on the zone. `GetWindowRect` includes an invisible
+resize border that DWM does not paint — around 7px at the left, right and bottom of an ordinary
+Windows 11 window — so a window placed at a zone's rectangle appears inset by that much on three
+sides. ScweenSpit measures the painted frame (`DWMWA_EXTENDED_FRAME_BOUNDS`) and grows the target to
+compensate, which is why tiled windows here touch each other and the screen edge instead of floating
+in a moat of unused pixels.
 
 Growing a bar takes room from its zone, and windows already sitting there do not move on their own,
 so ScweenSpit re-places the ones the bar would cover. It waits until you stop adjusting first — a
