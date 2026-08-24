@@ -8,6 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ScweenSpit</RootNamespace>
     <AssemblyName>ScweenSpit</AssemblyName>
+    <!-- Overridden by CI from the release tag; 0.0.0 locally so a dev build never looks current. -->
+    <Version>0.0.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- lets the project compile (not run) on Linux/macOS, so CI and dev boxes can typecheck it -->

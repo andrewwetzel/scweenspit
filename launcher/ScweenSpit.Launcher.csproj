@@ -8,6 +8,8 @@
     <RootNamespace>ScweenSpit.Launcher</RootNamespace>
     <!-- This IS ScweenSpit as far as anyone downloading it is concerned. -->
     <AssemblyName>ScweenSpit</AssemblyName>
+    <!-- Overridden by CI from the release tag; 0.0.0 locally so a dev build never looks current. -->
+    <Version>0.0.0</Version>
     <!-- LibraryImport source generation emits unsafe marshalling code -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 

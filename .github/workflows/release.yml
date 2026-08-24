@@ -27,14 +27,26 @@ jobs:
       - name: Publish
         shell: pwsh
         run: |
-          dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish/app
+          # The tag is the version. The app compares it against its own assembly version to decide
+          # whether an update exists, so an unstamped build would never see one.
+          $version = $env:TAG -replace '^v', ''
+          Write-Host "building version $version"
+
+          dotnet publish ScweenSpit.csproj -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=true -p:Version=$version -o publish/app
 
           New-Item -ItemType Directory -Force launcher/payload | Out-Null
           Copy-Item publish/app/ScweenSpit.exe launcher/payload/ScweenSpit.exe -Force
-          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 -o publish/ship
+          dotnet publish launcher/ScweenSpit.Launcher.csproj -c Release -r win-x64 `
+            -p:Version=$version -o publish/ship
 
           New-Item -ItemType Directory -Force release | Out-Null
           Copy-Item publish/ship/ScweenSpit.exe release/ScweenSpit.exe
 
+          # Published beside the exe so the updater can tell a truncated download from a whole one.
+          $hash = (Get-FileHash release/ScweenSpit.exe -Algorithm SHA256).Hash
+          "$hash  ScweenSpit.exe" | Out-File -Encoding ascii release/ScweenSpit.exe.sha256
+          Write-Host "sha256 $hash"
+
       - name: Create release
-        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes release/ScweenSpit.exe
+        run: gh release create "$env:TAG" --title "ScweenSpit $env:TAG" --generate-notes release/ScweenSpit.exe release/ScweenSpit.exe.sha256

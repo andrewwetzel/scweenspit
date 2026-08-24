@@ -366,6 +366,30 @@ A `[beat]` line every five seconds carries the counters that localise a fault:
 filtered out. `fullscreen=0` means nothing was recognised as maximized or borderless. `clamps=0`
 with `fullscreen>0` means the move itself was refused.
 
+## Updating
+
+**Settings → Updates → Check for updates.** If there is a newer release it shows the notes and an
+Install button; installing downloads it, replaces the `ScweenSpit.exe` you keep, and restarts.
+
+This is simpler here than it usually is, because of the shape of the thing: the file you keep is the
+native launcher, and it exits the moment it has started the app. So the file being replaced is never
+the file that is running — no rename dance, no helper process, no reboot. The old copy is kept as
+`ScweenSpit.exe.previous` in case the new one will not start.
+
+The download is checked against a SHA-256 published beside it in the release. That catches a
+truncated or corrupted transfer. It is **not** a signature and does not prove the release is genuine
+— there is no code signing here.
+
+On startup it looks for a newer release at most once a day and, if it finds one, says so and stops
+there. It never installs anything on its own.
+
+Updates come from the GitHub Releases feed of whatever repository is named on that page. A public
+repository needs no configuration. A private one needs an access token, which is stored as plain
+text in `config.json` — the page says so.
+
+Running the unpacked copy in `%LOCALAPPDATA%\ScweenSpit\bin` directly rather than the file you
+downloaded means there is nothing to replace, and the page says that too.
+
 ## If nothing seems to happen
 
 In rough order of likelihood:

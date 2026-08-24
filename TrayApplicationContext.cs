@@ -31,6 +31,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly System.Windows.Forms.Timer reflow = new() { Interval = 600 };
     private readonly SplitConfig config;
     private SettingsForm? settings;
+    private UpdateInfo? pendingUpdate;
 
     public TrayApplicationContext()
     {
@@ -93,6 +94,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         RegisterHotkeys();
         UpdateTrayText();
         LogStartup();
+        CheckForUpdatesQuietly();
     }
 
     // ---- tray menu ---------------------------------------------------------
@@ -103,6 +105,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         items.Clear();
 
         items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings()) { Font = new Font("Segoe UI", 9f, FontStyle.Bold) });
+
+        if (pendingUpdate is { } update)
+            items.Add(new ToolStripMenuItem($"Update to {update.Version}…", null, (_, _) => OpenSettings())
+            {
+                ForeColor = Theme.Accent,
+            });
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem(overlay.Visible ? "Hide zones" : "Show zones", null, (_, _) => overlay.Toggle(zones)));
         items.Add(new ToolStripMenuItem("Auto-clamp", null, (_, _) => { config.AutoClamp = !config.AutoClamp; config.Save(); ApplyChanges(); })
@@ -120,7 +128,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         // OnFormClosing does not cancel, so the instance can genuinely be disposed underneath us.
         if (settings is null || settings.IsDisposed)
             settings = new SettingsForm(config, zones, overlay, ApplyChanges, ReloadConfig,
-                                        () => hook.Running, hook.ArrangeAll);
+                                        () => hook.Running, hook.ArrangeAll,
+                                        () => { tray.Visible = false; ExitThread(); });
         settings.Reveal();
     }
 
@@ -302,6 +311,33 @@ public sealed class TrayApplicationContext : ApplicationContext
         Notify(monitors.Count == 0
             ? "No monitors detected — see the log."
             : $"{monitors.Count} monitor(s), {total} zones. Clamping {(hook.Running ? "active" : "off")}.");
+    }
+
+    /// <summary>
+    /// Looks for a newer release in the background, at most once a day, and does no more than say so.
+    /// Installing is always a deliberate act — an app that replaces itself unasked is a liability.
+    /// </summary>
+    private async void CheckForUpdatesQuietly()
+    {
+        if (!config.CheckForUpdates) return;
+        if (config.LastUpdateCheck is { } last && DateTime.Now - last < TimeSpan.FromDays(1)) return;
+
+        try
+        {
+            var update = await Updater.CheckAsync(config);
+            config.LastUpdateCheck = DateTime.Now;
+            config.Save();
+
+            if (update is null) return;
+
+            pendingUpdate = update;
+            Notify($"Version {update.Version} is available — open Settings to install it.");
+        }
+        catch (Exception ex)
+        {
+            // A failed check is not worth interrupting anyone over.
+            Log.WriteOnce("update-check", $"update check failed: {ex.Message}");
+        }
     }
 
     private void Notify(string message) =>

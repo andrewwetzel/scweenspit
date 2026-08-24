@@ -16,6 +16,7 @@ public sealed class SettingsForm : Form
     private readonly Action reloadFromDisk;
     private readonly Func<bool> hooksUp;
     private readonly Func<int> arrangeWindows;
+    private readonly Action quit;
 
     private readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Window, Padding = new Padding(28, 24, 28, 24), AutoScroll = true };
     private readonly FlowLayoutPanel nav = new() { Dock = DockStyle.Left, Width = 172, BackColor = Theme.Panel, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 20, 12, 12), WrapContents = false };
@@ -25,10 +26,11 @@ public sealed class SettingsForm : Form
 
     public SettingsForm(SplitConfig config, ZoneManager zones, ZoneOverlay overlay,
                         Action applyChanges, Action reloadFromDisk, Func<bool> hooksUp,
-                        Func<int> arrangeWindows)
+                        Func<int> arrangeWindows, Action quit)
     {
         this.reloadFromDisk = reloadFromDisk;
         this.arrangeWindows = arrangeWindows;
+        this.quit = quit;
         this.config = config;
         this.zones = zones;
         this.overlay = overlay;
@@ -54,6 +56,7 @@ public sealed class SettingsForm : Form
         AddNav("Layouts", ShowLayouts);
         AddNav("Taskbar", ShowTaskbar);
         AddNav("Exclusions", ShowExclusions);
+        AddNav("Updates", ShowUpdates);
         AddNav("Diagnostics", ShowDiagnostics);
 
         ShowGeneral();
@@ -644,6 +647,144 @@ public sealed class SettingsForm : Form
         reload.Margin = new Padding(0, 16, 0, 0);
         reload.Click += (_, _) => { reloadFromDisk(); ShowDiagnostics(); };
         page.Controls.Add(reload);
+    }
+
+    private void ShowUpdates()
+    {
+        var page = Page("Updates", "ScweenSpit replaces the file you downloaded and restarts itself.");
+
+        page.Controls.Add(new Label
+        {
+            Text = $"Running version {Updater.Current}",
+            AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(12f, FontStyle.Bold),
+            Margin = new Padding(0, 4, 0, 4),
+        });
+
+        if (Updater.LauncherPath() is not { } launcher)
+        {
+            page.Controls.Add(new Label
+            {
+                Text = "⚠  This is the unpacked copy, started directly rather than through the " +
+                       "ScweenSpit.exe you downloaded. There is nothing here to replace, so updates " +
+                       "cannot be installed from it — run the downloaded file instead.",
+                AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 12),
+            });
+        }
+        else
+        {
+            page.Controls.Add(Theme.Caption($"Updating: {launcher}"));
+        }
+
+        var auto = Theme.Toggle("Look for updates on startup", config.CheckForUpdates);
+        auto.CheckedChanged += (_, _) => { config.CheckForUpdates = auto.Checked; Save(); };
+        page.Controls.Add(auto);
+        page.Controls.Add(Theme.Caption("At most one check a day, and it never installs anything on its own."));
+
+        var status = new Label
+        {
+            Text = config.LastUpdateCheck is { } when ? $"Last checked {when:d MMM HH:mm}" : "Not checked yet",
+            AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Theme.Muted,
+            Font = Theme.Face(9.5f), Margin = new Padding(0, 10, 0, 8),
+        };
+        page.Controls.Add(status);
+
+        var check = Theme.Action("Check for updates", primary: true);
+        check.AutoSize = true;
+        check.Click += async (_, _) =>
+        {
+            check.Enabled = false;
+            status.ForeColor = Theme.Muted;
+            status.Text = "Checking…";
+            try
+            {
+                var update = await Updater.CheckAsync(config);
+                config.LastUpdateCheck = DateTime.Now;
+                config.Save();
+
+                if (update is null) { status.Text = $"Version {Updater.Current} is the latest."; return; }
+
+                status.ForeColor = Theme.Accent;
+                status.Text = $"Version {update.Version} is available.";
+                Offer(page, update);
+            }
+            catch (Exception ex)
+            {
+                status.ForeColor = Color.FromArgb(235, 140, 140);
+                status.Text = ex.Message;
+                Log.Write($"update check failed: {ex}");
+            }
+            finally { check.Enabled = true; }
+        };
+        page.Controls.Add(check);
+
+        page.Controls.Add(new Label
+        {
+            Text = "Released from", AutoSize = true, ForeColor = Theme.Text,
+            Font = Theme.Face(), Margin = new Padding(0, 18, 0, 2),
+        });
+        var repo = new TextBox
+        {
+            Text = config.UpdateRepository, Width = 320, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = Theme.Face(), BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 0, 0, 10),
+        };
+        repo.TextChanged += (_, _) => { config.UpdateRepository = repo.Text.Trim(); Save(); };
+        page.Controls.Add(repo);
+
+        page.Controls.Add(new Label
+        {
+            Text = "Access token (only needed while the repository is private)", AutoSize = true,
+            ForeColor = Theme.Muted, Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 2),
+        });
+        var token = new TextBox
+        {
+            Text = config.UpdateToken, Width = 320, UseSystemPasswordChar = true,
+            BackColor = Theme.Raised, ForeColor = Theme.Text, Font = Theme.Face(),
+            BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 0, 0, 10),
+        };
+        token.TextChanged += (_, _) => { config.UpdateToken = token.Text.Trim(); Save(); };
+        page.Controls.Add(token);
+        page.Controls.Add(Theme.Caption(
+            "Stored as plain text in config.json. A public repository needs no token at all."));
+    }
+
+    /// <summary>Shows the release notes and an install button once an update has been found.</summary>
+    private void Offer(FlowLayoutPanel page, UpdateInfo update)
+    {
+        if (!string.IsNullOrWhiteSpace(update.Notes))
+        {
+            page.Controls.Add(new TextBox
+            {
+                Text = update.Notes.Trim(), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+                Width = 460, Height = 130, BackColor = Theme.Raised, ForeColor = Theme.Muted,
+                Font = Theme.Face(9f), BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 10, 0, 8),
+            });
+        }
+
+        var install = Theme.Action($"Install {update.Version} and restart", primary: true);
+        install.AutoSize = true;
+        install.Click += async (_, _) =>
+        {
+            install.Enabled = false;
+            install.Text = "Downloading…";
+            try
+            {
+                var replaced = await Updater.ApplyAsync(update);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(replaced)
+                {
+                    UseShellExecute = true,
+                });
+                quit();
+            }
+            catch (Exception ex)
+            {
+                install.Enabled = true;
+                install.Text = "Install and restart";
+                MessageBox.Show(ex.Message, "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Log.Write($"update install failed: {ex}");
+            }
+        };
+        page.Controls.Add(install);
     }
 
     private static void OpenPath(string path)

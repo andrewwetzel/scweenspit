@@ -143,6 +143,18 @@ public sealed class SplitConfig
     /// </summary>
     public bool KeepOnOneDisplay { get; set; } = true;
 
+    /// <summary>Look for a newer release on startup, at most once a day.</summary>
+    public bool CheckForUpdates { get; set; } = true;
+
+    /// <summary>Where releases are published, as owner/name.</summary>
+    public string UpdateRepository { get; set; } = "andrewwetzel/scweenspit";
+
+    /// <summary>A GitHub token, needed only while the repository is private.</summary>
+    public string UpdateToken { get; set; } = "";
+
+    /// <summary>When the last check happened, so startup checks stay to one a day.</summary>
+    public DateTime? LastUpdateCheck { get; set; }
+
     /// <summary>Snap a window into a zone when you drop it there while dragging.</summary>
     public bool DragToZone { get; set; } = true;
 
@@ -397,6 +409,10 @@ public sealed class SplitConfig
         DragToZone = o.DragToZone;
         DragModifier = o.DragModifier;
         SpanModifier = o.SpanModifier;
+        CheckForUpdates = o.CheckForUpdates;
+        UpdateRepository = o.UpdateRepository;
+        UpdateToken = o.UpdateToken;
+        LastUpdateCheck = o.LastUpdateCheck;
         Exclude = o.Exclude;
         Monitors = o.Monitors;
         Bars = o.Bars;
