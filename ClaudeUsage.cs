@@ -255,10 +255,13 @@ public static class ClaudeUsage
             }
         }
 
-        var reply = Get($"{Origin}/api/organizations/{org}/usage", key!);
+        var reply = Get($"{Origin}/api/organizations/{org}/usage", key!, org);
         if (reply is null) { current = new UsageReading([], "claude.ai unreachable", false); return; }
 
-        AdoptRotatedKey(reply, key!);
+        // Only from a reply that worked: an authentication failure can carry a session cookie of
+        // its own, and adopting that would overwrite the user's good key with a rejected one -
+        // making a freshly pasted key fail permanently from the very first poll.
+        if (reply.Status < 400) AdoptRotatedKey(reply, key!);
 
         if (reply.Status is 401 or 403)
         {
@@ -296,7 +299,7 @@ public static class ClaudeUsage
             return null;
         }
 
-        AdoptRotatedKey(listing, key);
+        if (listing.Status < 400) AdoptRotatedKey(listing, key);
 
         try
         {
@@ -461,9 +464,14 @@ public static class ClaudeUsage
     /// identical, so a 403 with no body is treated as "challenged, not refused" and retried through
     /// curl.exe, which has shipped with Windows since 1803 and is what upstream uses throughout.
     /// </summary>
-    private static Response? Get(string url, string key)
+    private static Response? Get(string url, string key, string? org = null)
     {
-        var cookie = $"sessionKey={key}";
+        // claude.ai wants the active organisation alongside the session key on org-scoped calls.
+        // Sending only the key gets a 401 that is indistinguishable from an expired one, which is
+        // exactly how this presented: a freshly pasted key reported as no longer accepted.
+        var cookie = string.IsNullOrWhiteSpace(org)
+            ? $"sessionKey={key}"
+            : $"sessionKey={key}; lastActiveOrg={org}";
         var direct = ViaHttpClient(url, cookie);
 
         if (direct is { Status: 403 } && direct.Body.Length < 4096 && !direct.Body.TrimStart().StartsWith('{'))
@@ -482,7 +490,8 @@ public static class ClaudeUsage
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
             request.Headers.TryAddWithoutValidation("anthropic-client-platform", "web_claude_ai");
-            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            request.Headers.TryAddWithoutValidation("Accept", "*/*");
+            request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
             request.Headers.TryAddWithoutValidation("Referer", Origin + "/");
             request.Headers.TryAddWithoutValidation("Cookie", cookie);
 
