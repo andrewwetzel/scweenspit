@@ -743,6 +743,36 @@ public sealed class SettingsForm : Form
         interval.ValueChanged += (_, _) => { claude.RefreshSeconds = (int)interval.Value; Save(); };
         Row(page, "Seconds between checks", interval);
 
+        // ---- one place to look when it is not working
+        var diagnosis = new TextBox
+        {
+            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Visible = false,
+            Width = 460, Height = 120, BackColor = Theme.Raised, ForeColor = Theme.Muted,
+            Font = new Font(FontFamily.GenericMonospace, 8.5f), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 8, 0, 8),
+        };
+
+        var test = Theme.Action("Test connection");
+        test.AutoSize = true;
+        test.Click += async (_, _) =>
+        {
+            test.Enabled = false;
+            diagnosis.Visible = true;
+            diagnosis.Text = "Checking…";
+            try
+            {
+                // Off the UI thread: this makes real requests to claude.ai.
+                diagnosis.Text = await Task.Run(ClaudeUsage.SelfTest);
+            }
+            catch (Exception ex) { diagnosis.Text = ex.Message; }
+            finally { test.Enabled = true; }
+        };
+        page.Controls.Add(test);
+        page.Controls.Add(Theme.Caption(
+            "Walks the same path a refresh takes and says where it stops. The key itself is never "
+          + "included, so the result is safe to paste into a bug report."));
+        page.Controls.Add(diagnosis);
+
         // ---- what it is currently reading
         var state = new Label
         {

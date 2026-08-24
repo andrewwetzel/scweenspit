@@ -128,6 +128,64 @@ public static class ClaudeUsage
         }
     }
 
+    /// <summary>
+    /// Walks the same path a poll takes and reports where it stops, so a failure can be read rather
+    /// than guessed at. Never includes the key itself — this text is meant to be pasted into a bug
+    /// report.
+    /// </summary>
+    public static string SelfTest()
+    {
+        var report = new StringBuilder();
+        string? stored, key, org;
+
+        lock (gate)
+        {
+            stored = settings?.SessionKey;
+            key = Secret.Unprotect(stored);
+            org = settings?.OrgId;
+        }
+
+        report.AppendLine(
+            settings is null ? "not configured"
+            : !settings.Enabled ? "tracking is switched off"
+            : "tracking is on");
+
+        report.AppendLine(
+            string.IsNullOrWhiteSpace(stored) ? "key: none stored"
+            : key is null ? "key: stored, but this Windows account cannot decrypt it"
+            : !Plausible(key) ? $"key: decrypts to {key.Length} characters that do not look like a key"
+            : $"key: stored and readable ({key.Length} characters)");
+
+        if (key is null || !Plausible(key)) return report.ToString().TrimEnd();
+
+        var orgs = Get($"{Origin}/api/organizations", key);
+        report.AppendLine(orgs is null
+            ? "organisations: no reply — claude.ai unreachable"
+            : $"organisations: HTTP {orgs.Status}{(orgs.Status is 401 or 403 ? "  (the key was refused)" : "")}");
+
+        if (orgs is null || orgs.Status >= 400) return report.ToString().TrimEnd();
+
+        if (string.IsNullOrWhiteSpace(org)) org = ResolveOrg(key);
+        report.AppendLine(org is null ? "organisation: could not be determined" : $"organisation: {org}");
+        if (org is null) return report.ToString().TrimEnd();
+
+        var usage = Get($"{Origin}/api/organizations/{org}/usage", key, org);
+        report.AppendLine(usage is null
+            ? "usage: no reply"
+            : $"usage: HTTP {usage.Status}{(usage.Status is 401 or 403 ? "  (the key was refused)" : "")}");
+
+        if (usage is { Status: < 400 })
+        {
+            var parsed = Parse(usage.Body, true, true);
+            report.AppendLine(parsed.Error is not null
+                ? $"reading: {parsed.Error}"
+                : $"reading: {parsed.Limits.Count} limit(s) — " +
+                  string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
+        }
+
+        return report.ToString().TrimEnd();
+    }
+
     /// <summary>Asks the loop to poll now instead of waiting out the interval.</summary>
     public static void Refresh()
     {
@@ -473,14 +531,14 @@ public static class ClaudeUsage
             ? $"sessionKey={key}"
             : $"sessionKey={key}; lastActiveOrg={org}";
 
-        // curl first, deliberately, and not as a fallback.
+        // curl first, matching the implementation this is adapted from, which uses it for every
+        // request because Cloudflare fingerprints the TLS handshake and Python's OpenSSL gets
+        // challenged for it.
         //
-        // claude.ai sits behind Cloudflare, which fingerprints the TLS handshake itself to spot
-        // clients that are not browsers. No amount of browser-shaped headers helps: what gives it
-        // away is the handshake. curl on Windows uses schannel — the same TLS stack Edge and Chrome
-        // use — so its fingerprint matches a real browser, while .NET's does not. The challenge
-        // that comes back is a 401 or 403, which is indistinguishable from a rejected key, and is
-        // why a perfectly good session key reported as expired.
+        // Measured, rather than assumed: .NET's own client was answered with a 200 for both calls
+        // when tested, so it is not itself challenged and this is not the difference it was once
+        // thought to be. curl stays first because it is what the working implementation does; the
+        // .NET path is a genuine fallback rather than a broken one.
         var viaCurl = ViaCurl(url, cookie);
         if (viaCurl is not null) return viaCurl;
 
