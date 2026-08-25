@@ -27,6 +27,13 @@ public static class StartMenu
     /// <summary>Where the menu should go: the button, the bar it is on, and the room around them.</summary>
     public readonly record struct Anchor(Rectangle Button, Rectangle Bar, BarEdge Edge, RECT Monitor, int Gap);
 
+    /// <summary>
+    /// Where to put the menu — and when nowhere, why not. The reason matters: "no bar is running"
+    /// and "the bar does not want it" look identical from here and from the screen, and only one of
+    /// them is a setting the person can change.
+    /// </summary>
+    public delegate Anchor? AnchorSource(out string why);
+
     /// <summary>The shells that have drawn the menu, newest first.</summary>
     private static readonly string[] Hosts = ["StartMenuExperienceHost", "ShellExperienceHost"];
 
@@ -42,7 +49,7 @@ public static class StartMenu
     /// moved too early and then left alone.</summary>
     private const int HoldMs = 700;
 
-    private static Func<Anchor?>? anchor;
+    private static AnchorSource? anchor;
     private static Timer? chase;
 
     private static WinEventDelegate? callback;
@@ -70,7 +77,7 @@ public static class StartMenu
     /// Start following the menu, asking <paramref name="where"/> each time it opens. Null from that
     /// means no bar wants it moved, and the menu is left where Windows put it.
     /// </summary>
-    public static void Watch(Func<Anchor?> where)
+    public static void Watch(AnchorSource where)
     {
         anchor = where;
         EnsureWatching();
@@ -146,15 +153,10 @@ public static class StartMenu
     /// <summary>Nudges the menu towards the button until it stops moving, or until it is gone.</summary>
     private static void Follow()
     {
-        // Nothing wants it moved — no bar, or none with the button. Leave it where Windows put it
-        // rather than running a timer to discover that forty times over.
-        if (anchor?.Invoke() is null)
-        {
-            Status = anchor is null
-                ? "not following the menu"
-                : "no bar is asking for the menu (no Start button, or moving it is switched off)";
-            return;
-        }
+        // Nothing wants it moved. Leave the menu where Windows put it rather than running a timer
+        // forty times over to discover that.
+        if (anchor is null) { Status = "not following the menu"; return; }
+        if (anchor(out string why) is null) { Status = why; return; }
 
         Stop();
 
@@ -186,9 +188,15 @@ public static class StartMenu
 
             // Asked for each time rather than captured: between one press and the next the pointer
             // may have moved to another display, and the bar there is the one to open against.
-            if (anchor?.Invoke() is not { } target)
+            if (anchor is null)
             {
-                Status = "no bar is asking for the menu";
+                Status = "not following the menu";
+                Done(timer);
+                return;
+            }
+            if (anchor(out string gone) is not { } target)
+            {
+                Status = gone;
                 Done(timer);
                 return;
             }

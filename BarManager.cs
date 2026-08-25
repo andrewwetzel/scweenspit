@@ -24,11 +24,23 @@ public sealed class BarManager : IDisposable
     /// machine with several bars the menu appears on the screen being worked on; failing that, any
     /// bar that wants it. Null when none does, which leaves the menu where Windows put it.
     /// </summary>
-    public StartMenu.Anchor? StartAnchor()
+    public StartMenu.Anchor? StartAnchor(out string why)
     {
-        var wanting = bars.Values.Where(b => b.AnchorsStartMenu).ToList();
-        if (wanting.Count == 0) return null;
+        if (bars.Count == 0)
+        {
+            why = "no ScweenSpit bar is running, so there is no Start button to open the menu over";
+            return null;
+        }
 
+        var wanting = bars.Values.Where(b => b.AnchorsStartMenu).ToList();
+        if (wanting.Count == 0)
+        {
+            why = $"{bars.Count} bar(s) running, none asking for the menu — check \"Start button at " +
+                  "the leading end\" and \"Open the Start menu over the button\" on the Taskbar page";
+            return null;
+        }
+
+        why = "";
         var cursor = Cursor.Position;
         return (wanting.FirstOrDefault(b => b.Covers(cursor)) ?? wanting[0]).StartAnchor;
     }
