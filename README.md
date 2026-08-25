@@ -215,6 +215,15 @@ the order it appeared, and stays there — `EnumWindows` reports z-order, which 
 anything is activated, so using it directly makes the buttons reshuffle under the pointer. Right-click
 also closes a window.
 
+A pin is matched to a running application in two passes: an exact match on the declared application
+id wins outright, and only then may a pin that is a plain executable claim an application by its
+file. Each application is claimed once. That ordering is what lets a pinned browser and a pinned web
+app — both `chrome.exe` — end up on their own buttons, rather than one of them sitting there as
+permanently not running beside the other.
+
+A pinned application identified by an id rather than a file has nothing to take an icon from until it
+runs, so it shows its initial on a disc until then.
+
 **Stop windows flying into the taskbar when minimised** is on the same page. With the taskbar hidden
 Windows still animates a minimised window towards where its button would have been — a corner with
 nothing in it — which reads as a glitch. It is a system setting, so it is restored on exit.
