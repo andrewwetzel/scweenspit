@@ -136,6 +136,11 @@ public static class StartMenu
     /// <summary>Asks the shell for the menu, and moves it once it appears.</summary>
     public static void Press()
     {
+        // Before anything can go wrong, so that a line which never changes at all means the click
+        // never arrived — not that the machinery behind it failed quietly.
+        Status = "asked the shell for the menu (Ctrl+Esc)…";
+        Log.Write("start menu requested");
+
         PressStartShortcut();
 
         // The hook covers the keyboard, and would cover this too — but not the very first open after
