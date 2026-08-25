@@ -64,6 +64,18 @@ public sealed class TaskbarWindow : Form
     public BarEdge Edge { get; }
     public string Device => monitor.Device;
 
+    /// <summary>True when this bar wants the Start menu brought over to it.</summary>
+    public bool AnchorsStartMenu => settings.ShowStartButton && settings.MoveStartMenu;
+
+    /// <summary>Where this bar would like the Start menu, in screen pixels.</summary>
+    public StartMenu.Anchor StartAnchor => new(RectangleToScreen(StartSlot), Bounds, Edge, monitor.Bounds,
+        settings.Floating ? Math.Max(4, settings.FloatMargin) : 4);
+
+    /// <summary>True when <paramref name="p"/> is on this bar's display.</summary>
+    public bool Covers(Point p) =>
+        p.X >= monitor.Bounds.Left && p.X < monitor.Bounds.Right &&
+        p.Y >= monitor.Bounds.Top && p.Y < monitor.Bounds.Bottom;
+
     /// <summary>
     /// Raised when the ScweenSpit button is clicked. Hiding the Windows taskbar takes our own tray
     /// icon with it, so the bar has to carry a way back to Settings and Exit or the app becomes
@@ -99,7 +111,13 @@ public sealed class TaskbarWindow : Form
             Reposition();
             Rebuild();
         };
-        refresh.Tick += (_, _) => Rebuild();
+        refresh.Tick += (_, _) =>
+        {
+            Rebuild();
+            // Piggybacked rather than given a timer of its own: it is one window lookup, and it does
+            // nothing at all unless the shell has restarted since the hook went on.
+            if (AnchorsStartMenu) StartMenu.EnsureWatching();
+        };
         refresh.Start();
     }
 
@@ -206,6 +224,19 @@ public sealed class TaskbarWindow : Form
         BarEdge.Right => slot with { Width = slot.Width - MarkStrip },
         _ => new Rectangle(slot.X + MarkStrip, slot.Y, slot.Width - MarkStrip, slot.Height),
     };
+
+    /// <summary>
+    /// Where an icon sits in a slot. Shared, so the Start glyph cannot drift a pixel or two out of
+    /// line with the applications beside it — which is the one place on a bar it would be noticed.
+    /// </summary>
+    private Rectangle IconBox(Rectangle slot)
+    {
+        int size = IconSize;
+        var within = IconArea(slot);
+        return settings.IconsOnly
+            ? new Rectangle(within.X + (within.Width - size) / 2, within.Y + (within.Height - size) / 2, size, size)
+            : new Rectangle(within.X + 8, within.Y + (within.Height - size) / 2, size, size);
+    }
 
     // ---- contents ----------------------------------------------------------
 
@@ -495,8 +526,7 @@ public sealed class TaskbarWindow : Form
 
         if (settings.ShowStartButton && StartSlot.Contains(e.Location))
         {
-            StartMenu.Open(RectangleToScreen(StartSlot), Bounds, Edge, monitor.Bounds,
-                settings.Floating ? Math.Max(4, settings.FloatMargin) : 4, settings.MoveStartMenu);
+            StartMenu.Press();
             return;
         }
 
@@ -637,11 +667,7 @@ public sealed class TaskbarWindow : Form
 
             if (icon is not null)
             {
-                int size = IconSize;
-                var within = IconArea(slot);
-                var box = settings.IconsOnly
-                    ? new Rectangle(within.X + (within.Width - size) / 2, within.Y + (within.Height - size) / 2, size, size)
-                    : new Rectangle(within.X + 8, within.Y + (within.Height - size) / 2, size, size);
+                var box = IconBox(slot);
 
                 // A pinned app that is not running, and a minimised window, are both "not here";
                 // fading the icon says so without needing a legend.
@@ -709,23 +735,31 @@ public sealed class TaskbarWindow : Form
         g.DrawImage(icon, box, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, attributes);
     }
 
-    /// <summary>The Windows logo: four panes, the way it has looked since Windows 11.</summary>
+    /// <summary>
+    /// The Windows logo: four panes, the way it has looked since Windows 11. Drawn into the same box
+    /// an application icon would get, at the same size, so the row reads as one row.
+    /// </summary>
     private void PaintStart(Graphics g, Brush hot)
     {
         var slot = StartSlot;
         if (hoveredStart) g.FillRectangle(hot, slot);
 
-        int size = Math.Clamp(Math.Min(slot.Width, slot.Height) / 2, 14, 26);
-        int pane = (size - 3) / 2;
+        var box = IconBox(slot);
 
-        int x = slot.X + (slot.Width - size) / 2;
-        int y = slot.Y + (slot.Height - size) / 2;
+        // The gutter scales with the glyph; fixed, it swallows a small logo and vanishes in a large
+        // one. Odd sizes go to the panes rather than the gutter, so the four stay square and equal.
+        int gutter = Math.Max(2, box.Width / 8);
+        int pane = (box.Width - gutter) / 2;
+        int drawn = 2 * pane + gutter;
+
+        int x = box.X + (box.Width - drawn) / 2;
+        int y = box.Y + (box.Height - drawn) / 2;
 
         using var brush = new SolidBrush(hoveredStart ? Theme.Text : Theme.Muted);
         g.FillRectangle(brush, x, y, pane, pane);
-        g.FillRectangle(brush, x + pane + 3, y, pane, pane);
-        g.FillRectangle(brush, x, y + pane + 3, pane, pane);
-        g.FillRectangle(brush, x + pane + 3, y + pane + 3, pane, pane);
+        g.FillRectangle(brush, x + pane + gutter, y, pane, pane);
+        g.FillRectangle(brush, x, y + pane + gutter, pane, pane);
+        g.FillRectangle(brush, x + pane + gutter, y + pane + gutter, pane, pane);
     }
 
     private void PaintTray(Graphics g)

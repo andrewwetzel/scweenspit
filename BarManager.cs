@@ -11,12 +11,27 @@ public sealed class BarManager : IDisposable
 {
     private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
                                            bool IconsOnly, bool ShowStatus, bool ShowUsage,
-                                           int? Zone, bool Floating, int FloatMargin);
+                                           int? Zone, bool Floating, int FloatMargin, int SideGap,
+                                           int EdgeGap, bool ShowStartButton);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
 
     public int Count => bars.Count;
+
+    /// <summary>
+    /// Where the Start menu should open. The bar on the display the pointer is on, so that on a
+    /// machine with several bars the menu appears on the screen being worked on; failing that, any
+    /// bar that wants it. Null when none does, which leaves the menu where Windows put it.
+    /// </summary>
+    public StartMenu.Anchor? StartAnchor()
+    {
+        var wanting = bars.Values.Where(b => b.AnchorsStartMenu).ToList();
+        if (wanting.Count == 0) return null;
+
+        var cursor = Cursor.Position;
+        return (wanting.FirstOrDefault(b => b.Covers(cursor)) ?? wanting[0]).StartAnchor;
+    }
 
     /// <summary>Raised when a bar's ScweenSpit button is clicked, with the screen position to open at.</summary>
     public event Action<System.Drawing.Point>? MenuRequested;
@@ -49,7 +64,8 @@ public sealed class BarManager : IDisposable
 
             var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
                                      settings.IconsOnly, settings.ShowStatus, settings.ShowUsage,
-                                     settings.Zone, settings.Floating, settings.FloatMargin);
+                                     settings.Zone, settings.Floating, settings.FloatMargin,
+                                     settings.SideGap, settings.EdgeGap, settings.ShowStartButton);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 

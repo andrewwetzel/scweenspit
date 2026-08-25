@@ -186,17 +186,18 @@ it, so a 50px bar is 50px whether it floats or not. The space stays reserved eit
 bar moves in, so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
-The three sides get their own gap, because they are not doing the same job. **Gap from the screen
-edge** is the docked side: whatever that edge already holds — a band Windows still reserves, the
-bezel, the rounded corner of the panel — sits directly beneath it, so a gap equal to the others
-looks about twice as wide. **Gap on the open side** faces the desktop and is the only edge ever seen
-against a window, so it gets the most. **Gap at the ends** has nothing beside it at all and gets the
-least. Only the first two cost reserved space; the ends run along an edge that was spanned end to
-end anyway.
+The gap is three numbers rather than one. **Gap on the open side** and **Gap at the ends** are the
+three sides you see, and match by default, because an even border reads as one deliberate decision
+rather than three separate ones. **Gap from the screen edge** is the docked side and is smaller:
+whatever that edge already holds — a band Windows still reserves, the bezel, the rounded corner of
+the panel — sits directly beneath it, so a gap equal to the others looks about twice as wide. Only
+the open side and the docked one cost reserved space; the ends run along an edge that was spanned
+end to end anyway.
 
-A config written before these were separate says 6px for all four sides. It is brought down to the
-new open-side default once, on load, rather than leaving the change to reach new installs only — set
-it back afterwards and it stays set.
+The defaults have come down twice since bars were added, and a config written by an older build
+still holds the old numbers. They are brought down on load, once per revision, rather than leaving
+the change to reach new installs only. Each step only ever lowers a gap, so a smaller one you chose
+yourself is never raised to meet it — and a number set after the migration stays set.
 
 **Start button** puts a Windows logo at the leading end, where the shell's own Start button sits. It
 opens the real Start menu, by the Ctrl+Esc the shell has always answered rather than by poking at a
@@ -206,9 +207,17 @@ Windows then opens that menu wherever it believes its taskbar to be — the prim
 edge, whether or not the shell's bar is still shown there, and nowhere near a bar of ours on another
 screen. There is no supported way to ask for somewhere else, so **Open the Start menu over the
 button** moves it after the fact: the menu is an ordinary top-level window belonging to
-StartMenuExperienceHost, whatever is drawn inside it. It is nudged for a fraction of a second rather
-than placed once, since it animates in and would otherwise slide back. Undocumented, hence the
-switch — turn it off and the menu opens where Windows put it.
+StartMenuExperienceHost, whatever is drawn inside it. It is nudged for the better part of a second
+rather than placed once, since it animates in and would otherwise slide back.
+
+The keyboard's Windows key opens it in that same wrong place, so the menu is followed however it was
+asked for rather than only when the button is clicked. That means watching one process — a hook
+scoped to the shell that draws the menu, not to the desktop, since `EVENT_OBJECT_SHOW` across the
+whole machine is one of the busiest events there is and none of the rest of it could ever be the
+Start menu. With bars on several displays it opens on the one the pointer is on.
+
+All of this is undocumented, hence the switch: turn it off and the menu opens where Windows put it.
+The log says whether the menu was found and whether the move was allowed.
 
 Applications are told apart by the id their windows declare, not by their executable — which is how
 a Chrome PWA gets its own icon rather than disappearing into the browser's, despite both being
@@ -225,7 +234,9 @@ window's thread, which makes the call legitimate, and detaches immediately after
 ScweenSpit's own settings window is listed like any other application, which matters once the Windows
 taskbar is hidden: it would otherwise be the one window with no way back to it.
 
-It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
+The Start glyph is drawn into the same box an application icon gets, at the same size, so the row
+reads as one row — a couple of pixels out of line is invisible anywhere else on a bar and obvious
+here. It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
 thing you switch to, not six. The underline splits into a segment per open window, so a glance says
 both *running* and *how many*, and clicking walks through them rather than always raising the same
 one. A single window still toggles: raise it, click again to put it away.

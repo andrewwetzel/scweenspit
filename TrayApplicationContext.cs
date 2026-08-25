@@ -113,6 +113,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplyAnimationPreference();
         ApplyUsageTracking();
         bars.Apply(config, zones);
+        // Follows the menu however it was opened — the keyboard's Windows key as much as our own
+        // button, since Windows puts it in the same wrong place either way.
+        StartMenu.Watch(bars.StartAnchor);
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
         UpdateTrayText();
@@ -501,6 +504,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             foregroundWatch.Dispose();
             ClaudeUsage.Stop();      // stops the poll loop before the process winds down
+            StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();
             overlay.Dispose();

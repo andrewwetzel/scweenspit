@@ -84,15 +84,13 @@ public sealed class BarSettings
     /// </summary>
     public bool Floating { get; set; }
 
-    /// <summary>
-    /// How far a floating bar sits from the side facing the desktop, in pixels — the only edge of it
-    /// ever seen against a window, and so the one that wants the most room.
-    /// </summary>
-    public int FloatMargin { get; set; } = 4;
+    /// <summary>How far a floating bar sits from the side facing the desktop, in pixels.</summary>
+    public int FloatMargin { get; set; } = 3;
 
     /// <summary>
-    /// The gap at the two ends of a floating bar. Nothing sits beside those, so they need less than
-    /// the open side to read as deliberate.
+    /// The gap at the two ends of a floating bar. The same as <see cref="FloatMargin"/> by default:
+    /// three sides of one rectangle, and an even border is what makes it read as deliberate rather
+    /// than as three separate decisions.
     /// </summary>
     public int SideGap { get; set; } = 3;
 
@@ -203,7 +201,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
 
     /// <summary>Master switch for the automatic maximize / borderless-fullscreen clamp.</summary>
     public bool AutoClamp { get; set; } = true;
@@ -447,10 +445,14 @@ public sealed class SplitConfig
 
         foreach (var bar in Bars.Values)
         {
-            // The floating gap used to be one number for all four sides, and 6px of it. Split three
-            // ways the open side wants less, but a file written by the old build still says 6 — so
-            // bring it down, once, rather than leaving the change to reach new installs only.
+            // Defaults that moved after files were already written out. Each step only ever brings
+            // a gap down, so a value somebody chose smaller is never raised back up to meet it.
+            //
+            // v1: one number covered all four sides, at 6px, and split three ways the open side
+            //     wanted less than that.
+            // v2: even less — level with the ends, so the three visible sides match.
             if (Version < 1) bar.FloatMargin = Math.Min(bar.FloatMargin, 4);
+            if (Version < 2) bar.FloatMargin = Math.Min(bar.FloatMargin, 3);
 
             // A bar thinner than this cannot show anything; a bar wider than a third of a display is
             // almost certainly a typo, and it eats the work area for every app on that screen.
