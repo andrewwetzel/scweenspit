@@ -63,6 +63,9 @@ public static class StartMenu
     /// <summary>Last window identified as the menu, so a chase is not an enumeration per tick.</summary>
     private static IntPtr located;
 
+    /// <summary>What the last search of the host's windows turned up, for <see cref="Status"/>.</summary>
+    private static string scan = "nothing searched yet";
+
     /// <summary>
     /// Start following the menu, asking <paramref name="where"/> each time it opens. Null from that
     /// means no bar wants it moved, and the menu is left where Windows put it.
@@ -145,7 +148,13 @@ public static class StartMenu
     {
         // Nothing wants it moved — no bar, or none with the button. Leave it where Windows put it
         // rather than running a timer to discover that forty times over.
-        if (anchor?.Invoke() is null) return;
+        if (anchor?.Invoke() is null)
+        {
+            Status = anchor is null
+                ? "not following the menu"
+                : "no bar is asking for the menu (no Start button, or moving it is switched off)";
+            return;
+        }
 
         Stop();
 
@@ -165,7 +174,7 @@ public static class StartMenu
                 {
                     if (settled == 0)
                     {
-                        Status = $"the menu never appeared within {GiveUpMs}ms (host {watched})";
+                        Status = $"no menu window found within {GiveUpMs}ms — {scan}";
                         Log.WriteOnce("start-menu-missing",
                             $"start menu did not appear within {GiveUpMs}ms of being asked for " +
                             $"(host pid {watched}); leaving it where Windows put it");
@@ -226,18 +235,28 @@ public static class StartMenu
         // one opening to the next.
         if (Shown(located) && OwnedBy(located, pid)) return located;
 
+        // Counted, not just searched. "No window matched" and "the process has no windows at all"
+        // want different fixes, and from the outside they are the same silence.
+        int owned = 0, onScreen = 0, big = 0;
+
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, _) =>
         {
-            if (!OwnedBy(h, pid) || !Shown(h)) return true;
+            if (!OwnedBy(h, pid)) return true;
+            owned++;
+            if (!Shown(h)) return true;
+            onScreen++;
 
             // The host owns more than one window and shows only one of them at a time; a stray small
             // one would otherwise be dragged around the screen in the menu's place.
             if (!GetWindowRect(h, out var r) || r.Width < MinMenu || r.Height < MinMenu) return true;
+            big++;
 
             found = h;
             return false;
         }, IntPtr.Zero);
+
+        scan = $"host {pid}: {owned} windows, {onScreen} on screen, {big} big enough";
 
         if (found != IntPtr.Zero)
         {
