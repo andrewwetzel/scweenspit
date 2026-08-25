@@ -186,15 +186,29 @@ it, so a 50px bar is 50px whether it floats or not. The space stays reserved eit
 bar moves in, so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
-The gap against the docked edge is set separately, and is smaller by default. It is not symmetric
-with the others: whatever the screen edge already holds — a band Windows still reserves, the bezel,
-the rounded corner of the panel — sits directly beneath it, so an equal gap there looks about twice
-as wide as the one above. **Gap from the screen edge** tunes it; **Gap on the free sides**
-is the other three.
+The three sides get their own gap, because they are not doing the same job. **Gap from the screen
+edge** is the docked side: whatever that edge already holds — a band Windows still reserves, the
+bezel, the rounded corner of the panel — sits directly beneath it, so a gap equal to the others
+looks about twice as wide. **Gap on the open side** faces the desktop and is the only edge ever seen
+against a window, so it gets the most. **Gap at the ends** has nothing beside it at all and gets the
+least. Only the first two cost reserved space; the ends run along an edge that was spanned end to
+end anyway.
+
+A config written before these were separate says 6px for all four sides. It is brought down to the
+new open-side default once, on load, rather than leaving the change to reach new installs only — set
+it back afterwards and it stays set.
 
 **Start button** puts a Windows logo at the leading end, where the shell's own Start button sits. It
 opens the real Start menu, by the Ctrl+Esc the shell has always answered rather than by poking at a
 taskbar window ScweenSpit may have hidden.
+
+Windows then opens that menu wherever it believes its taskbar to be — the primary display's bottom
+edge, whether or not the shell's bar is still shown there, and nowhere near a bar of ours on another
+screen. There is no supported way to ask for somewhere else, so **Open the Start menu over the
+button** moves it after the fact: the menu is an ordinary top-level window belonging to
+StartMenuExperienceHost, whatever is drawn inside it. It is nudged for a fraction of a second rather
+than placed once, since it animates in and would otherwise slide back. Undocumented, hence the
+switch — turn it off and the menu opens where Windows put it.
 
 Applications are told apart by the id their windows declare, not by their executable — which is how
 a Chrome PWA gets its own icon rather than disappearing into the browser's, despite both being

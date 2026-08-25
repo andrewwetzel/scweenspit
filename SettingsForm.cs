@@ -571,9 +571,13 @@ public sealed class SettingsForm : Form
 
             if (settings.Floating)
             {
-                var gap = Theme.Number(settings.FloatMargin, 0, 40, 2);
+                var gap = Theme.Number(settings.FloatMargin, 0, 40, 1);
                 gap.ValueChanged += (_, _) => { settings.FloatMargin = (int)gap.Value; Save(); };
-                Row(page, "Gap on the free sides (pixels)", gap);
+                Row(page, "Gap on the open side (pixels)", gap);
+
+                var sideGap = Theme.Number(settings.SideGap, 0, 40, 1);
+                sideGap.ValueChanged += (_, _) => { settings.SideGap = (int)sideGap.Value; Save(); };
+                Row(page, "Gap at the ends (pixels)", sideGap);
 
                 var edgeGap = Theme.Number(settings.EdgeGap, 0, 40, 1);
                 edgeGap.ValueChanged += (_, _) => { settings.EdgeGap = (int)edgeGap.Value; Save(); };
@@ -609,6 +613,10 @@ public sealed class SettingsForm : Form
             var start = Theme.Toggle("Start button at the leading end", settings.ShowStartButton);
             start.CheckedChanged += (_, _) => { settings.ShowStartButton = start.Checked; Save(); };
             page.Controls.Add(start);
+
+            var moveMenu = Theme.Toggle("Open the Start menu over the button", settings.MoveStartMenu);
+            moveMenu.CheckedChanged += (_, _) => { settings.MoveStartMenu = moveMenu.Checked; Save(); };
+            page.Controls.Add(moveMenu);
 
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };

@@ -240,13 +240,14 @@ public static class Native
     private const uint KeyUp = 0x0002;
 
     /// <summary>
-    /// Opens the Windows Start menu, by pressing Ctrl+Esc.
+    /// Presses Ctrl+Esc, which asks the shell for the Start menu.
     ///
     /// The documented shortcut rather than a message to the shell: SC_TASKLIST goes to the taskbar
     /// window, which this application may well have hidden, whereas the keystroke is handled however
-    /// the shell is currently arranged.
+    /// the shell is currently arranged. Ctrl+Esc rather than the Windows key itself because a lost
+    /// key-up on that one leaves it stuck down, turning every later keystroke into a shortcut.
     /// </summary>
-    public static void OpenStartMenu()
+    public static void PressStartShortcut()
     {
         keybd_event(VkControl, 0, 0, IntPtr.Zero);
         keybd_event(VkEscape, 0, 0, IntPtr.Zero);

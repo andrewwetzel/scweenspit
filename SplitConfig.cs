@@ -84,8 +84,17 @@ public sealed class BarSettings
     /// </summary>
     public bool Floating { get; set; }
 
-    /// <summary>How far a floating bar sits from the edges of its reserved strip, in pixels.</summary>
-    public int FloatMargin { get; set; } = 6;
+    /// <summary>
+    /// How far a floating bar sits from the side facing the desktop, in pixels — the only edge of it
+    /// ever seen against a window, and so the one that wants the most room.
+    /// </summary>
+    public int FloatMargin { get; set; } = 4;
+
+    /// <summary>
+    /// The gap at the two ends of a floating bar. Nothing sits beside those, so they need less than
+    /// the open side to read as deliberate.
+    /// </summary>
+    public int SideGap { get; set; } = 3;
 
     /// <summary>
     /// The gap on the docked side only. Kept apart from <see cref="FloatMargin"/> because that side
@@ -102,6 +111,13 @@ public sealed class BarSettings
 
     /// <summary>A Start button at the leading end, opening the Windows Start menu.</summary>
     public bool ShowStartButton { get; set; } = true;
+
+    /// <summary>
+    /// Move the Start menu over the button that opened it. Windows opens it wherever it believes its
+    /// own taskbar to be, which need not be this display or this edge. Undocumented, so worth being
+    /// able to turn off if a future build of the shell takes it badly.
+    /// </summary>
+    public bool MoveStartMenu { get; set; } = true;
 
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
@@ -179,6 +195,16 @@ public sealed class MonitorLayout
 
 public sealed class SplitConfig
 {
+    /// <summary>
+    /// Schema revision of the file on disk, so a changed default can reach people who already have
+    /// the old one written out. Absent from a file written before this existed, which reads back as
+    /// 0 — exactly what a migration wants.
+    /// </summary>
+    public int Version { get; set; }
+
+    /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
+    public const int CurrentVersion = 1;
+
     /// <summary>Master switch for the automatic maximize / borderless-fullscreen clamp.</summary>
     public bool AutoClamp { get; set; } = true;
 
@@ -408,6 +434,7 @@ public sealed class SplitConfig
 
     public static SplitConfig Default() => new()
     {
+        Version = CurrentVersion,
         Monitors = { [Fallback] = new MonitorLayout { Zones = { new(0, 0, .70, 1), new(.70, 0, 1, 1) } } },
     };
 
@@ -420,15 +447,23 @@ public sealed class SplitConfig
 
         foreach (var bar in Bars.Values)
         {
+            // The floating gap used to be one number for all four sides, and 6px of it. Split three
+            // ways the open side wants less, but a file written by the old build still says 6 — so
+            // bring it down, once, rather than leaving the change to reach new installs only.
+            if (Version < 1) bar.FloatMargin = Math.Min(bar.FloatMargin, 4);
+
             // A bar thinner than this cannot show anything; a bar wider than a third of a display is
             // almost certainly a typo, and it eats the work area for every app on that screen.
             bar.Thickness = Math.Clamp(bar.Thickness, 28, 600);
             // The gap is added to the thickness rather than taken out of it, so it only needs a
             // sane upper bound of its own.
             bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, 40);
+            bar.SideGap = Math.Clamp(bar.SideGap, 0, 40);
             bar.EdgeGap = Math.Clamp(bar.EdgeGap, 0, 40);
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
+
+        Version = CurrentVersion;
 
         // Below half a minute this stops being a status readout and starts being a scraper.
         Claude.RefreshSeconds = Math.Clamp(Claude.RefreshSeconds, 30, 3600);
@@ -513,6 +548,9 @@ public sealed class SplitConfig
     /// </summary>
     public void CopyFrom(SplitConfig o)
     {
+        // The revision of the file we are taking these from, so a reload cannot leave the live
+        // config claiming to be older than the values it now holds and migrating them twice.
+        Version = o.Version;
         AutoClamp = o.AutoClamp;
         DebounceMs = o.DebounceMs;
         Padding = o.Padding;

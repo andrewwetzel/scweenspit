@@ -110,22 +110,24 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     public void Reposition()
     {
-        int inset = settings.Floating ? settings.FloatMargin : 0;
+        int open = settings.Floating ? settings.FloatMargin : 0;
+        int ends = settings.Floating ? settings.SideGap : 0;
         int edgeGap = settings.Floating ? settings.EdgeGap : 0;
 
         if (zones.BarStrip(monitor, settings) is { } strip)
         {
             // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
             // part of an edge cannot be expressed that way. The zone is shortened for it instead.
-            var placed = BarGeometry.Deflate(strip, inset, Edge, edgeGap);
+            var placed = BarGeometry.Deflate(strip, Edge, open, ends, edgeGap);
             SetWindowPos(Handle, HWND_TOPMOST, placed.Left, placed.Top, placed.Width, placed.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
             Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {placed}");
             return;
         }
 
-        // Reserve the bar plus its gap; the window is then inset back to the thickness asked for.
-        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + inset + edgeGap, inset, edgeGap);
+        // Reserve the bar plus the two gaps along the docking axis; the window is then inset back
+        // to the thickness asked for. The gap at the ends runs the other way and costs nothing.
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + open + edgeGap, open, ends, edgeGap);
     }
 
     protected override CreateParams CreateParams
@@ -493,7 +495,8 @@ public sealed class TaskbarWindow : Form
 
         if (settings.ShowStartButton && StartSlot.Contains(e.Location))
         {
-            OpenStartMenu();
+            StartMenu.Open(RectangleToScreen(StartSlot), Bounds, Edge, monitor.Bounds,
+                settings.Floating ? Math.Max(4, settings.FloatMargin) : 4, settings.MoveStartMenu);
             return;
         }
 

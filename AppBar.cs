@@ -45,7 +45,7 @@ public sealed class AppBar : IDisposable
     /// out of the way of other appbars, so the answer to ABM_QUERYPOS is authoritative, not our
     /// request — and the window has to be placed where the answer says.
     /// </summary>
-    public void Reserve(RECT monitor, BarEdge edge, int thickness, int inset = 0, int edgeGap = 0)
+    public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0)
     {
         if (!registered) return;
 
@@ -63,7 +63,7 @@ public sealed class AppBar : IDisposable
 
         // Windows keeps the whole strip reserved; only the visible bar moves inside it, which is
         // what makes a floating bar float without applications creeping under it.
-        var r = BarGeometry.Deflate(data.rc, inset, edge, edgeGap);
+        var r = BarGeometry.Deflate(data.rc, edge, open, ends, edgeGap);
         SetWindowPos(owner.Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
