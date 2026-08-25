@@ -983,23 +983,31 @@ public sealed class SettingsForm : Form
 
         // Moving another process's menu is the most undocumented thing here, and from the outside
         // every way it can fail looks the same. Say which one it was.
-        page.Controls.Add(new Label
+        var state = new Label
         {
             Text = StartMenu.Status, AutoSize = true, MaximumSize = new Size(520, 0),
             ForeColor = Theme.Muted, Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 4),
-        });
+        };
+        page.Controls.Add(state);
+
+        // Live, because opening the menu takes the foreground away from this window: by the time
+        // anyone is looking at the line again the attempt is long over, and a line that only
+        // refreshes on arrival would still be showing the state before it.
+        var watch = new System.Windows.Forms.Timer { Interval = 500 };
+        watch.Tick += (_, _) =>
+        {
+            if (state.IsDisposed || state.FindForm() is null) { watch.Stop(); watch.Dispose(); return; }
+            if (state.Text != StartMenu.Status) state.Text = StartMenu.Status;
+        };
+        watch.Start();
 
         var recheck = Theme.Action("Open the Start menu and report");
         recheck.Width = 260;
-        recheck.Click += (_, _) =>
-        {
-            StartMenu.Press();
-            // After the chase has had its say, rather than reporting the state it was in before.
-            var settle = new System.Windows.Forms.Timer { Interval = 1500 };
-            settle.Tick += (_, _) => { settle.Stop(); settle.Dispose(); if (!IsDisposed) ShowDiagnostics(); };
-            settle.Start();
-        };
+        recheck.Click += (_, _) => StartMenu.Press();
         page.Controls.Add(recheck);
+
+        page.Controls.Add(Theme.Caption(
+            "Press the Windows key, or the button above, and this line updates with what happened."));
 
         var reload = Theme.Action("Reload config from disk", primary: true);
         reload.Width = 220;
