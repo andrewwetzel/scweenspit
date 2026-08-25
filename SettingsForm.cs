@@ -111,12 +111,25 @@ public sealed class SettingsForm : Form
         Show();
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
 
-        BringToFront();
-        Activate();
+        // After the click that asked for this has finished. A tray menu or a bar button is still
+        // dismissing at this point and the foreground window moves underneath us, so raising now
+        // races whatever Windows does next.
+        BeginInvoke(() =>
+        {
+            BringToFront();
+            Activate();
 
-        // Activate() is not always enough: the click that asked for this came from the tray or from
-        // a bar that never takes focus, so this process may not hold the foreground right either.
-        WindowList.Raise(Handle);
+            // Activate() alone is not enough: the click came from the tray or from a bar that never
+            // takes focus, so this process may not hold the foreground right.
+            WindowList.Raise(Handle);
+
+            // And nothing ordinary rises past an always-on-top window. A window clamped into a zone
+            // that covers the taskbar is exactly that, so the settings window would open behind it
+            // however legitimate the foreground call was. Topmost briefly, then back to the normal
+            // band so it does not sit over everything afterwards.
+            TopMost = true;
+            TopMost = false;
+        });
     }
 
     // ---- nav ---------------------------------------------------------------
