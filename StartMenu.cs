@@ -49,9 +49,15 @@ public static class StartMenu
     private const int PollMs = 16;
     private const int GiveUpMs = 2500;
 
-    /// <summary>Long enough to outlast the opening animation, which slides the menu back if it is
-    /// moved too early and then left alone.</summary>
-    private const int HoldMs = 700;
+    /// <summary>
+    /// A cap, not a plan: the menu is held in place for as long as it is open. Windows re-asserts
+    /// its own position more than once while the menu animates in, and a fixed hold that ends before
+    /// the last of those loses to it — silently, since by then nothing is watching.
+    /// </summary>
+    private const int MaxChaseMs = 30_000;
+
+    /// <summary>Enough corrections to call it a losing fight rather than an animation settling.</summary>
+    private const int MaxCorrections = 60;
 
     /// <summary>How long after asking a foreground change is still attributable to us.</summary>
     private const int AskedWindowMs = 2500;
@@ -154,6 +160,9 @@ public static class StartMenu
         Stop();
 
         long began = Environment.TickCount64, settled = 0;
+        int corrections = 0;
+        var placed = new Point();
+
         var timer = new Timer { Interval = PollMs };
         chase = timer;
 
@@ -164,10 +173,10 @@ public static class StartMenu
 
             if (menu == IntPtr.Zero)
             {
-                // Never shown, or shown and already dismissed. Either way we are done.
+                // Never shown, or shown and now dismissed. Either way we are done.
                 if (now - began > GiveUpMs || settled != 0)
                 {
-                    if (settled == 0) GaveUp();
+                    if (settled == 0) GaveUp(); else Settled(placed, corrections, "the menu closed");
                     Done(timer);
                 }
                 return;
@@ -189,8 +198,16 @@ public static class StartMenu
             }
 
             if (settled == 0) settled = now;
-            Place(menu, target, log: settled == now);
-            if (now - settled > HoldMs) Done(timer);
+            if (Place(menu, target, out placed)) corrections++;
+
+            // Bounded on both sides. A menu left open all afternoon must not leave a timer running,
+            // and a shell determined to have its own way must not be fought to a flicker.
+            if (now - began > MaxChaseMs) { Settled(placed, corrections, "gave up watching"); Done(timer); }
+            else if (corrections > MaxCorrections)
+            {
+                Settled(placed, corrections, "Windows keeps putting it back");
+                Done(timer);
+            }
         };
         timer.Start();
     }
@@ -211,6 +228,23 @@ public static class StartMenu
 
         Status = $"no menu window found within {GiveUpMs}ms — {what}";
         Log.Write($"start menu not found: {what}");
+    }
+
+    /// <summary>
+    /// How it ended. Whether the menu stayed put or had to be dragged back repeatedly is the whole
+    /// question once the move itself succeeds, and one correction looks exactly like forty from the
+    /// outside — both of them just look like a menu in the right place, or not.
+    /// </summary>
+    private static void Settled(Point placed, int corrections, string ending)
+    {
+        Status = corrections switch
+        {
+            0 => $"the menu opened where it was wanted, at {placed.X},{placed.Y} ({ending})",
+            1 => $"moved the menu to {placed.X},{placed.Y} and it stayed ({ending})",
+            _ => $"moved the menu to {placed.X},{placed.Y} {corrections} times — " +
+                 $"Windows keeps moving it back ({ending})",
+        };
+        Log.WriteOnce($"start-menu-settled-{Math.Min(corrections, 2)}", $"start menu: {Status}");
     }
 
     private static void Stop()
@@ -258,9 +292,11 @@ public static class StartMenu
     private static bool Shown(IntPtr hWnd) =>
         hWnd != IntPtr.Zero && IsWindow(hWnd) && IsWindowVisible(hWnd) && !IsCloaked(hWnd);
 
-    private static void Place(IntPtr menu, Anchor at, bool log)
+    /// <summary>Puts the menu where the anchor wants it. True when it actually had to be moved.</summary>
+    private static bool Place(IntPtr menu, Anchor at, out Point placed)
     {
-        if (!GetWindowRect(menu, out var window)) return;
+        placed = new Point();
+        if (!GetWindowRect(menu, out var window)) return false;
 
         // The menu's window is larger than the menu: it carries a drop shadow outside its frame. Line
         // up what is painted, then move the window by the difference between the two.
@@ -286,30 +322,22 @@ public static class StartMenu
         x = Clamp(x, at.Monitor.Left + at.Gap, at.Monitor.Right - at.Gap - width);
         y = Clamp(y, at.Monitor.Top + at.Gap, at.Monitor.Bottom - at.Gap - height);
 
-        if (x == painted.Left && y == painted.Top)
+        placed = new Point(x, y);
+        if (x == painted.Left && y == painted.Top) return false;
+
+        if (SetWindowPos(menu, IntPtr.Zero, x + (window.Left - painted.Left), y + (window.Top - painted.Top),
+                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
         {
-            if (log) Status = $"the menu opened where it was wanted, at {x},{y}";
-            return;
+            Log.WriteOnce("start-menu-placed",
+                $"start menu {painted} moved to {x},{y} at {at.Edge}, button {at.Button}");
+            return true;
         }
 
-        bool moved = SetWindowPos(menu, IntPtr.Zero, x + (window.Left - painted.Left), y + (window.Top - painted.Top),
-            0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-
-        if (!log) return;
-
-        if (moved)
-        {
-            Status = $"moved the menu from {painted.Left},{painted.Top} to {x},{y} " +
-                     $"({painted.Width}x{painted.Height}, button at {at.Button.Left},{at.Button.Top}, {at.Edge})";
-            Log.WriteOnce("start-menu-placed", $"start menu {painted} moved to {x},{y} at {at.Edge}");
-        }
-        else
-        {
-            int err = Marshal.GetLastWin32Error();
-            Status = $"Windows refused to move the menu from {painted.Left},{painted.Top} to {x},{y} (error {err})";
-            Log.WriteOnce("start-menu-refused",
-                $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {err})");
-        }
+        int err = Marshal.GetLastWin32Error();
+        Status = $"Windows refused to move the menu from {painted.Left},{painted.Top} to {x},{y} (error {err})";
+        Log.WriteOnce("start-menu-refused",
+            $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {err})");
+        return false;
     }
 
     /// <summary>Math.Clamp with the low bound winning, for a menu too big for the space it has.</summary>

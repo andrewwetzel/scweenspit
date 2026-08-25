@@ -222,8 +222,11 @@ Windows then opens that menu wherever it believes its taskbar to be — the prim
 edge, whether or not the shell's bar is still shown there, and nowhere near a bar of ours on another
 screen. There is no supported way to ask for somewhere else, so **Open the Start menu over the
 button** moves it after the fact: the menu is an ordinary top-level window belonging to
-StartMenuExperienceHost, whatever is drawn inside it. It is nudged for the better part of a second
-rather than placed once, since it animates in and would otherwise slide back.
+StartMenuExperienceHost, whatever is drawn inside it. It is held there for as long as it stays
+open, rather than placed once and left: Windows re-asserts its own position more than once while the
+menu animates in, and a fixed hold that ends before the last of those loses to it silently, since by
+then nothing is watching. Both ends are bounded — a menu left open all afternoon does not leave a
+timer running, and a shell determined to have its own way is not fought to a flicker.
 
 The keyboard's Windows key opens it in that same wrong place, so the menu is followed however it was
 asked for rather than only when the button is clicked. That means watching one process — a hook
