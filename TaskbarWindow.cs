@@ -221,7 +221,7 @@ public sealed class TaskbarWindow : Form
 
         foreach (var button in buttons)
             if (!button.Running && !fileIcons.ContainsKey(button.Id))
-                fileIcons[button.Id] = WindowList.IconForFile(button.Id) ?? new Bitmap(32, 32);
+                fileIcons[button.Id] = WindowList.IconForFile(button.Id) ?? LetterTile(button.Label);
 
         foreach (var stale in icons.Keys.Where(h => !IsWindow(h)).ToList())
         {
@@ -301,32 +301,96 @@ public sealed class TaskbarWindow : Form
         var live = order.Select(h => windows.FirstOrDefault(w => w.Handle == h))
                         .Where(w => w is not null).Select(w => w!).ToList();
 
-        var laid = new List<Button>();
-        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var pin in settings.Pinned)
-        {
-            laid.Add(new Button(pin, live.Where(w => Same(w.GroupId, pin)).ToList(), true));
-            placed.Add(pin);
-        }
-
-        // Everything else, one button per application, positioned where its first window appeared.
+        // Group the running windows by application first, keeping the order they appeared in.
+        var groups = new List<(string Id, List<TaskWindow> Windows)>();
         foreach (var w in live)
         {
-            if (placed.Contains(w.GroupId)) continue;
-
-            placed.Add(w.GroupId);
-            laid.Add(new Button(w.GroupId, live.Where(o => Same(o.GroupId, w.GroupId)).ToList(), false));
+            var existing = groups.FindIndex(g => Same(g.Id, w.GroupId));
+            if (existing >= 0) groups[existing].Windows.Add(w);
+            else groups.Add((w.GroupId, [w]));
         }
+
+        // Pins are matched in two passes. An exact match on the declared application id wins
+        // outright; only then may a pin that is a plain executable claim a group by its file. That
+        // ordering is what lets a pinned browser and a pinned web app that are both chrome.exe end
+        // up on their own buttons rather than fighting over the first one.
+        var claimed = new bool[groups.Count];
+        var forPin = new int[settings.Pinned.Count];
+        Array.Fill(forPin, -1);
+
+        for (int p = 0; p < settings.Pinned.Count; p++)
+        {
+            int at = groups.FindIndex(g => Same(g.Id, settings.Pinned[p]));
+            if (at >= 0 && !claimed[at]) { forPin[p] = at; claimed[at] = true; }
+        }
+
+        for (int p = 0; p < settings.Pinned.Count; p++)
+        {
+            if (forPin[p] >= 0) continue;
+
+            int at = -1;
+            for (int g = 0; g < groups.Count && at < 0; g++)
+                if (!claimed[g] && groups[g].Windows.Count > 0
+                    && Same(groups[g].Windows[0].Path, settings.Pinned[p])) at = g;
+
+            if (at >= 0) { forPin[p] = at; claimed[at] = true; }
+        }
+
+        var laid = new List<Button>();
+
+        for (int p = 0; p < settings.Pinned.Count; p++)
+            laid.Add(new Button(settings.Pinned[p],
+                                forPin[p] >= 0 ? groups[forPin[p]].Windows : [], true));
+
+        for (int i = 0; i < groups.Count; i++)
+            if (!claimed[i]) laid.Add(new Button(groups[i].Id, groups[i].Windows, false));
 
         return laid;
     }
 
     private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
-    private static string NameOf(string path)
+    /// <summary>
+    /// A readable name for a pinned entry. Usually a file, but an application id for something like
+    /// a web app — and the leading segment of one of those is the closest thing it has to a name.
+    /// </summary>
+    private static string NameOf(string id)
     {
-        try { return Path.GetFileNameWithoutExtension(path); } catch { return path; }
+        try
+        {
+            if (File.Exists(id) || id.Contains('\\') || id.Contains('/'))
+                return Path.GetFileNameWithoutExtension(id);
+
+            var head = id.Split('.')[0];
+            return head.Length > 0 ? head : id;
+        }
+        catch { return id; }
+    }
+
+    /// <summary>
+    /// Stands in for an icon we cannot get. A pinned web app is identified by an application id
+    /// rather than a file, so there is nothing to extract from until it is running — and a blank
+    /// square says less than a letter does.
+    /// </summary>
+    private static Bitmap LetterTile(string label)
+    {
+        var tile = new Bitmap(32, 32);
+        using var g = Graphics.FromImage(tile);
+
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        g.Clear(Color.Transparent);
+
+        using var back = new SolidBrush(Theme.Raised);
+        g.FillEllipse(back, 1, 1, 30, 30);
+
+        var letter = (label.Length > 0 ? label[..1] : "?").ToUpperInvariant();
+        using var font = new Font(FontFamily.GenericSansSerif, 17f, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var ink = new SolidBrush(Theme.Muted);
+        using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
+        g.DrawString(letter, font, ink, new Rectangle(0, 0, 32, 32), centred);
+        return tile;
     }
 
     private Rectangle SlotAt(int index) => Vertical
