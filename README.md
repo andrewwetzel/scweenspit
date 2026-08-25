@@ -237,7 +237,9 @@ throughout. Among that process's windows the menu is the one on screen and large
 hundred pixels, which is enough to tell it from the helper windows beside it.
 
 All of this is undocumented, hence the switch: turn it off and the menu opens where Windows put it.
-The log says whether the menu was found and whether the move was allowed.
+**Diagnostics** reports what happened last time it opened — whether the window was found, whether
+Windows allowed the move, and where it went — because from the outside every one of those failures
+looks identical. **Open the Start menu and report** does it on demand.
 
 Applications are told apart by the id their windows declare, not by their executable — which is how
 a Chrome PWA gets its own icon rather than disappearing into the browser's, despite both being

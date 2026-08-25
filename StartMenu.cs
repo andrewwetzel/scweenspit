@@ -49,6 +49,14 @@ public static class StartMenu
     private static GCHandle pin;
     private static IntPtr hookShow, hookUncloak;
 
+    /// <summary>
+    /// What happened last time the menu opened, in one line, for the Diagnostics page. This is the
+    /// most undocumented thing the application does, and the difference between not finding the
+    /// window, not being allowed to move it, and moving it somewhere unhelpful is invisible from
+    /// the outside — but it decides which of three quite different fixes is the right one.
+    /// </summary>
+    public static string Status { get; private set; } = "not started";
+
     private static uint watched;
     /// <summary>Any window of the watched process, purely to notice when the shell has restarted.</summary>
     private static IntPtr hostAny;
@@ -77,6 +85,7 @@ public static class StartMenu
         uint pid = HostPid();
         if (pid == 0)
         {
+            Status = "no Start menu host process is running";
             Log.WriteOnce("start-menu-host-missing",
                 $"no Start menu host running ({string.Join(", ", Hosts)}); leaving the menu alone");
             return;
@@ -100,11 +109,16 @@ public static class StartMenu
         watched = hookShow != IntPtr.Zero || hookUncloak != IntPtr.Zero ? pid : 0;
         hostAny = watched != 0 ? AnyWindowOf(pid) : IntPtr.Zero;
         Log.Write($"start menu hooks: pid={pid} show=0x{hookShow:X} uncloak=0x{hookUncloak:X}");
+
+        Status = watched != 0
+            ? $"watching host {pid}; the menu has not opened yet"
+            : $"found host {pid} but Windows refused the hook";
     }
 
     public static void Unwatch()
     {
         anchor = null;
+        Status = "not following the menu";
         Unhook();
         Stop();
     }
@@ -149,9 +163,13 @@ public static class StartMenu
                 // Never shown, or shown and already dismissed. Either way we are done.
                 if (now - began > GiveUpMs || settled != 0)
                 {
-                    if (settled == 0) Log.WriteOnce("start-menu-missing",
-                        $"start menu did not appear within {GiveUpMs}ms of being asked for " +
-                        $"(host pid {watched}); leaving it where Windows put it");
+                    if (settled == 0)
+                    {
+                        Status = $"the menu never appeared within {GiveUpMs}ms (host {watched})";
+                        Log.WriteOnce("start-menu-missing",
+                            $"start menu did not appear within {GiveUpMs}ms of being asked for " +
+                            $"(host pid {watched}); leaving it where Windows put it");
+                    }
                     Done(timer);
                 }
                 return;
@@ -159,7 +177,12 @@ public static class StartMenu
 
             // Asked for each time rather than captured: between one press and the next the pointer
             // may have moved to another display, and the bar there is the one to open against.
-            if (anchor?.Invoke() is not { } target) { Done(timer); return; }
+            if (anchor?.Invoke() is not { } target)
+            {
+                Status = "no bar is asking for the menu";
+                Done(timer);
+                return;
+            }
 
             if (settled == 0) settled = now;
             Place(menu, target, log: settled == now);
@@ -279,7 +302,11 @@ public static class StartMenu
         x = Clamp(x, at.Monitor.Left + at.Gap, at.Monitor.Right - at.Gap - width);
         y = Clamp(y, at.Monitor.Top + at.Gap, at.Monitor.Bottom - at.Gap - height);
 
-        if (x == painted.Left && y == painted.Top) return;
+        if (x == painted.Left && y == painted.Top)
+        {
+            if (log) Status = $"the menu opened where it was wanted, at {x},{y}";
+            return;
+        }
 
         bool moved = SetWindowPos(menu, IntPtr.Zero, x + (window.Left - painted.Left), y + (window.Top - painted.Top),
             0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -287,9 +314,20 @@ public static class StartMenu
         // Once a session either way. This is undocumented enough to be worth a line in the log, and
         // repetitive enough that a line per opening would bury everything else in it.
         if (!log) return;
-        if (moved) Log.WriteOnce("start-menu-placed", $"start menu {painted} moved to {x},{y} at {at.Edge}");
-        else Log.WriteOnce("start-menu-refused",
-            $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {Marshal.GetLastWin32Error()})");
+
+        if (moved)
+        {
+            Status = $"moved the menu from {painted.Left},{painted.Top} to {x},{y} " +
+                     $"({painted.Width}x{painted.Height}, button at {at.Button.Left},{at.Button.Top}, {at.Edge})";
+            Log.WriteOnce("start-menu-placed", $"start menu {painted} moved to {x},{y} at {at.Edge}");
+        }
+        else
+        {
+            int err = Marshal.GetLastWin32Error();
+            Status = $"Windows refused to move the menu from {painted.Left},{painted.Top} to {x},{y} (error {err})";
+            Log.WriteOnce("start-menu-refused",
+                $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {err})");
+        }
     }
 
     private static void Unhook()

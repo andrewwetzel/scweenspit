@@ -975,6 +975,32 @@ public sealed class SettingsForm : Form
             page.Controls.Add(open);
         }
 
+        page.Controls.Add(new Label
+        {
+            Text = "Start menu", AutoSize = true, Font = Theme.Face(11f, FontStyle.Bold),
+            ForeColor = Theme.Text, Margin = new Padding(0, 20, 0, 2),
+        });
+
+        // Moving another process's menu is the most undocumented thing here, and from the outside
+        // every way it can fail looks the same. Say which one it was.
+        page.Controls.Add(new Label
+        {
+            Text = StartMenu.Status, AutoSize = true, MaximumSize = new Size(520, 0),
+            ForeColor = Theme.Muted, Font = Theme.Face(9f), Margin = new Padding(0, 0, 0, 4),
+        });
+
+        var recheck = Theme.Action("Open the Start menu and report");
+        recheck.Width = 260;
+        recheck.Click += (_, _) =>
+        {
+            StartMenu.Press();
+            // After the chase has had its say, rather than reporting the state it was in before.
+            var settle = new System.Windows.Forms.Timer { Interval = 1500 };
+            settle.Tick += (_, _) => { settle.Stop(); settle.Dispose(); if (!IsDisposed) ShowDiagnostics(); };
+            settle.Start();
+        };
+        page.Controls.Add(recheck);
+
         var reload = Theme.Action("Reload config from disk", primary: true);
         reload.Width = 220;
         reload.Margin = new Padding(0, 16, 0, 0);
