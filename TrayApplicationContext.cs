@@ -280,6 +280,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             config.TaskbarRestore = null;
             config.Save();
         }
+
+        // Auto-hide as a setting we hold, rather than one we only ever pushed at Windows. Without a
+        // record of it a profile cannot put it back, which is how undocking left a taskbar that only
+        // appeared on hover.
+        if (!config.HideWindowsTaskbar && config.TaskbarAutoHide is { } wanted && Taskbar.AutoHide != wanted)
+            Taskbar.AutoHide = wanted;
     }
 
     /// <summary>

@@ -29,6 +29,13 @@ public sealed class BarManager : IDisposable
     public void Apply(SplitConfig config, ZoneManager zoneManager)
     {
         zones = zoneManager;
+        // Stood down entirely: keep every display's setup, show none of it.
+        if (!config.ShowBars)
+        {
+            foreach (var device in bars.Keys.ToList()) Close(device);
+            return;
+        }
+
         var monitors = ZoneManager.AllMonitors().ToDictionary(m => m.Device, m => m);
 
         // Take down bars that are no longer configured, or whose display has gone away.

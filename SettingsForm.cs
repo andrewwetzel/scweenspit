@@ -412,8 +412,9 @@ public sealed class SettingsForm : Form
             Margin = new Padding(0, 4, 0, 10),
         });
 
-        var autoHide = Theme.Toggle("Hide the taskbar until I reach for it", Taskbar.AutoHide);
-        autoHide.CheckedChanged += (_, _) => Taskbar.AutoHide = autoHide.Checked;
+        var autoHide = Theme.Toggle("Hide the taskbar until I reach for it",
+                                    config.TaskbarAutoHide ?? Taskbar.AutoHide);
+        autoHide.CheckedChanged += (_, _) => { config.TaskbarAutoHide = autoHide.Checked; Save(); };
         page.Controls.Add(autoHide);
         page.Controls.Add(Theme.Caption(
             "Takes effect immediately, needs no restart, and — unlike moving the taskbar — still " +
@@ -982,6 +983,18 @@ public sealed class SettingsForm : Form
         };
         page.Controls.Add(name);
 
+        var handsOff = Theme.Action("Remember it with ScweenSpit standing down");
+        handsOff.AutoSize = true;
+        handsOff.Click += (_, _) =>
+        {
+            var profile = DisplayProfile.HandsOff(string.IsNullOrWhiteSpace(name.Text) ? null : name.Text.Trim());
+            config.Profiles[signature] = profile;
+            profile.ApplyTo(config);
+            Save();
+            Say("Saved. On this arrangement ScweenSpit leaves the machine to Windows.");
+            BeginInvoke(ShowDisplays);
+        };
+
         var save = Theme.Action(saved ? "Update this arrangement" : "Remember this arrangement", primary: true);
         save.AutoSize = true;
         save.Click += (_, _) =>
@@ -994,10 +1007,14 @@ public sealed class SettingsForm : Form
             BeginInvoke(ShowDisplays);
         };
         page.Controls.Add(save);
+        page.Controls.Add(handsOff);
         page.Controls.Add(Theme.Caption(
-            "Captures clamping, drag-to-zone, keeping windows on one display, hiding the Windows " +
-            "taskbar, snap suppression and the minimise animation — the settings that tend to differ " +
-            "between docked and undocked.\n\n" +
+            "Standing down turns off clamping, drag-to-zone, keeping windows on one display and our " +
+            "own bars, and puts the Windows taskbar back on screen and out of auto-hide — everything " +
+            "goes back to how Windows behaves on its own. Useful for the laptop screen.\n\n" +
+            "Remembering captures the current state instead: clamping, drag-to-zone, keeping windows " +
+            "on one display, the Windows taskbar and its auto-hide, our bars, snap suppression and " +
+            "the minimise animation.\n\n" +
             "Zone layouts and bars are already remembered per display, so they follow on their own: " +
             "a bar configured for a monitor simply is not there when that monitor is not."));
 

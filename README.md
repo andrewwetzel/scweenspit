@@ -471,9 +471,18 @@ with `fullscreen>0` means the move itself was refused.
 **Remember this arrangement**. Do the same undocked, and each one comes back with its hardware — the
 Windows taskbar restored on the laptop panel, hidden again at the desk.
 
-A profile carries the settings that tend to differ between docked and undocked: clamping,
-drag-to-zone, keeping windows on one display, hiding the Windows taskbar, snap suppression and the
-minimise animation. Anything it does not name is left alone.
+**Remember it with ScweenSpit standing down** is the one you want for the laptop screen: clamping,
+drag-to-zone, keeping windows on one display and our own bars all off, the Windows taskbar back on
+screen and out of auto-hide, Aero Snap and the minimise animation handed back. Undock, and the
+machine behaves the way Windows behaves on its own.
+
+A profile otherwise captures the current state: clamping, drag-to-zone, keeping windows on one
+display, the Windows taskbar and whether it auto-hides, our bars, snap suppression and the minimise
+animation. Anything it does not name is left alone.
+
+Auto-hide is a setting ScweenSpit holds rather than one it only pushes at Windows. That distinction
+matters: a setting with no record of it cannot be part of a profile, which is why undocking used to
+leave a taskbar that came back only when the pointer reached the edge.
 
 Zone layouts and bars need no profile — they are already stored per display, so they follow on their
 own. A bar configured for a monitor simply is not there when that monitor is not.

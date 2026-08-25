@@ -14,8 +14,27 @@ public sealed class DisplayProfile
     public bool? DragToZone { get; set; }
     public bool? KeepOnOneDisplay { get; set; }
     public bool? HideWindowsTaskbar { get; set; }
+    public bool? TaskbarAutoHide { get; set; }
+    public bool? ShowBars { get; set; }
     public bool? SuppressWindowsSnap { get; set; }
     public bool? StopMinimiseAnimation { get; set; }
+
+    /// <summary>
+    /// A profile that leaves the machine to Windows: nothing clamped, nothing snapped for you, no
+    /// bars, and the taskbar back where it was and staying there. What undocking usually wants.
+    /// </summary>
+    public static DisplayProfile HandsOff(string? name = null) => new()
+    {
+        Name = name,
+        AutoClamp = false,
+        DragToZone = false,
+        KeepOnOneDisplay = false,
+        HideWindowsTaskbar = false,
+        TaskbarAutoHide = false,
+        ShowBars = false,
+        SuppressWindowsSnap = false,
+        StopMinimiseAnimation = false,
+    };
 
     public void CaptureFrom(SplitConfig config)
     {
@@ -23,6 +42,8 @@ public sealed class DisplayProfile
         DragToZone = config.DragToZone;
         KeepOnOneDisplay = config.KeepOnOneDisplay;
         HideWindowsTaskbar = config.HideWindowsTaskbar;
+        TaskbarAutoHide = config.TaskbarAutoHide;
+        ShowBars = config.ShowBars;
         SuppressWindowsSnap = config.SuppressWindowsSnap;
         StopMinimiseAnimation = config.StopMinimiseAnimation;
     }
@@ -33,6 +54,8 @@ public sealed class DisplayProfile
         if (DragToZone is { } d) config.DragToZone = d;
         if (KeepOnOneDisplay is { } k) config.KeepOnOneDisplay = k;
         if (HideWindowsTaskbar is { } h) config.HideWindowsTaskbar = h;
+        if (TaskbarAutoHide is { } autoHide) config.TaskbarAutoHide = autoHide;
+        if (ShowBars is { } bars) config.ShowBars = bars;
         if (SuppressWindowsSnap is { } s) config.SuppressWindowsSnap = s;
         if (StopMinimiseAnimation is { } m) config.StopMinimiseAnimation = m;
     }

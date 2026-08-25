@@ -188,6 +188,20 @@ public sealed class SplitConfig
     public bool? TaskbarRestore { get; set; }
 
     /// <summary>
+    /// Whether the Windows taskbar should hide itself until reached for. Null means ScweenSpit does
+    /// not manage it and leaves whatever Windows has.
+    ///
+    /// Kept here rather than only being pushed at Windows, because a setting with no record of it
+    /// cannot be part of a display profile — and "put the taskbar back properly" is precisely what
+    /// undocking wants.
+    /// </summary>
+    public bool? TaskbarAutoHide { get; set; }
+
+    /// <summary>Show ScweenSpit's own bars at all. A master switch, so a profile can stand them
+    /// down without discarding how each display is set up.</summary>
+    public bool ShowBars { get; set; } = true;
+
+    /// <summary>
     /// Stop Windows animating windows into the taskbar. With the taskbar hidden the animation flies
     /// them at a corner where nothing is, which reads as a glitch.
     /// </summary>
@@ -493,6 +507,8 @@ public sealed class SplitConfig
         Padding = o.Padding;
         SuppressWindowsSnap = o.SuppressWindowsSnap;
         HideWindowsTaskbar = o.HideWindowsTaskbar;
+        TaskbarAutoHide = o.TaskbarAutoHide;
+        ShowBars = o.ShowBars;
         StopMinimiseAnimation = o.StopMinimiseAnimation;
         // SnapRestore is deliberately NOT copied: it records what this process changed on the
         // system, and the disk copy may be older than what we are currently holding.
