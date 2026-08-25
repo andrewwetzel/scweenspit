@@ -198,7 +198,12 @@ public static class StartMenu
             }
 
             if (settled == 0) settled = now;
-            if (Place(menu, target, out placed)) corrections++;
+
+            // Reported on the first move rather than only at the end. The hold now lasts as long as
+            // the menu is open, so waiting for the ending means the line reads "asked the shell…"
+            // for exactly as long as anyone is in a position to look at it.
+            if (Place(menu, target, out placed) && ++corrections == 1)
+                Status = $"moved the menu to {placed.X},{placed.Y}; holding it while it is open…";
 
             // Bounded on both sides. A menu left open all afternoon must not leave a timer running,
             // and a shell determined to have its own way must not be fought to a flicker.

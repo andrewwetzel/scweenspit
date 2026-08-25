@@ -579,8 +579,11 @@ has just been unplugged goes with it. Nothing else in the app watches for that.
 
 ## Updating
 
-**Settings → Updates → Check for updates.** If there is a newer release it shows the notes and an
-Install button; installing downloads it, replaces the `ScweenSpit.exe` you keep, and restarts.
+**Settings → Updates → Check and update.** One button: if there is a newer release it downloads it,
+replaces the `ScweenSpit.exe` you keep, and restarts. Finding out that an update exists and then
+being asked whether to have it is a question with one sensible answer, and it was being asked every
+time. The release notes go to the log rather than the window, since the window is about to be
+replaced along with everything else.
 
 This is simpler here than it usually is, because of the shape of the thing: the file you keep is the
 native launcher, and it exits the moment it has started the app. So the file being replaced is never

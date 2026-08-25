@@ -1150,7 +1150,9 @@ public sealed class SettingsForm : Form
         };
         page.Controls.Add(status);
 
-        var check = Theme.Action("Check for updates", primary: true);
+        // One button, not two. Finding out that an update exists and then being asked whether to
+        // have it is a question with one sensible answer, and it was being asked every time.
+        var check = Theme.Action("Check and update", primary: true);
         check.AutoSize = true;
         check.Click += async (_, _) =>
         {
@@ -1163,19 +1165,43 @@ public sealed class SettingsForm : Form
                 config.LastUpdateCheck = DateTime.Now;
                 config.Save();
 
-                if (update is null) { status.Text = $"Version {Updater.Current} is the latest."; return; }
+                if (update is null)
+                {
+                    status.Text = $"Version {Updater.Current} is the latest.";
+                    check.Enabled = true;
+                    return;
+                }
 
                 status.ForeColor = Theme.Accent;
-                status.Text = $"Version {update.Version} is available.";
-                Offer(page, update);
+                status.Text = $"Downloading {update.Version}…";
+                check.Text = "Downloading…";
+
+                // To the log rather than the window: the window is about to be replaced along with
+                // everything else, and nobody reads release notes in the second before a restart.
+                if (!string.IsNullOrWhiteSpace(update.Notes))
+                    Log.Write($"update {update.Version} notes: {update.Notes.Trim()}");
+
+                var replaced = await Updater.ApplyAsync(update);
+
+                status.Text = $"Installing {update.Version} and restarting…";
+
+                // Hand it our process id: it has to wait for us to let go of the unpacked copy
+                // before it can replace it, or the update lands on disk and never runs.
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(replaced)
+                {
+                    Arguments = $"--replacing {Environment.ProcessId}",
+                    UseShellExecute = true,
+                });
+                quit();
             }
             catch (Exception ex)
             {
                 status.ForeColor = Color.FromArgb(235, 140, 140);
                 status.Text = ex.Message;
-                Log.Write($"update check failed: {ex}");
+                check.Enabled = true;
+                check.Text = "Check and update";
+                Log.Write($"update failed: {ex}");
             }
-            finally { check.Enabled = true; }
         };
         page.Controls.Add(check);
 
@@ -1210,48 +1236,6 @@ public sealed class SettingsForm : Form
     }
 
     /// <summary>Shows the release notes and an install button once an update has been found.</summary>
-    private void Offer(FlowLayoutPanel page, UpdateInfo update)
-    {
-        if (!string.IsNullOrWhiteSpace(update.Notes))
-        {
-            page.Controls.Add(new TextBox
-            {
-                Text = update.Notes.Trim(), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
-                Width = 460, Height = 130, BackColor = Theme.Raised, ForeColor = Theme.Muted,
-                Font = Theme.Face(9f), BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 10, 0, 8),
-            });
-        }
-
-        var install = Theme.Action($"Install {update.Version} and restart", primary: true);
-        install.AutoSize = true;
-        install.Click += async (_, _) =>
-        {
-            install.Enabled = false;
-            install.Text = "Downloading…";
-            try
-            {
-                var replaced = await Updater.ApplyAsync(update);
-
-                // Hand it our process id: it has to wait for us to let go of the unpacked copy
-                // before it can replace it, or the update lands on disk and never runs.
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(replaced)
-                {
-                    Arguments = $"--replacing {Environment.ProcessId}",
-                    UseShellExecute = true,
-                });
-                quit();
-            }
-            catch (Exception ex)
-            {
-                install.Enabled = true;
-                install.Text = "Install and restart";
-                Say(ex.Message, problem: true);
-                Log.Write($"update install failed: {ex}");
-            }
-        };
-        page.Controls.Add(install);
-    }
-
     private static void OpenPath(string path)
     {
         try
