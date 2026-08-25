@@ -51,6 +51,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             config.SetZones(device, edited);
             Log.Write($"zones resized on {device}: {edited.Count} zones");
             hook.CancelPending();
+            RefitBars();
             UpdateTrayText();
         };
 
@@ -58,6 +59,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             config.SetMargins(device, m);
             Log.Write($"margins on {device}: T{m.Top} B{m.Bottom} L{m.Left} R{m.Right}");
+            RefitBars();
         };
 
         hotkeys = new HotkeyWindow(OnHotkey);
@@ -160,6 +162,23 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     // ---- state changes -----------------------------------------------------
+
+    /// <summary>
+    /// Brings the bars back into line with a layout that has just moved under them. A bar scoped to
+    /// a zone is measured from that zone, so dragging a divider moves the bar — and the strip it
+    /// reserves with it, or windows would be left overlapping wherever the bar used to be.
+    ///
+    /// Deliberately narrower than <see cref="ApplyChanges"/>: nothing else about the configuration
+    /// has changed, and that one would take the hooks down and put them back up mid-edit.
+    /// </summary>
+    private void RefitBars()
+    {
+        bars.Reposition();
+
+        // A bar that just moved is now drawn over whatever was already there.
+        reflow.Stop();
+        reflow.Start();
+    }
 
     /// <summary>Re-reconciles everything with the current config. Safe to call repeatedly.</summary>
     private void ApplyChanges()

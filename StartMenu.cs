@@ -178,16 +178,36 @@ public static class StartMenu
         return pid;
     }
 
-    /// <summary>The menu's window, or zero while it is not on screen.</summary>
+    /// <summary>The menu's window while it is on screen, or zero.</summary>
     private static IntPtr Find()
     {
-        var hWnd = Locate();
-        if (hWnd == IntPtr.Zero) return IntPtr.Zero;
+        // The remembered one first: the window outlives each opening, so it is usually still right.
+        if (Shown(located)) return located;
 
-        // The window outlives the menu: closing it cloaks the window rather than destroying it, so
-        // visibility alone would have us chasing a menu that is not there.
-        return IsWindowVisible(hWnd) && !IsCloaked(hWnd) ? hWnd : IntPtr.Zero;
+        var byTitle = FindWindow(HostClass, HostTitle);
+        if (Shown(byTitle) && IsStartWindow(byTitle)) return located = byTitle;
+
+        // The host owns more than one window of that class and only ever shows one of them, so the
+        // search is for a window that is on screen — not merely for one belonging to the host, which
+        // would settle on whichever the shell happened to create first and then never see the menu.
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if (!Shown(h) || !IsStartWindow(h)) return true;
+            found = h;
+            return false;
+        }, IntPtr.Zero);
+
+        if (found != IntPtr.Zero) located = found;
+        return found;
     }
+
+    /// <summary>
+    /// On screen right now. Closing the menu cloaks its window rather than destroying it, so
+    /// visibility on its own would have us chasing a menu that is not there.
+    /// </summary>
+    private static bool Shown(IntPtr hWnd) =>
+        hWnd != IntPtr.Zero && IsWindow(hWnd) && IsWindowVisible(hWnd) && !IsCloaked(hWnd);
 
     /// <summary>The menu's window whether it is on screen or not, cached between openings.</summary>
     private static IntPtr Locate()

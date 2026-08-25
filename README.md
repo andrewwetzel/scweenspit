@@ -176,6 +176,9 @@ one rectangle per display and part of an edge cannot be expressed in it. The zon
 the bar instead, so windows ScweenSpit places keep clear of it; anything maximised by Windows itself
 will not.
 
+Because such a bar is measured from its zone, dragging a divider moves it: the bar re-fits as soon
+as the drag is committed, and the windows around it are reflowed out of wherever it landed.
+
 It registers as a Win32 **appbar**, the same mechanism the shell's own taskbar uses, so Windows
 shrinks the work area and every application on the machine keeps clear of it — not just windows
 ScweenSpit manages. Zones follow automatically, because they are measured from the work area.
