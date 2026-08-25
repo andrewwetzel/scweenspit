@@ -231,10 +231,16 @@ scoped to the shell that draws the menu, not to the desktop, since `EVENT_OBJECT
 whole machine is one of the busiest events there is and none of the rest of it could ever be the
 Start menu. With bars on several displays it opens on the one the pointer is on.
 
-The window is identified by the process that drew it, not by its class or its caption. The menu has
-been rebuilt more than once and those change with it; `StartMenuExperienceHost` has drawn it
-throughout. Among that process's windows the menu is the one on screen and larger than a couple of
-hundred pixels, which is enough to tell it from the helper windows beside it.
+The window is identified by taking the foreground. Naming the window class, the caption, and then
+the process that owns it each turned out to be naming that year's implementation — on Windows 11
+build 26200 the menu is not an ordinary window of `StartMenuExperienceHost` at all. What cannot
+change is that opening the menu moves the focus, so the menu is whatever comes to the front, is
+bigger than a helper window, and belongs to an application under `%WINDIR%\SystemApps`. One hook,
+on foreground changes only — a handful of events a minute, rather than `EVENT_OBJECT_SHOW` firing
+for every tooltip on the machine.
+
+When that misses, Diagnostics reports what was in front instead, since the useful thing to record
+about a guess that missed is what was actually there.
 
 All of this is undocumented, hence the switch: turn it off and the menu opens where Windows put it.
 **Diagnostics** reports what happened last time it opened — whether the window was found, whether

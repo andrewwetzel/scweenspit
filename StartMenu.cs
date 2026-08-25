@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -15,12 +14,13 @@ namespace ScweenSpit;
 /// the menu lands nowhere near the button that asked for it, and the keyboard opens it in that same
 /// wrong place.
 ///
-/// There is no supported way to say where it should go, so the menu is moved after the fact. The
-/// window is identified by the process that drew it rather than by its class or its caption: the
-/// menu has been rebuilt more than once and those change with it, while the shell that hosts it has
-/// been StartMenuExperienceHost throughout. Undocumented either way, so every step is conditional
-/// and failure is silent — worst case the menu opens where Windows put it, which is where it would
-/// have opened anyway.
+/// There is no supported way to say where it should go, so the menu is moved after the fact. It is
+/// found by taking the foreground: whatever draws the menu on whichever build of Windows this is,
+/// opening it moves the focus, and that is the one thing about it that cannot change. Naming the
+/// process, the window class or the caption all turned out to be naming this year's implementation.
+///
+/// Undocumented either way, so every step is conditional and failure is silent — worst case the menu
+/// opens where Windows put it, which is where it would have opened anyway.
 /// </summary>
 public static class StartMenu
 {
@@ -34,10 +34,14 @@ public static class StartMenu
     /// </summary>
     public delegate Anchor? AnchorSource(out string why);
 
-    /// <summary>The shells that have drawn the menu, newest first.</summary>
-    private static readonly string[] Hosts = ["StartMenuExperienceHost", "ShellExperienceHost"];
+    /// <summary>
+    /// The shell's hosted applications live here — StartMenuExperienceHost today, whatever replaces
+    /// it tomorrow. Matching the folder rather than the file survives being replaced.
+    /// </summary>
+    private static readonly string SystemApps = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemApps");
 
-    /// <summary>The host owns small helper windows too. The menu is not one of them.</summary>
+    /// <summary>The shell shows small helper windows too. The menu is not one of them.</summary>
     private const int MinMenu = 200;
 
     // The menu is shown a beat after it is asked for and then animates into place, so one shot at
@@ -49,12 +53,8 @@ public static class StartMenu
     /// moved too early and then left alone.</summary>
     private const int HoldMs = 700;
 
-    private static AnchorSource? anchor;
-    private static Timer? chase;
-
-    private static WinEventDelegate? callback;
-    private static GCHandle pin;
-    private static IntPtr hookShow, hookUncloak;
+    /// <summary>How long after asking a foreground change is still attributable to us.</summary>
+    private const int AskedWindowMs = 2500;
 
     /// <summary>
     /// What happened last time the menu opened, in one line, for the Diagnostics page. This is the
@@ -64,14 +64,14 @@ public static class StartMenu
     /// </summary>
     public static string Status { get; private set; } = "not started";
 
-    private static uint watched;
-    /// <summary>Any window of the watched process, purely to notice when the shell has restarted.</summary>
-    private static IntPtr hostAny;
-    /// <summary>Last window identified as the menu, so a chase is not an enumeration per tick.</summary>
-    private static IntPtr located;
+    private static AnchorSource? anchor;
+    private static Timer? chase;
 
-    /// <summary>What the last search of the host's windows turned up, for <see cref="Status"/>.</summary>
-    private static string scan = "nothing searched yet";
+    private static WinEventDelegate? callback;
+    private static GCHandle pin;
+    private static IntPtr hook;
+
+    private static long askedAt;
 
     /// <summary>
     /// Start following the menu, asking <paramref name="where"/> each time it opens. Null from that
@@ -84,52 +84,35 @@ public static class StartMenu
     }
 
     /// <summary>
-    /// Re-arms the hook if the shell has restarted since it was installed. Cheap enough to call from
-    /// a bar's ordinary refresh: one liveness check, and nothing at all while that holds.
+    /// Puts the hook up if it is not already. Cheap enough to call from a bar's ordinary refresh:
+    /// it does nothing at all once installed.
+    ///
+    /// One hook, on foreground changes only. That is a handful of events a minute — unlike
+    /// EVENT_OBJECT_SHOW, which fires for every tooltip on the machine.
     /// </summary>
     public static void EnsureWatching()
     {
-        if (anchor is null) return;
-        if (watched != 0 && hostAny != IntPtr.Zero && IsWindow(hostAny)) return;
+        if (anchor is null || hook != IntPtr.Zero) return;
 
-        uint pid = HostPid();
-        if (pid == 0)
-        {
-            Status = "no Start menu host process is running";
-            Log.WriteOnce("start-menu-host-missing",
-                $"no Start menu host running ({string.Join(", ", Hosts)}); leaving the menu alone");
-            return;
-        }
-
-        Unhook();
-
-        // Hooked to that one process rather than the whole desktop. EVENT_OBJECT_SHOW is one of the
-        // busiest events there is — every tooltip and menu on the machine — and none of the rest of
-        // it could ever be the Start menu.
-        callback ??= OnShown;
+        callback ??= OnForeground;
         if (!pin.IsAllocated) pin = GCHandle.Alloc(callback);
 
-        hookShow = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
-                                   IntPtr.Zero, callback, pid, 0, WINEVENT_OUTOFCONTEXT);
-        // Closing the menu cloaks its window rather than destroying it, so on every open after the
-        // first there is no SHOW to see — only an uncloak.
-        hookUncloak = SetWinEventHook(EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED,
-                                      IntPtr.Zero, callback, pid, 0, WINEVENT_OUTOFCONTEXT);
+        hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                               IntPtr.Zero, callback, 0, 0,
+                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-        watched = hookShow != IntPtr.Zero || hookUncloak != IntPtr.Zero ? pid : 0;
-        hostAny = watched != 0 ? AnyWindowOf(pid) : IntPtr.Zero;
-        Log.Write($"start menu hooks: pid={pid} show=0x{hookShow:X} uncloak=0x{hookUncloak:X}");
-
-        Status = watched != 0
-            ? $"watching host {pid}; the menu has not opened yet"
-            : $"found host {pid} but Windows refused the hook";
+        Log.Write($"start menu hook: foreground=0x{hook:X}");
+        Status = hook != IntPtr.Zero
+            ? "watching for the menu; it has not opened yet"
+            : "Windows refused the foreground hook";
     }
 
     public static void Unwatch()
     {
         anchor = null;
         Status = "not following the menu";
-        Unhook();
+        if (hook != IntPtr.Zero) UnhookWinEvent(hook);
+        hook = IntPtr.Zero;
         Stop();
     }
 
@@ -141,17 +124,22 @@ public static class StartMenu
         Status = "asked the shell for the menu (Ctrl+Esc)…";
         Log.Write("start menu requested");
 
+        askedAt = Environment.TickCount64;
         PressStartShortcut();
-
-        // The hook covers the keyboard, and would cover this too — but not the very first open after
-        // a cold shell, when there was no process to hook yet. This costs one timer either way.
         Follow();
     }
 
-    private static void OnShown(IntPtr hook, uint ev, IntPtr hWnd, int idObject, int idChild,
-                                uint thread, uint time)
+    private static void OnForeground(IntPtr h, uint ev, IntPtr hWnd, int idObject, int idChild,
+                                     uint thread, uint time)
     {
         if (idObject != OBJID_WINDOW || idChild != 0 || hWnd == IntPtr.Zero) return;
+
+        // Either this is unmistakably the Start menu's own host, or we asked for the menu a moment
+        // ago and this is what came up. Anything else taking the foreground is somebody's window and
+        // none of our business.
+        if (!IsStartHost(hWnd) && Environment.TickCount64 - askedAt > AskedWindowMs) return;
+        if (!IsMenuWindow(hWnd)) return;
+
         Follow();
     }
 
@@ -179,13 +167,7 @@ public static class StartMenu
                 // Never shown, or shown and already dismissed. Either way we are done.
                 if (now - began > GiveUpMs || settled != 0)
                 {
-                    if (settled == 0)
-                    {
-                        Status = $"no menu window found within {GiveUpMs}ms — {scan}";
-                        Log.WriteOnce("start-menu-missing",
-                            $"start menu did not appear within {GiveUpMs}ms of being asked for " +
-                            $"(host pid {watched}); leaving it where Windows put it");
-                    }
+                    if (settled == 0) GaveUp();
                     Done(timer);
                 }
                 return;
@@ -213,6 +195,24 @@ public static class StartMenu
         timer.Start();
     }
 
+    /// <summary>
+    /// Says what was in front instead. Every previous guess at identifying the menu named something
+    /// that turned out to be this year's implementation, so when the guess misses, the useful thing
+    /// to record is what was actually there.
+    /// </summary>
+    private static void GaveUp()
+    {
+        var fg = GetForegroundWindow();
+        var what = fg == IntPtr.Zero
+            ? "nothing had the foreground"
+            : $"the foreground was {ClassNameOf(fg)} " +
+              $"from {Path.GetFileName(ExecutablePath(fg))}" +
+              (GetWindowRect(fg, out var r) ? $" at {r}" : "");
+
+        Status = $"no menu window found within {GiveUpMs}ms — {what}";
+        Log.Write($"start menu not found: {what}");
+    }
+
     private static void Stop()
     {
         if (chase is { } running) Done(running);
@@ -225,78 +225,30 @@ public static class StartMenu
         if (ReferenceEquals(chase, timer)) chase = null;
     }
 
-    /// <summary>The process drawing the menu, whether or not it is on screen just now.</summary>
-    private static uint HostPid()
-    {
-        foreach (var name in Hosts)
-        {
-            var running = Process.GetProcessesByName(name);
-            try { if (running.Length > 0) return (uint)running[0].Id; }
-            catch (InvalidOperationException) { /* exited between the listing and the read */ }
-            finally { foreach (var p in running) p.Dispose(); }
-        }
-        return 0;
-    }
-
     /// <summary>The menu's window while it is on screen, or zero.</summary>
     private static IntPtr Find()
     {
-        uint pid = watched != 0 ? watched : HostPid();
-        if (pid == 0) return IntPtr.Zero;
-
-        // The remembered one first: a chase asks sixty times a second, and the window survives from
-        // one opening to the next.
-        if (Shown(located) && OwnedBy(located, pid)) return located;
-
-        // Counted, not just searched. "No window matched" and "the process has no windows at all"
-        // want different fixes, and from the outside they are the same silence.
-        int owned = 0, onScreen = 0, big = 0;
-
-        IntPtr found = IntPtr.Zero;
-        EnumWindows((h, _) =>
-        {
-            if (!OwnedBy(h, pid)) return true;
-            owned++;
-            if (!Shown(h)) return true;
-            onScreen++;
-
-            // The host owns more than one window and shows only one of them at a time; a stray small
-            // one would otherwise be dragged around the screen in the menu's place.
-            if (!GetWindowRect(h, out var r) || r.Width < MinMenu || r.Height < MinMenu) return true;
-            big++;
-
-            found = h;
-            return false;
-        }, IntPtr.Zero);
-
-        scan = $"host {pid}: {owned} windows, {onScreen} on screen, {big} big enough";
-
-        if (found != IntPtr.Zero)
-        {
-            located = found;
-            Log.WriteOnce("start-menu-window",
-                $"start menu window found: class={ClassNameOf(found)} title='{WindowTitle(found)}'");
-        }
-        return found;
+        // Opening the menu takes the foreground, whatever draws it. That holds for the whole time it
+        // is open, so there is no window to remember between one tick and the next.
+        var fg = GetForegroundWindow();
+        return IsMenuWindow(fg) ? fg : IntPtr.Zero;
     }
 
-    /// <summary>Any top-level window of that process, as a handle on whether it is still alive.</summary>
-    private static IntPtr AnyWindowOf(uint pid)
-    {
-        IntPtr any = IntPtr.Zero;
-        EnumWindows((h, _) =>
-        {
-            if (!OwnedBy(h, pid)) return true;
-            any = h;
-            return false;
-        }, IntPtr.Zero);
-        return any;
-    }
+    /// <summary>Unmistakably the menu's host, rather than merely a shell window.</summary>
+    private static bool IsStartHost(IntPtr hWnd) =>
+        Path.GetFileName(ExecutablePath(hWnd)).StartsWith("StartMenu", StringComparison.OrdinalIgnoreCase);
 
-    private static bool OwnedBy(IntPtr hWnd, uint pid)
+    /// <summary>
+    /// Something the shell is showing, big enough to be the menu. Deliberately not a window class or
+    /// a process name: both have already changed once under this code.
+    /// </summary>
+    private static bool IsMenuWindow(IntPtr hWnd)
     {
-        GetWindowThreadProcessId(hWnd, out uint owner);
-        return owner == pid;
+        if (!Shown(hWnd)) return false;
+        if (!GetWindowRect(hWnd, out var r) || r.Width < MinMenu || r.Height < MinMenu) return false;
+
+        var exe = ExecutablePath(hWnd);
+        return exe.Length > 0 && exe.StartsWith(SystemApps, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -343,8 +295,6 @@ public static class StartMenu
         bool moved = SetWindowPos(menu, IntPtr.Zero, x + (window.Left - painted.Left), y + (window.Top - painted.Top),
             0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-        // Once a session either way. This is undocumented enough to be worth a line in the log, and
-        // repetitive enough that a line per opening would bury everything else in it.
         if (!log) return;
 
         if (moved)
@@ -360,15 +310,6 @@ public static class StartMenu
             Log.WriteOnce("start-menu-refused",
                 $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {err})");
         }
-    }
-
-    private static void Unhook()
-    {
-        if (hookShow != IntPtr.Zero) UnhookWinEvent(hookShow);
-        if (hookUncloak != IntPtr.Zero) UnhookWinEvent(hookUncloak);
-        hookShow = hookUncloak = IntPtr.Zero;
-        watched = 0;
-        hostAny = located = IntPtr.Zero;
     }
 
     /// <summary>Math.Clamp with the low bound winning, for a menu too big for the space it has.</summary>
