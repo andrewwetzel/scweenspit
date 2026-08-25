@@ -310,24 +310,11 @@ public static class StartMenu
             && frame.Width > 0 && frame.Height > 0)
             painted = frame;
 
-        int width = painted.Width, height = painted.Height;
+        var where = BarGeometry.Beside(new Size(painted.Width, painted.Height), at.Button, at.Bar,
+                                       at.Edge, at.Monitor, at.Gap);
+        (int x, int y) = (where.X, where.Y);
 
-        // Along the bar, the menu starts where the button does. Away from it, the menu sits just
-        // clear of the bar, on the side the desktop is.
-        (int x, int y) = at.Edge switch
-        {
-            BarEdge.Bottom => (at.Button.Left, at.Bar.Top - at.Gap - height),
-            BarEdge.Top => (at.Button.Left, at.Bar.Bottom + at.Gap),
-            BarEdge.Left => (at.Bar.Right + at.Gap, at.Button.Top),
-            _ => (at.Bar.Left - at.Gap - width, at.Button.Top),
-        };
-
-        // A menu taller than the space above the bar must still land on this display, not the one
-        // next door and not off the top of the desktop.
-        x = Clamp(x, at.Monitor.Left + at.Gap, at.Monitor.Right - at.Gap - width);
-        y = Clamp(y, at.Monitor.Top + at.Gap, at.Monitor.Bottom - at.Gap - height);
-
-        placed = new Point(x, y);
+        placed = where;
         if (x == painted.Left && y == painted.Top) return false;
 
         if (SetWindowPos(menu, IntPtr.Zero, x + (window.Left - painted.Left), y + (window.Top - painted.Top),
@@ -344,7 +331,4 @@ public static class StartMenu
             $"start menu {painted} would not move to {x},{y}: SetWindowPos refused (err {err})");
         return false;
     }
-
-    /// <summary>Math.Clamp with the low bound winning, for a menu too big for the space it has.</summary>
-    private static int Clamp(int value, int low, int high) => Math.Max(low, Math.Min(value, high));
 }

@@ -123,6 +123,41 @@ public static class Native
     public struct POINT { public int X, Y; }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE { public int Width, Height; }
+
+    // ---- DWM thumbnails ----------------------------------------------------
+    // A live view of another window's content, composited by the desktop manager. The only way to
+    // show what a window looks like without asking it to redraw itself into a bitmap.
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DWM_THUMBNAIL_PROPERTIES
+    {
+        public int dwFlags;
+        public RECT rcDestination;
+        public RECT rcSource;
+        public byte opacity;
+        public bool fVisible;
+        public bool fSourceClientAreaOnly;
+    }
+
+    public const int DWM_TNP_RECTDESTINATION      = 0x00000001;
+    public const int DWM_TNP_VISIBLE              = 0x00000008;
+    public const int DWM_TNP_OPACITY              = 0x00000004;
+    public const int DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmUnregisterThumbnail(IntPtr thumb);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref DWM_THUMBNAIL_PROPERTIES props);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmQueryThumbnailSourceSize(IntPtr thumb, out SIZE size);
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct WINDOWPLACEMENT
     {
         public int length;

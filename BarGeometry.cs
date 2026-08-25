@@ -1,3 +1,4 @@
+using System.Drawing;
 using static ScweenSpit.Native;
 
 namespace ScweenSpit;
@@ -12,6 +13,33 @@ public static class BarGeometry
 {
     /// <summary>Nothing may shrink a bar below this, however cramped the strip it sits in.</summary>
     private const int MinExtent = 8;
+
+    /// <summary>
+    /// Where a panel belonging to a button on a bar goes: lined up with the button along the bar,
+    /// clear of the bar on the side the desktop is, and never off the display it came from.
+    ///
+    /// Shared, because a hover preview and the Start menu are the same problem — and a panel that
+    /// runs off the edge of an ultrawide is the failure both of them have.
+    /// </summary>
+    public static Point Beside(Size panel, Rectangle button, Rectangle bar, BarEdge edge,
+                               RECT monitor, int gap)
+    {
+        (int x, int y) = edge switch
+        {
+            BarEdge.Bottom => (button.Left, bar.Top - gap - panel.Height),
+            BarEdge.Top => (button.Left, bar.Bottom + gap),
+            BarEdge.Left => (bar.Right + gap, button.Top),
+            _ => (bar.Left - gap - panel.Width, button.Top),
+        };
+
+        // A panel too big for the space it has must still land on this display, not the one next
+        // door and not off the top of the desktop. The low bound wins, so it is never pushed to a
+        // negative width's worth of room.
+        return new Point(Fit(x, monitor.Left + gap, monitor.Right - gap - panel.Width),
+                         Fit(y, monitor.Top + gap, monitor.Bottom - gap - panel.Height));
+    }
+
+    private static int Fit(int value, int low, int high) => Math.Max(low, Math.Min(value, high));
 
     /// <summary>
     /// Shrinks a reserved strip down to the bar that floats inside it. The three sides get their

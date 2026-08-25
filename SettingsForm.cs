@@ -621,6 +621,10 @@ public sealed class SettingsForm : Form
                 "No effect on Windows 11 build 26200 and later: the menu's window can be moved, and " +
                 "reports its new position afterwards, but what is drawn stays where the shell put it."));
 
+            var previews = Theme.Toggle("Live previews on hover", settings.ShowPreviews);
+            previews.CheckedChanged += (_, _) => { settings.ShowPreviews = previews.Checked; Save(); };
+            page.Controls.Add(previews);
+
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };
             page.Controls.Add(iconsOnly);

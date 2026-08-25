@@ -121,6 +121,12 @@ public sealed class BarSettings
     /// </summary>
     public bool MoveStartMenu { get; set; }
 
+    /// <summary>
+    /// Live previews when the pointer rests on a button. Grouping puts six windows behind one icon,
+    /// and a list of titles is a poor way to tell six of the same application apart.
+    /// </summary>
+    public bool ShowPreviews { get; set; } = true;
+
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
 

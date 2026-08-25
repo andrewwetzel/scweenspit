@@ -20,6 +20,17 @@ public sealed class TaskbarWindow : Form
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
     private readonly ToolTip tips = new() { InitialDelay = 400, ReshowDelay = 120 };
 
+    private readonly TaskbarPreview preview = new();
+
+    /// <summary>
+    /// Long enough that running the pointer along the bar does not fire eight of them, short enough
+    /// that resting on a button feels like asking.
+    /// </summary>
+    private readonly System.Windows.Forms.Timer hoverDelay = new() { Interval = 350 };
+
+    /// <summary>The button the pending preview is for.</summary>
+    private int pending = -1;
+
     private readonly MonitorGeometry monitor;
     private readonly BarSettings settings;
     private readonly ZoneManager zones;
@@ -111,6 +122,9 @@ public sealed class TaskbarWindow : Form
             Reposition();
             Rebuild();
         };
+        preview.Chosen += window => { WindowList.Raise(window.Handle); Rebuild(); };
+        hoverDelay.Tick += (_, _) => { hoverDelay.Stop(); ShowPreview(pending); };
+
         refresh.Tick += (_, _) =>
         {
             Rebuild();
@@ -472,13 +486,51 @@ public sealed class TaskbarWindow : Form
         Cursor = under >= 0 || tray >= 0 || usage || start ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
-        // like: five pixels of colour cannot say which limit it is, or when it resets.
+        // like: five pixels of colour cannot say which limit it is, or when it resets. A button
+        // showing a preview needs no tooltip — and would otherwise show both at once.
+        bool previewing = Previewable(under);
         tips.SetToolTip(this, start ? "Start"
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
-                            : under >= 0 && under < buttons.Count ? Describe(buttons[under])
+                            : under >= 0 && under < buttons.Count && !previewing ? Describe(buttons[under])
                             : string.Empty);
+
+        TrackPreview(under, previewing);
         Invalidate();
+    }
+
+    /// <summary>Worth a preview: a running application, and previews turned on.</summary>
+    private bool Previewable(int slot) =>
+        settings.ShowPreviews && slot >= 0 && slot < buttons.Count && buttons[slot].Running;
+
+    /// <summary>
+    /// Opens, moves, or closes the preview as the pointer travels along the bar. Moving between two
+    /// buttons swaps it at once — the delay is there to stop a pointer crossing the bar from opening
+    /// one at all, and having served that it would only be in the way.
+    /// </summary>
+    private void TrackPreview(int slot, bool previewable)
+    {
+        if (!previewable)
+        {
+            hoverDelay.Stop();
+            pending = -1;
+            if (preview.Visible) preview.Dismiss();
+            return;
+        }
+
+        if (slot == pending) return;
+        pending = slot;
+
+        if (preview.Visible) ShowPreview(slot);
+        else { hoverDelay.Stop(); hoverDelay.Start(); }
+    }
+
+    private void ShowPreview(int slot)
+    {
+        if (!Previewable(slot)) return;
+
+        preview.Open(buttons[slot].Windows, RectangleToScreen(SlotAt(slot + Leading)), Bounds, Edge,
+                     monitor.Bounds, settings.Floating ? Math.Max(4, settings.FloatMargin) : 4);
     }
 
     private static string Describe(Button b) => b.Windows.Count switch
@@ -508,6 +560,12 @@ public sealed class TaskbarWindow : Form
         hovered = hoveredStatus = -1;
         hoveredStart = false;
         hoveredUsage = false;
+
+        // The preview closes itself once the pointer is over neither it nor the button: leaving the
+        // bar is how you reach it, so a leave here cannot mean it is finished with.
+        hoverDelay.Stop();
+        pending = -1;
+
         Invalidate();
     }
 
@@ -549,6 +607,10 @@ public sealed class TaskbarWindow : Form
         if (under < 0 || under >= buttons.Count) return;
 
         var button = buttons[under];
+
+        // Whatever the click does next, it is not "keep showing me what this window looks like".
+        preview.Dismiss();
+
         if (e.Button == MouseButtons.Right) { ShowButtonMenu(button, Cursor.Position); return; }
         if (e.Button != MouseButtons.Left) return;
 
@@ -593,14 +655,32 @@ public sealed class TaskbarWindow : Form
         catch (Exception ex) { Log.Write($"could not launch {id}: {ex.Message}"); }
     }
 
-    /// <summary>Right-click: pin, unpin, or close — the three things a taskbar button owes you.</summary>
+    /// <summary>
+    /// Right-click: the windows themselves, then pin, then close. Grouping hides the individual
+    /// windows behind one icon, so a grouped button has to give a way back to them — going through
+    /// them one click at a time is fine for two and useless for six.
+    /// </summary>
     private void ShowButtonMenu(Button button, Point at)
     {
-        var menu = new ContextMenuStrip();
+        var menu = Theme.Menu();
         bool pinned = settings.Pinned.Any(p => Same(p, button.Id));
+
+        if (button.Windows.Count > 1)
+        {
+            foreach (var window in button.Windows)
+            {
+                var title = window.Title is { Length: > 0 } t ? t : button.Label;
+                var item = new ToolStripMenuItem(Shorten(title), null, (_, _) => WindowList.Raise(window.Handle));
+                if (window.Minimised) item.ForeColor = Theme.Muted;
+                menu.Items.Add(item);
+            }
+            menu.Items.Add(new ToolStripSeparator());
+        }
 
         if (!string.IsNullOrWhiteSpace(button.Id))
         {
+            menu.Items.Add(new ToolStripMenuItem("New window", null, (_, _) => Launch(button.Id)));
+
             menu.Items.Add(new ToolStripMenuItem(pinned ? "Unpin from bar" : "Pin to bar", null, (_, _) =>
             {
                 if (pinned) settings.Pinned.RemoveAll(p => Same(p, button.Id));
@@ -623,8 +703,12 @@ public sealed class TaskbarWindow : Form
             }));
         }
 
-        if (menu.Items.Count > 0) menu.Show(at);
+        if (menu.Items.Count > 0) menu.Show(at); else menu.Dispose();
     }
+
+    /// <summary>A window title is a sentence often enough that a menu built from them is unusable.</summary>
+    private static string Shorten(string title) =>
+        title.Length <= 60 ? title : title[..57].TrimEnd() + "…";
 
     // ---- painting ----------------------------------------------------------
 
@@ -830,7 +914,9 @@ public sealed class TaskbarWindow : Form
         if (disposing)
         {
             refresh.Dispose();
+            hoverDelay.Dispose();
             tips.Dispose();
+            preview.Dispose();         // unregisters its thumbnails with it
             appBar.Dispose();          // must happen, or the desktop stays short of the strip
             foreach (var icon in icons.Values) icon.Dispose();
             icons.Clear();

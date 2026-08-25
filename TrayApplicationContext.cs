@@ -70,7 +70,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             Icon = Theme.AppIcon(),
             Text = "ScweenSpit",
             Visible = true,
-            ContextMenuStrip = new ContextMenuStrip(),
+            ContextMenuStrip = Theme.Dress(new ContextMenuStrip()),
         };
         tray.ContextMenuStrip.Opening += (_, e) =>
         {

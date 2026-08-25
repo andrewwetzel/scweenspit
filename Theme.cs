@@ -77,6 +77,51 @@ internal static class Theme
     /// settings window: a window with no icon does not look like an application, and this one is
     /// meant to sit in the taskbar and Alt+Tab like any other.
     /// </summary>
+    /// <summary>
+    /// A menu in the same palette as everything else. Windows renders a stock ContextMenuStrip in
+    /// system light grey whatever the surface it opens from, which on a dark bar reads as a bug.
+    /// </summary>
+    public static ContextMenuStrip Menu()
+    {
+        var menu = Dress(new ContextMenuStrip());
+
+        // A menu that outlives its click is a handle held for the life of the process, once per
+        // right-click. Nothing refers to it afterwards — but not from inside Closed, which is still
+        // running through the menu it would be disposing.
+        menu.Closed += (_, _) =>
+        {
+            if (menu.IsHandleCreated) menu.BeginInvoke(menu.Dispose);
+            else menu.Dispose();
+        };
+        return menu;
+    }
+
+    /// <summary>Puts an existing menu into the same palette. For the ones that outlive a click.</summary>
+    public static ContextMenuStrip Dress(ContextMenuStrip menu)
+    {
+        menu.BackColor = Panel;
+        menu.ForeColor = Text;
+        menu.Font = Face();
+        menu.Renderer = new ToolStripProfessionalRenderer(new MenuColours()) { RoundedEdges = false };
+        menu.ShowImageMargin = false;
+        return menu;
+    }
+
+    private sealed class MenuColours : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground => Panel;
+        public override Color MenuItemSelected => Raised;
+        public override Color MenuItemSelectedGradientBegin => Raised;
+        public override Color MenuItemSelectedGradientEnd => Raised;
+        public override Color MenuItemBorder => Raised;
+        public override Color MenuBorder => Divider;
+        public override Color SeparatorDark => Divider;
+        public override Color SeparatorLight => Divider;
+        public override Color ImageMarginGradientBegin => Panel;
+        public override Color ImageMarginGradientMiddle => Panel;
+        public override Color ImageMarginGradientEnd => Panel;
+    }
+
     public static Icon AppIcon()
     {
         if (appIcon is not null) return appIcon;

@@ -281,6 +281,17 @@ thing you switch to, not six. The underline splits into a segment per open windo
 both *running* and *how many*, and clicking walks through them rather than always raising the same
 one. A single window still toggles: raise it, click again to put it away.
 
+Resting on a button shows **live previews** — one tile per window in the group, each a
+desktop-composited view of the real window rather than a screenshot, so it keeps updating while you
+look at it. This is the answer to the question grouping asks: a window title is a poor way to tell
+six Chrome windows apart, and that is exactly the case grouping creates. Click a tile to raise that
+window, middle-click to close it. Minimised windows have nothing to compose, so they show their icon
+instead — a blank rectangle would read as a broken preview.
+
+Right-click a button for the windows themselves, a new window, pin or unpin, and close. The window
+list only appears when there is more than one, since walking a group one click at a time is fine for
+two and useless for six.
+
 It accents the foreground application and fades one whose windows are all minimised. Hovering names the window; clicking brings it forward, or minimises it if it is already in
 front. Turn off *Icons only* for titles as well, and give it more room to put them in.
 
