@@ -186,6 +186,16 @@ it, so a 50px bar is 50px whether it floats or not. The space stays reserved eit
 bar moves in, so nothing creeps underneath it. Docked instead, it rounds the corners facing the desktop and keeps
 the ones against the screen edge square, which is how Windows 11 treats a docked surface.
 
+The gap against the docked edge is set separately, and is smaller by default. It is not symmetric
+with the others: whatever the screen edge already holds — a band Windows still reserves, the bezel,
+the rounded corner of the panel — sits directly beneath it, so an equal gap there looks about twice
+as wide as the one above. **Gap from the screen edge** tunes it; **Gap on the free sides**
+is the other three.
+
+**Start button** puts a Windows logo at the leading end, where the shell's own Start button sits. It
+opens the real Start menu, by the Ctrl+Esc the shell has always answered rather than by poking at a
+taskbar window ScweenSpit may have hidden.
+
 Applications are told apart by the id their windows declare, not by their executable — which is how
 a Chrome PWA gets its own icon rather than disappearing into the browser's, despite both being
 `chrome.exe`. It is the same mechanism the Windows taskbar groups by. Where a window declares no id,

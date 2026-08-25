@@ -232,6 +232,27 @@ public static class Native
     [DllImport("user32.dll")] public static extern IntPtr GetLastActivePopup(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte key, byte scan, uint flags, IntPtr extra);
+
+    private const byte VkControl = 0x11, VkEscape = 0x1B;
+    private const uint KeyUp = 0x0002;
+
+    /// <summary>
+    /// Opens the Windows Start menu, by pressing Ctrl+Esc.
+    ///
+    /// The documented shortcut rather than a message to the shell: SC_TASKLIST goes to the taskbar
+    /// window, which this application may well have hidden, whereas the keystroke is handled however
+    /// the shell is currently arranged.
+    /// </summary>
+    public static void OpenStartMenu()
+    {
+        keybd_event(VkControl, 0, 0, IntPtr.Zero);
+        keybd_event(VkEscape, 0, 0, IntPtr.Zero);
+        keybd_event(VkEscape, 0, KeyUp, IntPtr.Zero);
+        keybd_event(VkControl, 0, KeyUp, IntPtr.Zero);
+    }
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool join);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);

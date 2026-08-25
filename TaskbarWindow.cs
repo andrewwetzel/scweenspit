@@ -53,6 +53,7 @@ public sealed class TaskbarWindow : Form
     private readonly Dictionary<string, int> cycle = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
     private int hovered = -1, hoveredStatus = -1;
+    private bool hoveredStart;
     private bool hoveredUsage;
     private long lastStatusPoll;
 
@@ -110,12 +111,13 @@ public sealed class TaskbarWindow : Form
     public void Reposition()
     {
         int inset = settings.Floating ? settings.FloatMargin : 0;
+        int edgeGap = settings.Floating ? settings.EdgeGap : 0;
 
         if (zones.BarStrip(monitor, settings) is { } strip)
         {
             // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
             // part of an edge cannot be expressed that way. The zone is shortened for it instead.
-            var placed = AppBar.Deflate(strip, inset);
+            var placed = BarGeometry.Deflate(strip, inset, Edge, edgeGap);
             SetWindowPos(Handle, HWND_TOPMOST, placed.Left, placed.Top, placed.Width, placed.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
             Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {placed}");
@@ -123,7 +125,7 @@ public sealed class TaskbarWindow : Form
         }
 
         // Reserve the bar plus its gap; the window is then inset back to the thickness asked for.
-        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + 2 * inset, inset);
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + inset + edgeGap, inset, edgeGap);
     }
 
     protected override CreateParams CreateParams
@@ -397,12 +399,17 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, index * Slot, Width, Slot)
         : new Rectangle(index * Slot, 0, Slot, Height);
 
-    private int Capacity => Math.Max(0, StatusStart / Math.Max(1, Slot));
+    /// <summary>Slots taken before the window buttons begin.</summary>
+    private int Leading => settings.ShowStartButton ? 1 : 0;
+
+    private Rectangle StartSlot => SlotAt(0);
+
+    private int Capacity => Math.Max(0, StatusStart / Math.Max(1, Slot) - Leading);
 
     private int SlotUnder(Point p)
     {
         for (int i = 0; i < Math.Min(buttons.Count, Capacity); i++)
-            if (SlotAt(i).Contains(p)) return i;
+            if (SlotAt(i + Leading).Contains(p)) return i;
         return -1;
     }
 
@@ -422,16 +429,19 @@ public sealed class TaskbarWindow : Form
 
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
-        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage) return;
+        bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
+        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage && start == hoveredStart) return;
 
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
-        Cursor = under >= 0 || tray >= 0 || usage ? Cursors.Hand : Cursors.Default;
+        hoveredStart = start;
+        Cursor = under >= 0 || tray >= 0 || usage || start ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
         // like: five pixels of colour cannot say which limit it is, or when it resets.
-        tips.SetToolTip(this, usage ? UsageStrip.Tip(ClaudeUsage.Current)
+        tips.SetToolTip(this, start ? "Start"
+                            : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
                             : under >= 0 && under < buttons.Count ? Describe(buttons[under])
                             : string.Empty);
@@ -463,6 +473,7 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseLeave(e);
         hovered = hoveredStatus = -1;
+        hoveredStart = false;
         hoveredUsage = false;
         Invalidate();
     }
@@ -477,6 +488,12 @@ public sealed class TaskbarWindow : Form
             // cannot tell you anything until a key is in place.
             if (ClaudeUsage.Enabled) SystemStatus.Open(ClaudeUsage.UsagePage);
             else MenuRequested?.Invoke(Cursor.Position);
+            return;
+        }
+
+        if (settings.ShowStartButton && StartSlot.Contains(e.Location))
+        {
+            OpenStartMenu();
             return;
         }
 
@@ -594,10 +611,12 @@ public sealed class TaskbarWindow : Form
         using var text = new SolidBrush(Theme.Text);
         using var dim = new SolidBrush(Theme.Muted);
 
+        if (settings.ShowStartButton) PaintStart(g, hot);
+
         int shown = Math.Min(buttons.Count, Capacity);
         for (int i = 0; i < shown; i++)
         {
-            var slot = SlotAt(i);
+            var slot = SlotAt(i + Leading);
             var button = buttons[i];
             var w = button.First;
 
@@ -685,6 +704,25 @@ public sealed class TaskbarWindow : Form
         attributes.SetColorMatrix(matrix);
 
         g.DrawImage(icon, box, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, attributes);
+    }
+
+    /// <summary>The Windows logo: four panes, the way it has looked since Windows 11.</summary>
+    private void PaintStart(Graphics g, Brush hot)
+    {
+        var slot = StartSlot;
+        if (hoveredStart) g.FillRectangle(hot, slot);
+
+        int size = Math.Clamp(Math.Min(slot.Width, slot.Height) / 2, 14, 26);
+        int pane = (size - 3) / 2;
+
+        int x = slot.X + (slot.Width - size) / 2;
+        int y = slot.Y + (slot.Height - size) / 2;
+
+        using var brush = new SolidBrush(hoveredStart ? Theme.Text : Theme.Muted);
+        g.FillRectangle(brush, x, y, pane, pane);
+        g.FillRectangle(brush, x + pane + 3, y, pane, pane);
+        g.FillRectangle(brush, x, y + pane + 3, pane, pane);
+        g.FillRectangle(brush, x + pane + 3, y + pane + 3, pane, pane);
     }
 
     private void PaintTray(Graphics g)

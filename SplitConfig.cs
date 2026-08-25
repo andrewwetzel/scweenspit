@@ -88,10 +88,20 @@ public sealed class BarSettings
     public int FloatMargin { get; set; } = 6;
 
     /// <summary>
+    /// The gap on the docked side only. Kept apart from <see cref="FloatMargin"/> because that side
+    /// is not symmetric with the others: whatever Windows already reserves at the screen edge sits
+    /// underneath, so an equal gap there reads as roughly twice the one above.
+    /// </summary>
+    public int EdgeGap { get; set; } = 2;
+
+    /// <summary>
     /// Applications kept on the bar whether or not they are running, in the order they appear.
     /// Stored as full executable paths.
     /// </summary>
     public List<string> Pinned { get; set; } = new();
+
+    /// <summary>A Start button at the leading end, opening the Windows Start menu.</summary>
+    public bool ShowStartButton { get; set; } = true;
 
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
@@ -416,6 +426,7 @@ public sealed class SplitConfig
             // The gap is added to the thickness rather than taken out of it, so it only needs a
             // sane upper bound of its own.
             bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, 40);
+            bar.EdgeGap = Math.Clamp(bar.EdgeGap, 0, 40);
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
 

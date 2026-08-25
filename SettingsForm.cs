@@ -571,9 +571,13 @@ public sealed class SettingsForm : Form
 
             if (settings.Floating)
             {
-                var gap = Theme.Number(settings.FloatMargin, 0, 60, 2);
+                var gap = Theme.Number(settings.FloatMargin, 0, 40, 2);
                 gap.ValueChanged += (_, _) => { settings.FloatMargin = (int)gap.Value; Save(); };
-                Row(page, "Gap from the edges (pixels)", gap);
+                Row(page, "Gap on the free sides (pixels)", gap);
+
+                var edgeGap = Theme.Number(settings.EdgeGap, 0, 40, 1);
+                edgeGap.ValueChanged += (_, _) => { settings.EdgeGap = (int)edgeGap.Value; Save(); };
+                Row(page, "Gap from the screen edge (pixels)", edgeGap);
             }
 
             var barSettings = settings;
@@ -601,6 +605,10 @@ public sealed class SettingsForm : Form
                 pinButtons.Controls.Add(clear);
             }
             page.Controls.Add(pinButtons);
+
+            var start = Theme.Toggle("Start button at the leading end", settings.ShowStartButton);
+            start.CheckedChanged += (_, _) => { settings.ShowStartButton = start.Checked; Save(); };
+            page.Controls.Add(start);
 
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };

@@ -4,8 +4,6 @@ using static ScweenSpit.Native;
 
 namespace ScweenSpit;
 
-public enum BarEdge { Left = 0, Top = 1, Right = 2, Bottom = 3 }
-
 /// <summary>
 /// Registers a window as a Win32 application desktop toolbar, so Windows shrinks the work area to
 /// make room for it and every other app keeps clear — the same mechanism the shell's own taskbar
@@ -47,7 +45,7 @@ public sealed class AppBar : IDisposable
     /// out of the way of other appbars, so the answer to ABM_QUERYPOS is authoritative, not our
     /// request — and the window has to be placed where the answer says.
     /// </summary>
-    public void Reserve(RECT monitor, BarEdge edge, int thickness, int inset = 0)
+    public void Reserve(RECT monitor, BarEdge edge, int thickness, int inset = 0, int edgeGap = 0)
     {
         if (!registered) return;
 
@@ -65,7 +63,7 @@ public sealed class AppBar : IDisposable
 
         // Windows keeps the whole strip reserved; only the visible bar moves inside it, which is
         // what makes a floating bar float without applications creeping under it.
-        var r = Deflate(data.rc, inset);
+        var r = BarGeometry.Deflate(data.rc, inset, edge, edgeGap);
         SetWindowPos(owner.Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
@@ -93,15 +91,6 @@ public sealed class AppBar : IDisposable
             default:             r.Top = r.Bottom - Thickness; break;
         }
         return r;
-    }
-
-    /// <summary>Shrinks a rectangle on all sides, refusing to collapse it.</summary>
-    public static RECT Deflate(RECT r, int by)
-    {
-        if (by <= 0) return r;
-        if (r.Width <= 2 * by + 8 || r.Height <= 2 * by + 8) return r;
-
-        return new RECT { Left = r.Left + by, Top = r.Top + by, Right = r.Right - by, Bottom = r.Bottom - by };
     }
 
     /// <summary>Call from the owning window's WndProc. Returns true when the message was ours.</summary>
