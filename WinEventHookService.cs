@@ -68,6 +68,10 @@ public sealed class WinEventHookService : IDisposable
     // Windows we raised above the taskbar for a cover-taskbar zone; restored when they leave one.
     private readonly ConcurrentDictionary<IntPtr, byte> madeTopmost = new();
 
+    // Windows currently placed in a zone that covers the taskbar. Kept apart from madeTopmost
+    // because being in such a zone and being raised above everything are no longer the same thing.
+    private readonly ConcurrentDictionary<IntPtr, byte> coversTaskbar = new();
+
     // Windows the user personally dragged across a display boundary. Their choice stands.
     private readonly ConcurrentDictionary<IntPtr, byte> allowedToSpan = new();
 
@@ -133,6 +137,7 @@ public sealed class WinEventHookService : IDisposable
         if (pin.IsAllocated) pin.Free();
         callback = null;
         RestoreTopmost();
+        coversTaskbar.Clear();
         recent.Clear();
         lastNormal.Clear();
         owners.Clear();
@@ -527,7 +532,8 @@ public sealed class WinEventHookService : IDisposable
 
         // Z-order is decided even when the rectangle is already right: a window can be in the
         // correct place and still be sitting underneath the taskbar.
-        ApplyTopmost(hWnd, zone.CoverTaskbar);
+        if (zone.CoverTaskbar) coversTaskbar[hWnd] = 0; else coversTaskbar.TryRemove(hWnd, out _);
+        RefreshTopmost();
 
         if (!ZoneManager.ClampToZone(hWnd, zone.Rect)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
         clamps++;
@@ -618,6 +624,40 @@ public sealed class WinEventHookService : IDisposable
         else madeTopmost.TryRemove(hWnd, out _);
     }
 
+    /// <summary>
+    /// Keeps a taskbar-covering window above everything only while it is the one being used.
+    ///
+    /// Leaving it there permanently is what the flag used to do, and it makes every other window
+    /// unreachable: nothing ordinary can be raised past an always-on-top window, so clicking a
+    /// taskbar button appeared to do nothing at all. Covering the taskbar is only wanted while the
+    /// window is in front, which is the same moment the taskbar would otherwise be in the way.
+    ///
+    /// With the shell taskbar hidden there is nothing to cover, so nothing is raised at all.
+    /// </summary>
+    public void RefreshTopmost()
+    {
+        if (coversTaskbar.IsEmpty && madeTopmost.IsEmpty) return;
+
+        var foreground = GetForegroundWindow();
+        bool anythingToCover = !zones.Config.HideWindowsTaskbar;
+
+        foreach (var hWnd in coversTaskbar.Keys)
+        {
+            if (!IsWindow(hWnd))
+            {
+                coversTaskbar.TryRemove(hWnd, out _);
+                madeTopmost.TryRemove(hWnd, out _);
+                continue;
+            }
+
+            ApplyTopmost(hWnd, anythingToCover && hWnd == foreground);
+        }
+
+        // Anything we raised that is no longer in such a zone goes back regardless.
+        foreach (var hWnd in madeTopmost.Keys)
+            if (!coversTaskbar.ContainsKey(hWnd)) ApplyTopmost(hWnd, false);
+    }
+
     /// <summary>Drops every window we raised back to normal z-order.</summary>
     private void RestoreTopmost()
     {
@@ -650,6 +690,8 @@ public sealed class WinEventHookService : IDisposable
                 if (!IsWindow(key)) allowedToSpan.TryRemove(key, out _);
             foreach (var key in madeTopmost.Keys)
                 if (!IsWindow(key)) madeTopmost.TryRemove(key, out _);
+            foreach (var key in coversTaskbar.Keys)
+                if (!IsWindow(key)) coversTaskbar.TryRemove(key, out _);
         }
 
         // WINEVENT_SKIPOWNPROCESS does not help here: we move *other* processes' windows,

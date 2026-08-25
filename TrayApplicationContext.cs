@@ -38,6 +38,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly SplitConfig config;
     private SettingsForm? settings;
     private UpdateInfo? pendingUpdate;
+    private readonly Action raised;
 
     public TrayApplicationContext()
     {
@@ -81,13 +82,25 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         bars.PinsChanged += () => config.Save();
 
+        // A window we just brought forward may be one that covers the taskbar, or may be blocked by
+        // one that does; either way the answer changes the moment the foreground does.
+        raised = () => hook.RefreshTopmost();
+        WindowList.Raised += raised;
+
         bars.MenuRequested += at =>
         {
             BuildMenu();
             tray.ContextMenuStrip!.Show(at);
         };
 
-        foregroundWatch.Tick += (_, _) => TrackForeground();
+        foregroundWatch.Tick += (_, _) =>
+        {
+            TrackForeground();
+
+            // A taskbar-covering window is only held above everything while it is in front, so this
+            // has to follow the foreground rather than being decided once when it was placed.
+            hook.RefreshTopmost();
+        };
         foregroundWatch.Start();
 
         // Re-assert only the hide. Re-applying auto-hide here would make Explorer re-lay-out every
@@ -493,6 +506,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             overlay.Dispose();
             settings?.Dispose();
 
+            WindowList.Raised -= raised;
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             displaySettle.Dispose();
             marshaller.Dispose();

@@ -227,6 +227,12 @@ public static class WindowList
     /// long as it takes to make it. The attachment is always undone: leaving two input queues joined
     /// makes both applications feel wrong.
     /// </summary>
+    /// <summary>
+    /// Raised just after a window is brought forward, so anything holding a z-order policy can
+    /// follow the change immediately rather than waiting to notice it.
+    /// </summary>
+    public static event Action? Raised;
+
     public static void Raise(IntPtr hWnd)
     {
         if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
@@ -251,5 +257,12 @@ public static class WindowList
             if (joinedOwner) AttachThreadInput(owner, self, false);
             if (joinedHolder) AttachThreadInput(holder, self, false);
         }
+
+        Raised?.Invoke();
+
+        // If it still is not in front, something is holding the position - most likely a window
+        // marked always-on-top, which nothing ordinary can be raised past.
+        if (GetForegroundWindow() != hWnd)
+            Log.WriteOnce($"raise:{hWnd}", $"0x{hWnd:X} ({ClassNameOf(hWnd)}) would not come forward");
     }
 }

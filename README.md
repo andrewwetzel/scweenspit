@@ -88,8 +88,16 @@ Only the outer edges grow. A zone already touching the left, top and bottom of t
 to the display on those three sides, while the divider it shares with its neighbour stays exactly
 where it was — so the two zones still meet, even with the taskbar on the left or top.
 
-Windows raised this way are put back to normal z-order when they leave such a zone, and when
-ScweenSpit exits.
+A window in such a zone is held above everything **only while it is the one in front**. That
+distinction matters more than it sounds: leaving it always-on-top permanently makes every other
+window unreachable, because nothing ordinary can be raised past an always-on-top window — clicking
+another application's taskbar button appears to do nothing at all. Covering the taskbar is only
+wanted while the window is in use, which is the same moment the taskbar would otherwise be in the
+way.
+
+With the Windows taskbar hidden there is nothing to cover, so nothing is raised above anything.
+Windows raised this way are put back to normal z-order when they lose focus, when they leave such a
+zone, and when ScweenSpit exits.
 
 ### Keeping windows on one display
 
