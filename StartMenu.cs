@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -10,32 +11,35 @@ namespace ScweenSpit;
 /// Puts the Windows Start menu where the Start button is.
 ///
 /// Windows opens it wherever it believes the taskbar to be, which is the primary display's bottom
-/// edge whether or not the shell's bar is still shown there. With a bar of our own on some other
-/// edge — or some other screen — the menu lands nowhere near the button that asked for it, and the
-/// keyboard opens it in that same wrong place.
+/// edge whether or not the shell's bar is still shown there. With a bar of our own somewhere else,
+/// the menu lands nowhere near the button that asked for it, and the keyboard opens it in that same
+/// wrong place.
 ///
-/// There is no supported way to say where it should go, so the menu is moved after the fact: its
-/// window belongs to StartMenuExperienceHost and is an ordinary top-level window, whatever is drawn
-/// inside it. Undocumented, so every step is conditional and failure is silent — worst case the
-/// menu opens where Windows put it, which is where it would have opened anyway.
+/// There is no supported way to say where it should go, so the menu is moved after the fact. The
+/// window is identified by the process that drew it rather than by its class or its caption: the
+/// menu has been rebuilt more than once and those change with it, while the shell that hosts it has
+/// been StartMenuExperienceHost throughout. Undocumented either way, so every step is conditional
+/// and failure is silent — worst case the menu opens where Windows put it, which is where it would
+/// have opened anyway.
 /// </summary>
 public static class StartMenu
 {
     /// <summary>Where the menu should go: the button, the bar it is on, and the room around them.</summary>
     public readonly record struct Anchor(Rectangle Button, Rectangle Bar, BarEdge Edge, RECT Monitor, int Gap);
 
-    private const string HostClass = "Windows.UI.Core.CoreWindow";
-    private const string HostTitle = "Start";
+    /// <summary>The shells that have drawn the menu, newest first.</summary>
+    private static readonly string[] Hosts = ["StartMenuExperienceHost", "ShellExperienceHost"];
 
-    /// <summary>The two shells that have hosted the menu. Anything else by that name is not it.</summary>
-    private static readonly string[] Hosts = ["StartMenuExperienceHost.exe", "ShellExperienceHost.exe"];
+    /// <summary>The host owns small helper windows too. The menu is not one of them.</summary>
+    private const int MinMenu = 200;
 
     // The menu is shown a beat after it is asked for and then animates into place, so one shot at
     // moving it is not enough; it is nudged until it stays put.
     private const int PollMs = 16;
     private const int GiveUpMs = 2500;
-    // Long enough to outlast the opening animation, which slides the menu back if it is moved too
-    // early and then left alone.
+
+    /// <summary>Long enough to outlast the opening animation, which slides the menu back if it is
+    /// moved too early and then left alone.</summary>
     private const int HoldMs = 700;
 
     private static Func<Anchor?>? anchor;
@@ -44,10 +48,11 @@ public static class StartMenu
     private static WinEventDelegate? callback;
     private static GCHandle pin;
     private static IntPtr hookShow, hookUncloak;
-    private static uint watched;
 
-    /// <summary>Last window we identified as the menu. It outlives each opening, so it is worth
-    /// keeping: finding it again means a walk of every top-level window on the desktop.</summary>
+    private static uint watched;
+    /// <summary>Any window of the watched process, purely to notice when the shell has restarted.</summary>
+    private static IntPtr hostAny;
+    /// <summary>Last window identified as the menu, so a chase is not an enumeration per tick.</summary>
     private static IntPtr located;
 
     /// <summary>
@@ -62,14 +67,20 @@ public static class StartMenu
 
     /// <summary>
     /// Re-arms the hook if the shell has restarted since it was installed. Cheap enough to call from
-    /// a bar's ordinary refresh: one window lookup, and nothing at all once the process id matches.
+    /// a bar's ordinary refresh: one liveness check, and nothing at all while that holds.
     /// </summary>
     public static void EnsureWatching()
     {
         if (anchor is null) return;
+        if (watched != 0 && hostAny != IntPtr.Zero && IsWindow(hostAny)) return;
 
         uint pid = HostPid();
-        if (pid == 0 || pid == watched) return;
+        if (pid == 0)
+        {
+            Log.WriteOnce("start-menu-host-missing",
+                $"no Start menu host running ({string.Join(", ", Hosts)}); leaving the menu alone");
+            return;
+        }
 
         Unhook();
 
@@ -87,6 +98,7 @@ public static class StartMenu
                                       IntPtr.Zero, callback, pid, 0, WINEVENT_OUTOFCONTEXT);
 
         watched = hookShow != IntPtr.Zero || hookUncloak != IntPtr.Zero ? pid : 0;
+        hostAny = watched != 0 ? AnyWindowOf(pid) : IntPtr.Zero;
         Log.Write($"start menu hooks: pid={pid} show=0x{hookShow:X} uncloak=0x{hookUncloak:X}");
     }
 
@@ -111,7 +123,6 @@ public static class StartMenu
                                 uint thread, uint time)
     {
         if (idObject != OBJID_WINDOW || idChild != 0 || hWnd == IntPtr.Zero) return;
-        if (!IsStartWindow(hWnd)) return;
         Follow();
     }
 
@@ -119,7 +130,7 @@ public static class StartMenu
     private static void Follow()
     {
         // Nothing wants it moved — no bar, or none with the button. Leave it where Windows put it
-        // rather than running a timer to discover that thirty times over.
+        // rather than running a timer to discover that forty times over.
         if (anchor?.Invoke() is null) return;
 
         Stop();
@@ -139,7 +150,8 @@ public static class StartMenu
                 if (now - began > GiveUpMs || settled != 0)
                 {
                     if (settled == 0) Log.WriteOnce("start-menu-missing",
-                        "start menu did not appear within the time allowed; leaving it where Windows put it");
+                        $"start menu did not appear within {GiveUpMs}ms of being asked for " +
+                        $"(host pid {watched}); leaving it where Windows put it");
                     Done(timer);
                 }
                 return;
@@ -171,35 +183,65 @@ public static class StartMenu
     /// <summary>The process drawing the menu, whether or not it is on screen just now.</summary>
     private static uint HostPid()
     {
-        var hWnd = Locate();
-        if (hWnd == IntPtr.Zero) return 0;
-
-        GetWindowThreadProcessId(hWnd, out uint pid);
-        return pid;
+        foreach (var name in Hosts)
+        {
+            var running = Process.GetProcessesByName(name);
+            try { if (running.Length > 0) return (uint)running[0].Id; }
+            catch (InvalidOperationException) { /* exited between the listing and the read */ }
+            finally { foreach (var p in running) p.Dispose(); }
+        }
+        return 0;
     }
 
     /// <summary>The menu's window while it is on screen, or zero.</summary>
     private static IntPtr Find()
     {
-        // The remembered one first: the window outlives each opening, so it is usually still right.
-        if (Shown(located)) return located;
+        uint pid = watched != 0 ? watched : HostPid();
+        if (pid == 0) return IntPtr.Zero;
 
-        var byTitle = FindWindow(HostClass, HostTitle);
-        if (Shown(byTitle) && IsStartWindow(byTitle)) return located = byTitle;
+        // The remembered one first: a chase asks sixty times a second, and the window survives from
+        // one opening to the next.
+        if (Shown(located) && OwnedBy(located, pid)) return located;
 
-        // The host owns more than one window of that class and only ever shows one of them, so the
-        // search is for a window that is on screen — not merely for one belonging to the host, which
-        // would settle on whichever the shell happened to create first and then never see the menu.
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, _) =>
         {
-            if (!Shown(h) || !IsStartWindow(h)) return true;
+            if (!OwnedBy(h, pid) || !Shown(h)) return true;
+
+            // The host owns more than one window and shows only one of them at a time; a stray small
+            // one would otherwise be dragged around the screen in the menu's place.
+            if (!GetWindowRect(h, out var r) || r.Width < MinMenu || r.Height < MinMenu) return true;
+
             found = h;
             return false;
         }, IntPtr.Zero);
 
-        if (found != IntPtr.Zero) located = found;
+        if (found != IntPtr.Zero)
+        {
+            located = found;
+            Log.WriteOnce("start-menu-window",
+                $"start menu window found: class={ClassNameOf(found)} title='{WindowTitle(found)}'");
+        }
         return found;
+    }
+
+    /// <summary>Any top-level window of that process, as a handle on whether it is still alive.</summary>
+    private static IntPtr AnyWindowOf(uint pid)
+    {
+        IntPtr any = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if (!OwnedBy(h, pid)) return true;
+            any = h;
+            return false;
+        }, IntPtr.Zero);
+        return any;
+    }
+
+    private static bool OwnedBy(IntPtr hWnd, uint pid)
+    {
+        GetWindowThreadProcessId(hWnd, out uint owner);
+        return owner == pid;
     }
 
     /// <summary>
@@ -208,44 +250,6 @@ public static class StartMenu
     /// </summary>
     private static bool Shown(IntPtr hWnd) =>
         hWnd != IntPtr.Zero && IsWindow(hWnd) && IsWindowVisible(hWnd) && !IsCloaked(hWnd);
-
-    /// <summary>The menu's window whether it is on screen or not, cached between openings.</summary>
-    private static IntPtr Locate()
-    {
-        if (located != IntPtr.Zero && IsWindow(located) && IsCoreWindow(located)) return located;
-
-        var byTitle = FindWindow(HostClass, HostTitle);
-        if (byTitle != IntPtr.Zero && IsStartWindow(byTitle)) return located = byTitle;
-
-        // The caption is how the window is found on every build we have seen, but it is not ours to
-        // rely on. Failing that, ask the shells that host it which window is theirs.
-        located = IntPtr.Zero;
-        EnumWindows((h, _) =>
-        {
-            if (!IsStartWindow(h)) return true;
-            located = h;
-            return false;
-        }, IntPtr.Zero);
-
-        return located;
-    }
-
-    private static bool IsCoreWindow(IntPtr hWnd) =>
-        string.Equals(ClassNameOf(hWnd), HostClass, StringComparison.Ordinal);
-
-    /// <summary>
-    /// A window of that class from anything else is not the Start menu, so the deciding evidence is
-    /// which process drew it. Where that cannot be read, the caption is all there is to go on.
-    /// </summary>
-    private static bool IsStartWindow(IntPtr hWnd)
-    {
-        if (!IsCoreWindow(hWnd)) return false;
-
-        var exe = ExecutablePath(hWnd);
-        return exe.Length > 0
-            ? Hosts.Any(h => exe.EndsWith(h, StringComparison.OrdinalIgnoreCase))
-            : string.Equals(WindowTitle(hWnd), HostTitle, StringComparison.Ordinal);
-    }
 
     private static void Place(IntPtr menu, Anchor at, bool log)
     {
@@ -294,7 +298,7 @@ public static class StartMenu
         if (hookUncloak != IntPtr.Zero) UnhookWinEvent(hookUncloak);
         hookShow = hookUncloak = IntPtr.Zero;
         watched = 0;
-        located = IntPtr.Zero;
+        hostAny = located = IntPtr.Zero;
     }
 
     /// <summary>Math.Clamp with the low bound winning, for a menu too big for the space it has.</summary>

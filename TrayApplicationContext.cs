@@ -121,6 +121,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (config.AutoClamp || config.DragToZone) hook.Start();
         RegisterHotkeys();
         UpdateTrayText();
+        Startup.Refresh();
         LogStartup();
         CheckForUpdatesQuietly();
     }

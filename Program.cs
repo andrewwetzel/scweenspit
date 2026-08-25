@@ -4,6 +4,57 @@ namespace ScweenSpit;
 
 internal static class Program
 {
+    /// <summary>Which copy of ScweenSpit is already running, as something a person can act on.</summary>
+    private static string Running()
+    {
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("ScweenSpit"))
+                using (p)
+                {
+                    if (p.Id == Environment.ProcessId) continue;
+
+                    var path = Native.ExecutablePath(p.MainWindowHandle) is { Length: > 0 } byWindow
+                        ? byWindow
+                        : p.MainModule?.FileName ?? "";
+                    var version = path.Length > 0
+                        ? System.Diagnostics.FileVersionInfo.GetVersionInfo(path).FileVersion
+                        : null;
+
+                    return version is { Length: > 0 }
+                        ? $"version {version}\n{path}"
+                        : path.Length > 0 ? path : $"process {p.Id}";
+                }
+        }
+        catch (Exception ex) { Log.Write($"could not identify the running instance: {ex.Message}"); }
+
+        return "another process";
+    }
+
+    /// <summary>
+    /// A message box that comes to the front. Ours may be the only window without a taskbar button —
+    /// this runs before there is a tray icon — so one opening behind whatever is maximised is one
+    /// nobody sees.
+    /// </summary>
+    private static void Tell(string message)
+    {
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            using var owner = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new System.Drawing.Point(-32000, -32000),
+                Size = new System.Drawing.Size(1, 1),
+                ShowInTaskbar = false,
+                TopMost = true,
+            };
+            owner.Show();
+            MessageBox.Show(owner, message, "ScweenSpit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex) { Log.Write($"could not show the already-running notice: {ex.Message}"); }
+    }
+
     [STAThread]
     private static void Main()
     {
@@ -17,7 +68,14 @@ internal static class Program
         using var single = new Mutex(true, @"Local\ScweenSpit.SingleInstance", out bool first);
         if (!first)
         {
-            Log.Write("another instance already holds the mutex - exiting");
+            var other = Running();
+            Log.Write($"another instance already holds the mutex - exiting (running: {other})");
+
+            // Saying nothing is the wrong answer here. The copy holding the mutex is often an older
+            // one started at login from wherever it was first downloaded, and a newly downloaded exe
+            // that exits without a word looks exactly like an exe that does not work.
+            Tell($"ScweenSpit is already running:\n\n{other}\n\n" +
+                 "Exit that copy from its tray icon, then start this one again.");
             return;
         }
 

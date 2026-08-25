@@ -121,6 +121,18 @@ stays a clean split — no gaps, no overlaps — and nothing can be squeezed bel
 
 Presets are still there (70/30, thirds, quadrants and so on) if you'd rather not fiddle.
 
+### Running one copy
+
+A second copy exits rather than fighting the first over the same reservations — but it says so now,
+naming the executable and version that holds the machine. Silence was the wrong answer: the copy
+already running is often an older one started at login, and a newly downloaded exe that exits
+without a word looks exactly like an exe that does not work.
+
+**Start with Windows** writes the path of the copy that turned it on. Download the next version
+somewhere else and every login goes on starting the old one, which then holds the machine against
+the new — while the switch reads as off, because the path no longer matches, so nothing looks wrong
+until you go looking. The registration is now re-pointed at startup to whichever copy is running.
+
 ### Reserving space at the screen edges
 
 Zones are laid out inside the Windows **work area**, so the taskbar is already excluded. When that
@@ -218,6 +230,11 @@ asked for rather than only when the button is clicked. That means watching one p
 scoped to the shell that draws the menu, not to the desktop, since `EVENT_OBJECT_SHOW` across the
 whole machine is one of the busiest events there is and none of the rest of it could ever be the
 Start menu. With bars on several displays it opens on the one the pointer is on.
+
+The window is identified by the process that drew it, not by its class or its caption. The menu has
+been rebuilt more than once and those change with it; `StartMenuExperienceHost` has drawn it
+throughout. Among that process's windows the menu is the one on screen and larger than a couple of
+hundred pixels, which is enough to tell it from the helper windows beside it.
 
 All of this is undocumented, hence the switch: turn it off and the menu opens where Windows put it.
 The log says whether the menu was found and whether the move was allowed.

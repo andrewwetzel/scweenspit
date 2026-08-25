@@ -37,6 +37,32 @@ internal static class Startup
         }
     }
 
+    /// <summary>
+    /// Keeps an existing registration pointing at the copy that is actually running.
+    ///
+    /// The path is written once, when the switch is turned on, and the file it names is wherever it
+    /// was downloaded to that day. Download the next version somewhere else — or to the same folder
+    /// under a version-stamped name — and every login goes on starting the old one, which then holds
+    /// the single-instance mutex against the new. The switch reads as off in the meantime, because
+    /// the path no longer matches, so nothing about it looks wrong until you go looking.
+    /// </summary>
+    public static void Refresh()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(Key, writable: true);
+            if (k?.GetValue(Name) is not string existing) return;   // never turned on: leave it off
+
+            var current = ExePath;
+            if (current.Length == 0) return;
+            if (existing.Trim('"').Equals(current, StringComparison.OrdinalIgnoreCase)) return;
+
+            k.SetValue(Name, $"\"{current}\"");
+            Log.Write($"start with windows re-pointed: {existing} -> {current}");
+        }
+        catch (Exception ex) { Log.Write($"startup refresh failed: {ex.Message}"); }
+    }
+
     public static void Set(bool enabled)
     {
         try
