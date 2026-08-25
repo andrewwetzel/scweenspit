@@ -617,6 +617,9 @@ public sealed class SettingsForm : Form
             var moveMenu = Theme.Toggle("Open the Start menu over the button", settings.MoveStartMenu);
             moveMenu.CheckedChanged += (_, _) => { settings.MoveStartMenu = moveMenu.Checked; Save(); };
             page.Controls.Add(moveMenu);
+            page.Controls.Add(Theme.Caption(
+                "No effect on Windows 11 build 26200 and later: the menu's window can be moved, and " +
+                "reports its new position afterwards, but what is drawn stays where the shell put it."));
 
             var iconsOnly = Theme.Toggle("Icons only, no window titles", settings.IconsOnly);
             iconsOnly.CheckedChanged += (_, _) => { settings.IconsOnly = iconsOnly.Checked; Save(); };

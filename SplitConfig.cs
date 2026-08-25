@@ -112,10 +112,14 @@ public sealed class BarSettings
 
     /// <summary>
     /// Move the Start menu over the button that opened it. Windows opens it wherever it believes its
-    /// own taskbar to be, which need not be this display or this edge. Undocumented, so worth being
-    /// able to turn off if a future build of the shell takes it badly.
+    /// own taskbar to be, which need not be this display or this edge.
+    ///
+    /// Off by default because on Windows 11 build 26200 it does nothing: the menu's window can be
+    /// found and moved, and reports the new rectangle afterwards, while what is drawn stays where
+    /// the shell wanted it. The window and the pixels are no longer the same thing. Left in as a
+    /// switch rather than removed, since it did work on the builds it was written against.
     /// </summary>
-    public bool MoveStartMenu { get; set; } = true;
+    public bool MoveStartMenu { get; set; }
 
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
@@ -201,7 +205,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     /// <summary>Master switch for the automatic maximize / borderless-fullscreen clamp.</summary>
     public bool AutoClamp { get; set; } = true;
@@ -453,6 +457,10 @@ public sealed class SplitConfig
             // v2: even less — level with the ends, so the three visible sides match.
             if (Version < 1) bar.FloatMargin = Math.Min(bar.FloatMargin, 4);
             if (Version < 2) bar.FloatMargin = Math.Min(bar.FloatMargin, 3);
+
+            // v3 is not a changed default but an abandoned feature: leaving it on costs a foreground
+            // hook and a timer for every opening of a menu it cannot move.
+            if (Version < 3) bar.MoveStartMenu = false;
 
             // A bar thinner than this cannot show anything; a bar wider than a third of a display is
             // almost certainly a typo, and it eats the work area for every app on that screen.

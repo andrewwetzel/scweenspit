@@ -220,8 +220,17 @@ taskbar window ScweenSpit may have hidden.
 
 Windows then opens that menu wherever it believes its taskbar to be — the primary display's bottom
 edge, whether or not the shell's bar is still shown there, and nowhere near a bar of ours on another
-screen. There is no supported way to ask for somewhere else, so **Open the Start menu over the
-button** moves it after the fact: the menu is an ordinary top-level window belonging to
+screen.
+
+**On Windows 11 build 26200 and later this cannot be fixed from outside the shell, and the switch
+that tries is off by default.** The menu's window can be found, moved, and will report its new
+rectangle for as long as you care to ask — while what is drawn stays exactly where the shell put it.
+The window and the pixels are no longer the same thing, so there is nothing left to move. What
+remains would mean loading code into the shell's own process to intercept its positioning, which is
+a different category of thing than this program does, and it would break on every Windows update.
+
+The switch is kept because it did work on the builds it was written against. **Open the Start menu
+over the button** moves the menu after the fact: the menu is an ordinary top-level window belonging to
 StartMenuExperienceHost, whatever is drawn inside it. It is held there for as long as it stays
 open, rather than placed once and left: Windows re-asserts its own position more than once while the
 menu animates in, and a fixed hold that ends before the last of those loses to it silently, since by
