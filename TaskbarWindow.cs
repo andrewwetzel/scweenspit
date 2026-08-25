@@ -45,8 +45,15 @@ public sealed class TaskbarWindow : Form
         public TaskWindow? First => Windows.Count > 0 ? Windows[0] : null;
         public bool Running => Windows.Count > 0;
 
-        /// <summary>A name for a person. An application id is not one, so prefer the process.</summary>
-        public string Label => First?.Process is { Length: > 0 } name ? name : NameOf(Id);
+        /// <summary>
+        /// A name for a person. The shell's, where the application has an id it knows — the process
+        /// name is the browser's for anything hosted in one, so a PWA would read as "chrome".
+        /// Otherwise the process, since an application id is not a name.
+        /// </summary>
+        public string Label =>
+            First is { AppId.Length: > 0 } w && ShellIcon.NameForAppId(w.AppId) is { } known ? known
+            : First?.Process is { Length: > 0 } name ? name
+            : NameOf(Id);
     }
 
     private List<TaskWindow> windows = [];
@@ -58,6 +65,12 @@ public sealed class TaskbarWindow : Form
     private readonly List<IntPtr> order = [];
 
     private readonly Dictionary<IntPtr, Bitmap> icons = [];
+
+    /// <summary>Handles wearing a stand-in, and how many times we have looked for the real thing.</summary>
+    private readonly Dictionary<IntPtr, int> standIn = [];
+
+    /// <summary>Ten seconds of asking. An application without an icon is not going to grow one.</summary>
+    private const int IconAttempts = 10;
 
     // Which window of each group is next. Clicking a grouped icon walks its windows, the way a
     // Plasma task manager does, rather than always raising the same one.
@@ -264,18 +277,19 @@ public sealed class TaskbarWindow : Form
 
         buttons = LayOutButtons();
 
-        foreach (var w in windows)
-            if (!icons.ContainsKey(w.Handle))
-                icons[w.Handle] = WindowList.IconFor(w.Handle) ?? new Bitmap(32, 32);
+        foreach (var w in windows) Adopt(w);
 
         foreach (var button in buttons)
             if (!button.Running && !fileIcons.ContainsKey(button.Id))
-                fileIcons[button.Id] = WindowList.IconForFile(button.Id) ?? LetterTile(button.Label);
+                fileIcons[button.Id] = WindowList.IconForFile(button.Id)
+                                       ?? ShellIcon.ForAppId(button.Id)
+                                       ?? LetterTile(button.Label);
 
         foreach (var stale in icons.Keys.Where(h => !IsWindow(h)).ToList())
         {
             icons[stale].Dispose();
             icons.Remove(stale);
+            standIn.Remove(stale);
         }
 
         // Volume goes through COM, so it is polled less often than the clock ticks.
@@ -421,6 +435,62 @@ public sealed class TaskbarWindow : Form
     /// rather than a file, so there is nothing to extract from until it is running — and a blank
     /// square says less than a letter does.
     /// </summary>
+    /// <summary>
+    /// Takes the best icon a window has to offer, and keeps asking while it is only offering a
+    /// stand-in. Applications commonly set their icon a moment after the window appears, so the
+    /// first look is often too early — and this used to be the only look there was.
+    /// </summary>
+    private void Adopt(TaskWindow window)
+    {
+        bool known = icons.ContainsKey(window.Handle);
+        int looks = standIn.GetValueOrDefault(window.Handle);
+
+        if (known && looks == 0) return;                // settled on the window's own icon
+        if (known && looks >= IconAttempts) return;     // asked enough; it is not going to have one
+
+        var (art, real) = Artwork(window);
+
+        if (known && !real)
+        {
+            // No better than what is already there. Count the look and keep the one we have, rather
+            // than swapping one stand-in for an identical one every second.
+            art.Dispose();
+            standIn[window.Handle] = looks + 1;
+            return;
+        }
+
+        if (known) icons[window.Handle].Dispose();
+        icons[window.Handle] = art;
+
+        if (real) standIn.Remove(window.Handle);
+        else standIn[window.Handle] = 1;
+    }
+
+    /// <summary>
+    /// The best icon a window has, and whether it is really the window's own. In order of how
+    /// specific each source is — a blank square used to be the last resort, which is how an
+    /// application with no window icon ended up as an empty space on the bar.
+    /// </summary>
+    private (Bitmap Art, bool Real) Artwork(TaskWindow window)
+    {
+        if (WindowList.IconFor(window.Handle) is { } own) return (own, true);
+        if (ShellIcon.ForAppId(window.AppId) is { } registered) return (registered, true);
+
+        // Not the executable's icon when the window declares an application id of its own: a PWA
+        // whose icon cannot be found is still not the browser, and wearing the browser's icon is
+        // exactly the confusion that grouping by application id exists to prevent.
+        if (window.AppId.Length == 0 && WindowList.IconForFile(window.Path) is { } file)
+            return (file, true);
+
+        // Named after itself, not after its host: a stand-in reading "C" beside the browser's own
+        // "C" identifies nothing.
+        var named = window.AppId.Length > 0
+            ? ShellIcon.NameForAppId(window.AppId) ?? window.Title
+            : window.Process is { Length: > 0 } p ? p : window.Title;
+
+        return (LetterTile(named), false);
+    }
+
     private static Bitmap LetterTile(string label)
     {
         var tile = new Bitmap(32, 32);

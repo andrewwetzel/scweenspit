@@ -264,6 +264,17 @@ a Chrome PWA gets its own icon rather than disappearing into the browser's, desp
 `chrome.exe`. It is the same mechanism the Windows taskbar groups by. Where a window declares no id,
 the executable is used instead.
 
+That id is also where the icon and the name come from when the window has neither. A PWA window
+carries no icon to ask for and its executable belongs to the browser, so both of the ordinary
+answers are wrong — one blank, the other Chrome's. The shell is asked what the id looks like and
+what it is called instead, which is what the Start menu shows for the same application. Failing
+even that, a lettered tile named after the application rather than after its host: a stand-in
+reading "C" beside the browser's own "C" identifies nothing.
+
+Icons are also asked for again while a window is only wearing a stand-in. Applications commonly set
+their icon a moment after the window appears, and the first look — which used to be the only look —
+is often too early.
+
 Clicking a button brings its window past whatever is maximised. Windows only lets a process hand the
 foreground to a window if it already holds the foreground or was last to receive input, and a taskbar
 holds neither — its own window is deliberately never activated. So the request is refused and the
