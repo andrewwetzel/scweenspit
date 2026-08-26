@@ -110,6 +110,23 @@ public sealed class TrayApplicationContext : ApplicationContext
         taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.Hide(true); };
         reflow.Tick += (_, _) => { reflow.Stop(); ReflowAroundBars(); };
 
+        // Touching Handle rather than CreateControl(): that one returns without doing anything for a
+        // control that is not visible, and this one never is. Without a handle the BeginInvoke below
+        // throws, into a catch that would swallow it.
+        _ = marshaller.Handle;
+
+        // What we started in, so the first real change is compared against the arrangement on screen
+        // rather than against the empty string.
+        topology = DisplayTopology.Signature();
+
+        displaySettle.Tick += (_, _) => { displaySettle.Stop(); DisplaysChanged(); };
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
+        // Signing out and shutting down end the message loop without disposing anything, so none of
+        // the teardown below runs. Auto-hide is a state Explorer keeps, so it would still be on at
+        // the next sign-in — a machine handed back in a state the user never chose.
+        SystemEvents.SessionEnding += OnSessionEnding;
+
         ApplySnapSuppression();
         ApplyTaskbarVisibility();
         ApplyAnimationPreference();
@@ -298,6 +315,15 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// </summary>
     private void ApplyTaskbarVisibility()
     {
+        // Unconditional, and not driven by any record: a run that was killed leaves the shell's bar
+        // hidden, and a record that was lost with it leaves nothing to notice. Whatever the file
+        // believes, if we are not hiding the taskbar then the taskbar should be on screen.
+        if (!config.HideWindowsTaskbar && !SystemRestore.Visible())
+        {
+            Log.Write("taskbar was hidden and nothing here asked for that; showing it");
+            Taskbar.SetHidden(false);
+        }
+
         if (config.HideWindowsTaskbar)
         {
             if (config.TaskbarRestore is null)
@@ -337,6 +363,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex) { Log.Write($"display change could not be marshalled: {ex.Message}"); }
     }
 
+    private void OnSessionEnding(object? sender, SessionEndingEventArgs e)
+    {
+        taskbarWatch.Stop();
+        SystemRestore.OnSessionEnding(config);
+    }
+
     private void DisplaysChanged()
     {
         var now = DisplayTopology.Signature();
@@ -351,6 +383,17 @@ public sealed class TrayApplicationContext : ApplicationContext
             config.Save();
             Notify($"Switched to {profile.Name ?? now}.");
             Log.Write($"applied profile for {now}");
+        }
+        else if (different && config.HideWindowsTaskbar)
+        {
+            // Nothing saved for this arrangement, and the shell's taskbar is still hidden — which on
+            // a laptop that has just been undocked is the whole screen's worth of difference between
+            // a working machine and one with no way to reach anything. Say so, because the setting
+            // that fixes it is two clicks away and impossible to guess.
+            Notify(config.FollowDisplayChanges
+                ? "New display arrangement. Save settings for it in Settings \u2192 Displays."
+                : "Displays changed. Following them is switched off in Settings \u2192 Displays.");
+            Log.Write($"no profile for {now}; settings left as they are");
         }
 
         // Whether or not a profile matched: a display may have gone, and a bar reserving space on it
@@ -517,6 +560,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         if (disposing)
         {
+            // Before anything else, and before anything that could throw. Handing the machine back
+            // is the one part of shutting down that the user cannot do without, and it used to come
+            // last — after six disposals, any of which failing would have taken it with them.
+            //
+            // The watchdog goes first or it puts the taskbar straight back.
+            taskbarWatch.Stop();
+            SystemRestore.Everything(config);
+
             UnregisterHotKey(hotkeys.Handle, HotkeyPrev);
             UnregisterHotKey(hotkeys.Handle, HotkeyNext);
             UnregisterHotKey(hotkeys.Handle, HotkeyZones);
@@ -532,31 +583,13 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             WindowList.Raised -= raised;
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            SystemEvents.SessionEnding -= OnSessionEnding;
             displaySettle.Dispose();
             marshaller.Dispose();
             taskbarWatch.Dispose();
             reflow.Dispose();
 
-            if (config.AnimationRestore is { } animationWasOn)
-            {
-                Taskbar.MinimiseAnimation = animationWasOn;
-                config.AnimationRestore = null;
-                config.Save();
-            }
-            if (config.TaskbarRestore is { } wasAutoHidden)
-            {
-                Taskbar.SetHidden(false);
-                Taskbar.AutoHide = wasAutoHidden;
-                config.TaskbarRestore = null;
-                config.Save();
-            }
-
-            if (config.SnapRestore is { } saved)
-            {
-                WindowsSnap.Restore(saved);
-                config.SnapRestore = null;
-                config.Save();
-            }
+            SystemRestore.Everything(config);
 
             tray.Visible = false;
             tray.Dispose();

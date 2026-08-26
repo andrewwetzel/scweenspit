@@ -126,8 +126,13 @@ public sealed class WinEventHookService : IDisposable
 
     public void Stop()
     {
-        // Above the guard: the hotkey path arms the verify timer while the hooks are down.
+        // Above the guard: the hotkey path arms the verify timer, and raises windows, while the
+        // hooks are down. A window left HWND_TOPMOST sits over everything the user needs and there
+        // is nothing left afterwards to put it back — so this is undone whatever the hooks are doing.
         CancelPending();
+        RestoreTopmost();
+        coversTaskbar.Clear();
+
         if (!Running) return;
 
         CancelDrag();
@@ -136,8 +141,6 @@ public sealed class WinEventHookService : IDisposable
         if (hookShow     != IntPtr.Zero) { UnhookWinEvent(hookShow);     hookShow     = IntPtr.Zero; }
         if (pin.IsAllocated) pin.Free();
         callback = null;
-        RestoreTopmost();
-        coversTaskbar.Clear();
         recent.Clear();
         lastNormal.Clear();
         owners.Clear();

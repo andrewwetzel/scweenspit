@@ -380,16 +380,26 @@ public sealed class SplitConfig
     /// <summary>True when the last <see cref="Load"/> could not read an existing config file.</summary>
     public static bool LastLoadFailed { get; private set; }
 
+    /// <summary>
+    /// Set when a config file exists but could not be read, and never cleared for that session.
+    ///
+    /// Load already refuses to overwrite an unreadable file, but every other save site in the app
+    /// would — and the file holds the only record of what this machine had before ScweenSpit changed
+    /// it. One spinner nudged after a failed load would write defaults over that record and make the
+    /// changes permanent, which is a far worse outcome than a session that cannot save.
+    /// </summary>
+    public static bool SaveSuppressed { get; private set; }
+
     public static SplitConfig Load()
     {
-        LastLoadFailed = false;
+        LastLoadFailed = SaveSuppressed = false;
         try
         {
             if (File.Exists(Path))
             {
                 var cfg = JsonSerializer.Deserialize<SplitConfig>(File.ReadAllText(Path), JsonOpts);
                 if (cfg is not null) return cfg.Normalized();
-                LastLoadFailed = true;
+                LastLoadFailed = SaveSuppressed = true;
             }
             else
             {
@@ -404,7 +414,7 @@ public sealed class SplitConfig
         {
             // A corrupt config must never stop the app — but it must not be destroyed either;
             // it is hand-edited, so keep a copy before defaults overwrite it.
-            LastLoadFailed = true;
+            LastLoadFailed = SaveSuppressed = true;
             Log.Write($"config load failed: {ex.Message}");
             try
             {
@@ -422,6 +432,14 @@ public sealed class SplitConfig
 
     public void Save()
     {
+        if (SaveSuppressed)
+        {
+            Log.WriteOnce("save-suppressed",
+                $"not saving over an unreadable config; it holds the only record of what this " +
+                $"machine had before. Fix or delete {Path} to save again.");
+            return;
+        }
+
         try
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);

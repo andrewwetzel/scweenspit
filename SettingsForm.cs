@@ -444,8 +444,12 @@ public sealed class SettingsForm : Form
         page.Controls.Add(hide);
         page.Controls.Add(Theme.Caption(
             "Takes the shell's taskbars off screen and gives their reserved strip back, so a bar of " +
-            "yours docked to the same edge sits flush against it rather than above a gap. Restored " +
-            "when ScweenSpit exits, and on the next launch if this one is killed.\n\n" +
+            "yours docked to the same edge sits flush against it rather than above a gap. Put back " +
+            "when ScweenSpit exits, when Windows signs out, and on the next launch if this switch " +
+            "is off.\n\n" +
+            "If ScweenSpit is ever killed while the taskbar is hidden, run ScweenSpit.exe with " +
+            "--restore to put it back without starting the app. Task Manager's Run New Task opens " +
+            "on Ctrl+Shift+Esc with no taskbar at all, which is what makes that reachable.\n\n" +
             "Note that third-party notification icons — Discord, Steam, and anything else living in " +
             "the system tray — go with it. The indicators below are ours; the tray itself belongs to " +
             "Explorer and cannot be borrowed."));

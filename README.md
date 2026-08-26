@@ -99,6 +99,22 @@ With the Windows taskbar hidden there is nothing to cover, so nothing is raised 
 Windows raised this way are put back to normal z-order when they lose focus, when they leave such a
 zone, and when ScweenSpit exits.
 
+### Following the displays
+
+Docking and undocking is a different machine each time, and the settings that suit an ultrawide are
+not the ones that suit a laptop panel. **Displays** saves a profile per arrangement — recognised by
+the set of displays present, not by their order — and applies it when that arrangement comes back.
+
+The arrangement is watched through `SystemEvents.DisplaySettingsChanged`, debounced, because a dock
+reports several changes while it settles and everything downstream touches windows. Whether or not a
+profile matches, the bars are re-applied: a display may have gone, and a bar reserving space on it
+has to go with it.
+
+Undocking to an arrangement with nothing saved for it leaves the settings alone — including a hidden
+taskbar, which on a laptop with nowhere else to go is the difference between a working machine and
+one you cannot reach anything from. So it says so, because the setting that fixes it is two clicks
+away and impossible to guess.
+
 ### Keeping windows on one display
 
 Some apps reopen at whatever rectangle they last remembered, which on a multi-monitor desktop often
@@ -120,6 +136,28 @@ becomes a draggable handle, the layout reflows live as you drag, and it's saved 
 stays a clean split — no gaps, no overlaps — and nothing can be squeezed below 5% of the display.
 
 Presets are still there (70/30, thirds, quadrants and so on) if you'd rather not fiddle.
+
+### Handing the machine back
+
+ScweenSpit changes things that outlive it: the shell's taskbar is hidden, its auto-hide state is
+switched, Windows' snap settings are turned off, the minimise animation is turned off. All four are
+put back when it exits, when Windows signs out, and on the next launch when the setting that asked
+for them is off.
+
+The restore now runs **first** in the teardown, before anything else is disposed, and each of the
+four is independent — undoing four things where a failure in the first must not decide the fate of
+the other three is the whole job. It used to run last, after six disposals.
+
+If ScweenSpit is killed while the taskbar is hidden, the taskbar comes back on hover — Explorer's
+auto-hide survives, the hide does not — but that is not the same as having it back. Run
+`ScweenSpit.exe --restore` to put everything back without starting the app; it also switches off
+hiding the taskbar, so the next ordinary launch does not immediately undo the rescue. Task Manager's
+**Run new task** opens on Ctrl+Shift+Esc with no taskbar at all, which is what makes that reachable.
+
+An unreadable `config.json` is never written over. The file holds the only record of what the
+machine looked like before ScweenSpit touched it, and one spinner nudged after a failed load would
+put defaults on top of it and make the changes permanent. Saving is switched off for that session
+instead.
 
 ### Running one copy
 

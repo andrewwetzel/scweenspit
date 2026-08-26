@@ -65,6 +65,17 @@ internal static class Program
         Log.Banner();
         Log.Write($"dpi per-monitor-v2: {dpi}");
 
+        // Before the single-instance check, and before anything else: this exists for the machine
+        // whose taskbar is missing, and the copy that hid it may still be running or may be long
+        // gone. Either way there is nothing to coordinate with — it only puts settings back.
+        if (Environment.GetCommandLineArgs().Any(a =>
+                a.Equals("--restore", StringComparison.OrdinalIgnoreCase)))
+        {
+            ApplicationConfiguration.Initialize();
+            SystemRestore.RunFromCommandLine();
+            return;
+        }
+
         using var single = new Mutex(true, @"Local\ScweenSpit.SingleInstance", out bool first);
         if (!first)
         {
