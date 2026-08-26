@@ -96,14 +96,20 @@ internal static class Theme
         return menu;
     }
 
-    /// <summary>Puts an existing menu into the same palette. For the ones that outlive a click.</summary>
-    public static ContextMenuStrip Dress(ContextMenuStrip menu)
+    /// <summary>
+    /// Puts a menu into the same palette. Submenus too: a drop-down takes its renderer from the
+    /// ToolStripManager rather than from the menu it hangs off, so dressing the parent alone leaves
+    /// every submenu rendering in system light grey.
+    ///
+    /// The image margin is deliberately left on. It is the gutter check marks are drawn in, and
+    /// turning it off silently makes every ticked item look unticked.
+    /// </summary>
+    public static T Dress<T>(T menu) where T : ToolStripDropDown
     {
         menu.BackColor = Panel;
         menu.ForeColor = Text;
         menu.Font = Face();
         menu.Renderer = new ToolStripProfessionalRenderer(new MenuColours()) { RoundedEdges = false };
-        menu.ShowImageMargin = false;
         return menu;
     }
 

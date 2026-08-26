@@ -285,7 +285,7 @@ public sealed class SettingsForm : Form
 
             foreach (var (name, make) in SplitConfig.Presets)
             {
-                bool active = SameZones(current, make());
+                bool active = ZoneEdges.Same(current, make());
                 var b = Theme.Action(name, active);
                 b.AutoSize = true;
                 b.MinimumSize = new Size(130, 32);
@@ -894,11 +894,6 @@ public sealed class SettingsForm : Form
         };
         overlay.Closed += back;
     }
-
-    private static bool SameZones(List<FracRect> a, List<FracRect> b) =>
-        a.Count == b.Count && a.Zip(b).All(p =>
-            Math.Abs(p.First.L - p.Second.L) < 0.005 && Math.Abs(p.First.T - p.Second.T) < 0.005 &&
-            Math.Abs(p.First.R - p.Second.R) < 0.005 && Math.Abs(p.First.B - p.Second.B) < 0.005);
 
     private void ShowExclusions()
     {

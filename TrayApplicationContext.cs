@@ -158,6 +158,8 @@ public sealed class TrayApplicationContext : ApplicationContext
                 ForeColor = Theme.Accent,
             });
         items.Add(new ToolStripSeparator());
+        items.Add(LayoutMenu());
+        items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem(overlay.Visible ? "Hide zones" : "Show zones", null, (_, _) => overlay.Toggle(zones)));
         items.Add(new ToolStripMenuItem("Auto-clamp", null, (_, _) => { config.AutoClamp = !config.AutoClamp; config.Save(); ApplyChanges(); })
         {
@@ -165,7 +167,99 @@ public sealed class TrayApplicationContext : ApplicationContext
         });
         items.Add(new ToolStripMenuItem("Exclude active window's app", null, (_, _) => ExcludeActiveApp()));
         items.Add(new ToolStripSeparator());
+
+        bool handedBack = config.HandedBack is not null;
+        items.Add(new ToolStripMenuItem(handedBack ? "Take ScweenSpit's settings back up" : "Hand back to Windows",
+                                        null, (_, _) => { if (handedBack) TakeOverAgain(); else HandBackToWindows(); })
+        {
+            ToolTipText = handedBack
+                ? "Put back the zones, bars and taskbar settings that were on before."
+                : "Stock Windows: taskbar shown and staying shown, nothing clamped, no bars, snap "
+                  + "handed back. Your layouts are kept for when you want them again.",
+        });
+
+        items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { tray.Visible = false; ExitThread(); }));
+    }
+
+    /// <summary>
+    /// The layouts available for the display the menu was opened on. Changing a display's split is
+    /// the thing most worth reaching quickly, and it used to live three clicks into the settings
+    /// window — behind a window that has to be found first.
+    /// </summary>
+    private ToolStripMenuItem LayoutMenu()
+    {
+        var at = Cursor.Position;
+        if (!ZoneManager.TryGetMonitorAt(new POINT { X = at.X, Y = at.Y }, out var geo))
+            return new ToolStripMenuItem("Layout") { Enabled = false };
+
+        var menu = new ToolStripMenuItem($"Layout for this display ({geo.Describe()})");
+        Theme.Dress(menu.DropDown);
+        var current = config.ZonesFor(geo.Device);
+        bool anyMatched = false;
+
+        foreach (var (name, make) in SplitConfig.Presets)
+        {
+            bool active = ZoneEdges.Same(current, make());
+            anyMatched |= active;
+
+            var device = geo.Device;
+            menu.DropDownItems.Add(new ToolStripMenuItem(name, null, (_, _) =>
+            {
+                config.SetZones(device, make());
+                ApplyChanges();
+                overlay.Flash(zones);
+            })
+            {
+                Checked = active,
+            });
+        }
+
+        // A layout dragged into shape matches no preset, and a menu with nothing ticked reads as a
+        // menu that does not know what is going on.
+        if (!anyMatched)
+        {
+            menu.DropDownItems.Insert(0, new ToolStripSeparator());
+            menu.DropDownItems.Insert(0, new ToolStripMenuItem($"Custom — {current.Count} zones")
+            {
+                Checked = true,
+                Enabled = false,
+            });
+        }
+
+        return menu;
+    }
+
+    /// <summary>
+    /// Stock Windows, without throwing anything away: the taskbar back and staying back, nothing
+    /// clamped, no bars, snap and the minimise animation handed over. The zone layouts stay in the
+    /// config, unenforced, so taking over again is one click rather than a rebuild.
+    /// </summary>
+    private void HandBackToWindows()
+    {
+        var before = new DisplayProfile { Name = "Before handing back" };
+        before.CaptureFrom(config);
+        config.HandedBack = before;
+
+        DisplayProfile.HandsOff().ApplyTo(config);
+        config.Save();
+        ApplyChanges();
+
+        Notify("Handed back to Windows. The taskbar is back, and your layouts are kept.");
+        Log.Write("handed back to Windows");
+    }
+
+    private void TakeOverAgain()
+    {
+        if (config.HandedBack is not { } before) return;
+
+        before.ApplyTo(config);
+        config.HandedBack = null;
+        config.Save();
+        ApplyChanges();
+
+        Notify("ScweenSpit is managing windows again.");
+        Log.Write("took its settings back up");
     }
 
     private void OpenSettings()

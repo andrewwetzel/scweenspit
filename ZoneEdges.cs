@@ -122,6 +122,16 @@ public static class ZoneEdges
         }
     }
 
+    /// <summary>
+    /// Whether two layouts are the same to within a rounding error. Compared loosely on purpose:
+    /// a layout that came back from a preset and one that came back from JSON differ in the last
+    /// decimal place, and an exact test would say a preset is never the one currently applied.
+    /// </summary>
+    public static bool Same(List<FracRect> a, List<FracRect> b) =>
+        a.Count == b.Count && a.Zip(b).All(p =>
+            Near(p.First.L, p.Second.L) && Near(p.First.T, p.Second.T) &&
+            Near(p.First.R, p.Second.R) && Near(p.First.B, p.Second.B));
+
     public static List<FracRect> Clone(List<FracRect> zones) =>
         zones.Select(z => new FracRect(z.L, z.T, z.R, z.B, z.CoverTaskbar)).ToList();
 }

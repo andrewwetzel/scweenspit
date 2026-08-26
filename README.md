@@ -70,6 +70,21 @@ Three ways, in rough order of how often you'll reach for them:
 | `Win+Alt+Z` | show/hide the zone overlay |
 | `Win+Alt+S` | let the focused window span displays, or stop it |
 
+### The menu on the bar
+
+Clicking the ScweenSpit icon — on the bar, or in the notification area — opens the menu that has to
+carry everything when the Windows taskbar is hidden, since there is nothing else to reach the app by.
+
+**Layout for this display** switches the split on whichever display the pointer is on, with the
+current one ticked. A layout dragged into shape matches no preset, so it says *Custom* and how many
+zones it has rather than leaving nothing ticked, which reads as a menu that does not know.
+
+**Hand back to Windows** is stock Windows in one click: taskbar shown and staying shown, nothing
+clamped, no bars, snap and the minimise animation given back. Nothing is thrown away — the layouts
+stay in the config, unenforced — and the item becomes **Take ScweenSpit's settings back up**, which
+puts back exactly what was on before. That is the same thing an undocking profile does, reachable
+without knowing that profiles exist.
+
 ### A zone that covers the taskbar
 
 Zones normally live inside the work area, so they stop short of the taskbar — and an ordinary window

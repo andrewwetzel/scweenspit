@@ -213,6 +213,12 @@ public sealed class SplitConfig
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
     public const int CurrentVersion = 3;
 
+    /// <summary>
+    /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
+    /// so it can pick it up again. Null means it is managing windows normally.
+    /// </summary>
+    public DisplayProfile? HandedBack { get; set; }
+
     /// <summary>Master switch for the automatic maximize / borderless-fullscreen clamp.</summary>
     public bool AutoClamp { get; set; } = true;
 
@@ -585,6 +591,7 @@ public sealed class SplitConfig
         // The revision of the file we are taking these from, so a reload cannot leave the live
         // config claiming to be older than the values it now holds and migrating them twice.
         Version = o.Version;
+        HandedBack = o.HandedBack;
         AutoClamp = o.AutoClamp;
         DebounceMs = o.DebounceMs;
         Padding = o.Padding;
