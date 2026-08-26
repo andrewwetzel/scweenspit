@@ -323,6 +323,76 @@ public sealed class WinEventHookService : IDisposable
     /// </summary>
     public int ArrangeOverlapping(RECT area) => Arrange(area);
 
+    // ---- live divider drag -------------------------------------------------
+
+    /// <summary>
+    /// Which zone each window on a display was filling when a divider drag began, so the drag can
+    /// resize them with it.
+    ///
+    /// Remembered rather than re-decided each frame, because the alternative is asking "which zone
+    /// is this window in now?" while the boundary is sliding under it — and a window straddling the
+    /// divider would hop across to the other side halfway through the drag.
+    /// </summary>
+    private readonly Dictionary<IntPtr, int> following = [];
+
+    /// <summary>How far off a zone a window may be and still count as filling it.</summary>
+    private const int FillsTolerance = 12;
+
+    public void BeginZonePreview(MonitorGeometry geo)
+    {
+        following.Clear();
+
+        var rects = zones.ZonesFor(geo);
+        if (rects.Count == 0) return;
+
+        foreach (var window in WindowList.Enumerate(geo.Device))
+        {
+            var hWnd = window.Handle;
+            if (!IsClampTarget(hWnd)) continue;
+            if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
+            if (!GetWindowRect(hWnd, out var rect)) continue;
+
+            int index = ZoneManager.PickZoneIndex(rects, ReferenceRect(hWnd, rect));
+
+            // Only the windows already filling a zone. One left at some size of its own is not
+            // "in" a zone in any sense the user would recognise, and dragging a divider is no
+            // reason to seize it.
+            if (!Fills(rect, rects[index].Rect)) continue;
+
+            following[hWnd] = index;
+        }
+
+        if (following.Count > 0) Log.Write($"divider drag on {geo.Device}: {following.Count} window(s) following");
+    }
+
+    /// <summary>Moves the remembered windows to wherever their zone is now.</summary>
+    public void PreviewZones(MonitorGeometry geo)
+    {
+        if (following.Count == 0) return;
+
+        var rects = zones.ZonesFor(geo);
+        if (rects.Count == 0) return;
+
+        foreach (var (hWnd, index) in following)
+        {
+            if (index >= rects.Count || !IsWindow(hWnd)) continue;
+            Apply(hWnd, rects[index]);
+        }
+    }
+
+    public void EndZonePreview() => following.Clear();
+
+    /// <summary>
+    /// Whether a window is sitting in a zone rather than merely overlapping it. Loose, because a
+    /// clamped window's frame carries an invisible resize border that puts its reported rectangle a
+    /// few pixels outside the zone it was placed in.
+    /// </summary>
+    private static bool Fills(RECT window, RECT zone) =>
+        Math.Abs(window.Left - zone.Left) <= FillsTolerance
+        && Math.Abs(window.Top - zone.Top) <= FillsTolerance
+        && Math.Abs(window.Right - zone.Right) <= FillsTolerance
+        && Math.Abs(window.Bottom - zone.Bottom) <= FillsTolerance;
+
     private int Arrange(RECT? within)
     {
         int moved = 0;

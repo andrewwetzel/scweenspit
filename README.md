@@ -79,6 +79,10 @@ carry everything when the Windows taskbar is hidden, since there is nothing else
 current one ticked. A layout dragged into shape matches no preset, so it says *Custom* and how many
 zones it has rather than leaving nothing ticked, which reads as a menu that does not know.
 
+**Drag zone dividers** puts the layout on screen with the dividers grabbable — the same editor
+the settings window opens, without having to find the settings window first, which on a machine
+with the Windows taskbar hidden is the harder half.
+
 **Hand back to Windows** is stock Windows in one click: taskbar shown and staying shown, nothing
 clamped, no bars, snap and the minimise animation given back. Nothing is thrown away — the layouts
 stay in the config, unenforced — and the item becomes **Take ScweenSpit's settings back up**, which
@@ -144,6 +148,22 @@ Newly opened windows are checked a third of a second after they appear rather th
 an app still laying itself out should not be fought over its own opening position.
 
 ### Adjusting the zones
+
+Windows filling the zones either side of a divider resize as it is dragged, rather than after it is
+let go. A layout you can see the consequences of is a different thing to judge than one you cannot.
+
+Which window is in which zone is settled once, before the first pixel of the drag, and remembered.
+Re-deciding it each frame — asking "which zone is this window in now?" while the boundary slides
+underneath it — would have a window hop to the other side halfway through the drag, and that is not
+a resize. Only windows already *filling* a zone follow: one left at some size of its own is not in a
+zone in any sense worth seizing it over. That test is loose by a dozen pixels, because a clamped
+window's frame carries an invisible resize border that puts its reported rectangle slightly outside
+the zone it was placed in.
+
+The preview runs twenty-five times a second and does not write the config; the file is written once,
+on release. The windows are then placed once more against the layout that was actually committed,
+since that differs from the last frame by however far the mouse travelled in the final forty
+milliseconds.
 
 **Layouts → Drag dividers on screen…** puts the overlay into edit mode: every divider between zones
 becomes a draggable handle, the layout reflows live as you drag, and it's saved when you let go.

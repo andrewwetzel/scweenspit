@@ -30,6 +30,15 @@ public sealed class ZoneOverlay : IDisposable
     /// <summary>Raised when the user finishes dragging an outer edge: (device, new margins).</summary>
     public event Action<string, Margins>? MarginsEdited;
 
+    /// <summary>A divider drag has started on this display.</summary>
+    public event Action<string>? PreviewBegan;
+
+    /// <summary>Where the dividers are mid-drag, often enough to follow but not every pixel.</summary>
+    public event Action<string, List<FracRect>>? Previewing;
+
+    /// <summary>The drag is over, committed or not.</summary>
+    public event Action<string>? PreviewEnded;
+
     /// <summary>Raised when a visible overlay is taken down, so callers can restore their own UI.</summary>
     public event Action? Closed;
 
@@ -67,6 +76,9 @@ public sealed class ZoneOverlay : IDisposable
                                        zones.Config.Padding, mode);
             form.Committed += (device, edited) => ZonesEdited?.Invoke(device, edited);
             form.MarginsCommitted += (device, m) => MarginsEdited?.Invoke(device, m);
+            form.PreviewBegan += device => PreviewBegan?.Invoke(device);
+            form.Previewing += (device, edited) => Previewing?.Invoke(device, edited);
+            form.PreviewEnded += device => PreviewEnded?.Invoke(device);
             form.Dismissed += Hide;
             forms.Add(form);
 
@@ -132,6 +144,17 @@ public sealed class ZoneOverlay : IDisposable
         public string Device => geo.Device;
         public event Action<string, List<FracRect>>? Committed;
         public event Action<string, Margins>? MarginsCommitted;
+        public event Action<string>? PreviewBegan;
+        public event Action<string, List<FracRect>>? Previewing;
+        public event Action<string>? PreviewEnded;
+
+        /// <summary>
+        /// Twenty-five a second. Every one of these moves real windows, and a mouse reports far
+        /// faster than any of them can be redrawn — so the extra frames buy nothing and cost the
+        /// smoothness they were meant to add.
+        /// </summary>
+        private const int PreviewMs = 40;
+        private long lastPreview;
         public event Action? Dismissed;
 
         public OverlayForm(MonitorGeometry geo, RECT inner, List<Zone> pixels,
@@ -262,6 +285,13 @@ public sealed class ZoneOverlay : IDisposable
                     draggingEdge = clamped;
                     zonesDirty = true;
                     Invalidate();
+
+                    long now = Environment.TickCount64;
+                    if (now - lastPreview >= PreviewMs)
+                    {
+                        lastPreview = now;
+                        Previewing?.Invoke(geo.Device, ZoneEdges.Clone(fractions));
+                    }
                 }
                 return;
             }
@@ -324,6 +354,10 @@ public sealed class ZoneOverlay : IDisposable
             draggingGrip = grip;
             draggingEdge = double.IsNaN(near) ? null : near;
             draggingVertical = vertical;
+
+            // Which windows are filling which zone has to be settled before the first pixel of the
+            // drag, while the answer is still the one the user can see.
+            if (grip == Grip.Divider) PreviewBegan?.Invoke(geo.Device);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -336,6 +370,10 @@ public sealed class ZoneOverlay : IDisposable
 
             if (zonesDirty) { zonesDirty = false; Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions)); }
             if (marginsDirty) { marginsDirty = false; MarginsCommitted?.Invoke(geo.Device, margins.Copy()); }
+
+            // After the commit, so the windows that were following end up against the layout that
+            // was actually saved rather than against the last frame of the drag.
+            PreviewEnded?.Invoke(geo.Device);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)

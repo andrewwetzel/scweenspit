@@ -55,6 +55,29 @@ public sealed class TrayApplicationContext : ApplicationContext
             UpdateTrayText();
         };
 
+        // A divider drag moves the windows that were filling the zones either side of it, live. A
+        // layout you can see the consequences of is a different thing to judge than one you cannot.
+        overlay.PreviewBegan += device =>
+        {
+            if (MonitorFor(device) is { } geo) hook.BeginZonePreview(geo);
+        };
+
+        overlay.Previewing += (device, edited) =>
+        {
+            // Not saved: this runs twenty-five times a second, and the file is not the point of it.
+            config.SetZones(device, edited, save: false);
+            if (MonitorFor(device) is { } geo) hook.PreviewZones(geo);
+        };
+
+        overlay.PreviewEnded += device =>
+        {
+            // Once more against the layout that was actually committed, rather than leaving the
+            // windows where the last frame of the drag put them — those differ by however far the
+            // mouse travelled inside the last forty milliseconds.
+            if (MonitorFor(device) is { } geo) hook.PreviewZones(geo);
+            hook.EndZonePreview();
+        };
+
         overlay.MarginsEdited += (device, m) =>
         {
             config.SetMargins(device, m);
@@ -161,6 +184,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         items.Add(LayoutMenu());
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem(overlay.Visible ? "Hide zones" : "Show zones", null, (_, _) => overlay.Toggle(zones)));
+        items.Add(new ToolStripMenuItem("Drag zone dividers…", null, (_, _) => overlay.Show(zones, OverlayMode.Edit))
+        {
+            ToolTipText = "Drag the dividers on screen. Windows filling those zones resize as you " +
+                          "drag. Click anywhere else, or press Escape, to finish.",
+        });
         items.Add(new ToolStripMenuItem("Auto-clamp", null, (_, _) => { config.AutoClamp = !config.AutoClamp; config.Save(); ApplyChanges(); })
         {
             Checked = config.AutoClamp && hook.Running,
@@ -461,6 +489,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         taskbarWatch.Stop();
         SystemRestore.OnSessionEnding(config);
+    }
+
+    /// <summary>The display with this device name, if it is still attached.</summary>
+    private static MonitorGeometry? MonitorFor(string device)
+    {
+        foreach (var geo in ZoneManager.AllMonitors())
+            if (geo.Device == device) return geo;
+        return null;
     }
 
     private void DisplaysChanged()

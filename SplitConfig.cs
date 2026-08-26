@@ -617,10 +617,15 @@ public sealed class SplitConfig
         Claude = o.Claude;
     }
 
-    public void SetZones(string device, List<FracRect> zones)
+    /// <summary>
+    /// Sets a display's zones. <paramref name="save"/> is false while a divider is being dragged:
+    /// the layout has to be live for the windows following it to be placed against something, and
+    /// writing the file twenty-five times a second to say so is not the way to do that.
+    /// </summary>
+    public void SetZones(string device, List<FracRect> zones, bool save = true)
     {
         var layout = OwnLayout(device);
         layout.Zones = zones.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
-        Save();
+        if (save) Save();
     }
 }
