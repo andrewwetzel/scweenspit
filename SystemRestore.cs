@@ -17,6 +17,12 @@ namespace ScweenSpit;
 public static class SystemRestore
 {
     /// <summary>
+    /// Broadcast by a copy started with --restore, so a copy already running stands down rather than
+    /// spending the next two seconds putting back what the first one just undid.
+    /// </summary>
+    public static readonly uint StandDownMessage = Native.RegisterWindowMessage("ScweenSpit.StandDown");
+
+    /// <summary>
     /// Undoes whatever <paramref name="config"/> records as outstanding, and clears the records it
     /// managed to act on. Returns the number of changes put back.
     /// </summary>
@@ -108,6 +114,16 @@ public static class SystemRestore
     public static void RunFromCommandLine()
     {
         Log.Write("--restore requested");
+
+        // Anything already running has a watchdog that re-hides the taskbar every two seconds for as
+        // long as its own settings say to — so telling it to stop comes before putting anything back,
+        // or the rescue is undone before the message box has finished being read.
+        if (StandDownMessage != 0)
+        {
+            Native.PostMessage(Native.HWND_BROADCAST, StandDownMessage, IntPtr.Zero, IntPtr.Zero);
+            Log.Write("asked any running copy to stand down");
+            Thread.Sleep(1200);   // long enough for it to save; it is a keystroke's worth of wait
+        }
 
         var config = SplitConfig.Load();
 

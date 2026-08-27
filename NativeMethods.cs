@@ -77,6 +77,8 @@ public static class Native
     public const uint VK_LEFT  = 0x25;
     public const uint VK_RIGHT = 0x27;
     public const uint VK_Z     = 0x5A;
+    public const uint VK_HOME  = 0x24;
+    public const uint VK_END   = 0x23;
     public const uint VK_S     = 0x53;
     public const uint WM_APP = 0x8000;
     public const uint WM_GETICON = 0x007F;
@@ -299,6 +301,17 @@ public static class Native
 
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    public static readonly IntPtr HWND_BROADCAST = new(0xFFFF);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessageW(string name);
+
+    /// <summary>
+    /// A message number the whole desktop agrees on for a given name, so one copy of this program
+    /// can say something to another without either knowing the other's window.
+    /// </summary>
+    public static uint RegisterWindowMessage(string name) => RegisterWindowMessageW(name);
 
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 

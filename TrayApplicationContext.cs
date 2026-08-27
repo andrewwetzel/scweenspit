@@ -8,7 +8,8 @@ namespace ScweenSpit;
 /// <summary>Tray presence, global hotkeys, and the lifetime of everything else.</summary>
 public sealed class TrayApplicationContext : ApplicationContext
 {
-    private const int HotkeyPrev = 1, HotkeyNext = 2, HotkeyZones = 3, HotkeySpan = 4;
+    private const int HotkeyPrev = 1, HotkeyNext = 2, HotkeyZones = 3, HotkeySpan = 4,
+                      HotkeySettings = 5, HotkeyHandBack = 6;
 
     private readonly NotifyIcon tray;
     private readonly HotkeyWindow hotkeys;
@@ -85,7 +86,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             RefitBars();
         };
 
-        hotkeys = new HotkeyWindow(OnHotkey);
+        hotkeys = new HotkeyWindow(OnHotkey, StandDown);
         hotkeys.CreateControl();
 
         tray = new NotifyIcon
@@ -263,6 +264,17 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// clamped, no bars, snap and the minimise animation handed over. The zone layouts stay in the
     /// config, unenforced, so taking over again is one click rather than a rebuild.
     /// </summary>
+    /// <summary>
+    /// Another copy of ScweenSpit was run with --restore. That copy is about to put the machine
+    /// back, and this one would undo it within two seconds — the watchdog re-hides the taskbar for
+    /// as long as the setting says to. So this one stands down first.
+    /// </summary>
+    private void StandDown()
+    {
+        Log.Write("--restore from another copy; standing down");
+        if (config.HandedBack is null) HandBackToWindows(); else ApplyChanges();
+    }
+
     private void HandBackToWindows()
     {
         var before = new DisplayProfile { Name = "Before handing back" };
@@ -446,6 +458,22 @@ public sealed class TrayApplicationContext : ApplicationContext
             Taskbar.SetHidden(false);
         }
 
+        // Hiding the shell's taskbar is only ever a trade: ours instead of theirs. With no bar of
+        // ours on any display that is attached, it is not a trade — it is a machine with no taskbar
+        // at all, no notification area, and no way to reach this program by pointing at anything.
+        if (config.HideWindowsTaskbar && !AnyBarOnScreen())
+        {
+            Log.Write("not hiding the Windows taskbar: no ScweenSpit bar on any attached display");
+            Notify("Keeping the Windows taskbar: ScweenSpit has no bar on any display that is "
+                 + "attached, and hiding it would leave you with none at all.");
+
+            if (config.TaskbarRestore is not null) SystemRestore.Everything(config);
+            else if (!SystemRestore.Visible()) Taskbar.SetHidden(false);
+
+            taskbarWatch.Stop();
+            return;
+        }
+
         if (config.HideWindowsTaskbar)
         {
             if (config.TaskbarRestore is null)
@@ -489,6 +517,21 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         taskbarWatch.Stop();
         SystemRestore.OnSessionEnding(config);
+    }
+
+    /// <summary>
+    /// Whether a bar of ours would actually appear somewhere. Bars are configured per display by
+    /// the name Windows gives it, so a perfectly good configuration describes no bar at all once
+    /// the display it names has been unplugged.
+    /// </summary>
+    private bool AnyBarOnScreen()
+    {
+        if (!config.ShowBars || config.Bars.Count == 0) return false;
+
+        foreach (var geo in ZoneManager.AllMonitors())
+            if (config.Bars.ContainsKey(geo.Device)) return true;
+
+        return false;
     }
 
     /// <summary>The display with this device name, if it is still attached.</summary>
@@ -648,11 +691,30 @@ public sealed class TrayApplicationContext : ApplicationContext
                 & RegisterHotKey(hotkeys.Handle, HotkeyZones, mods, VK_Z)
                 & RegisterHotKey(hotkeys.Handle, HotkeySpan,  mods, VK_S);
 
+        // The two that have to work when nothing else does. Hiding the shell's taskbar takes the
+        // notification area with it, and a bar of ours needs a display it is configured for — so
+        // there are arrangements with no icon of ours anywhere on screen, and the settings window
+        // is then unreachable by pointing at anything. A keystroke needs nothing to be visible.
+        bool reachable = RegisterHotKey(hotkeys.Handle, HotkeySettings, mods, VK_HOME)
+                       & RegisterHotKey(hotkeys.Handle, HotkeyHandBack, mods, VK_END);
+
         if (!ok) Notify("Some Win+Alt hotkeys could not be registered (already in use).");
+
+        // Worth its own line in the log: if this is the arrangement with no icon on screen, this
+        // line is the difference between a machine that can be recovered and one that cannot.
+        Log.Write(reachable
+            ? "rescue hotkeys: Win+Alt+Home opens settings, Win+Alt+End hands back to Windows"
+            : "*** rescue hotkeys COULD NOT be registered; --restore is the way back ***");
+
+        if (!reachable)
+            Notify("Win+Alt+Home / Win+Alt+End are taken by something else. If ScweenSpit becomes "
+                 + "unreachable, run ScweenSpit.exe --restore.");
     }
 
     private void OnHotkey(int id)
     {
+        if (id == HotkeySettings) { OpenSettings(); return; }
+        if (id == HotkeyHandBack) { if (config.HandedBack is null) HandBackToWindows(); else TakeOverAgain(); return; }
         if (id == HotkeyZones) { overlay.Toggle(zones); return; }
 
         if (id == HotkeySpan)
@@ -702,6 +764,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeyNext);
             UnregisterHotKey(hotkeys.Handle, HotkeyZones);
             UnregisterHotKey(hotkeys.Handle, HotkeySpan);
+            UnregisterHotKey(hotkeys.Handle, HotkeySettings);
+            UnregisterHotKey(hotkeys.Handle, HotkeyHandBack);
 
             foregroundWatch.Dispose();
             ClaudeUsage.Stop();      // stops the poll loop before the process winds down
@@ -729,13 +793,16 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>Hidden window: RegisterHotKey needs an HWND and a WndProc to deliver WM_HOTKEY to.</summary>
-    private sealed class HotkeyWindow(Action<int> onHotkey) : NativeWindow
+    private sealed class HotkeyWindow(Action<int> onHotkey, Action onStandDown) : NativeWindow
     {
+        // Unparented on purpose. A message-only window would be tidier and would never receive the
+        // broadcast below, which is the entire reason this one exists.
         public void CreateControl() => CreateHandle(new CreateParams());
 
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == WM_HOTKEY) onHotkey((int)m.WParam);
+            else if (m.Msg != 0 && m.Msg == SystemRestore.StandDownMessage) onStandDown();
             base.WndProc(ref m);
         }
     }

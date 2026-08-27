@@ -172,6 +172,28 @@ stays a clean split — no gaps, no overlaps — and nothing can be squeezed bel
 
 Presets are still there (70/30, thirds, quadrants and so on) if you'd rather not fiddle.
 
+### When ScweenSpit cannot be reached
+
+Hiding the shell's taskbar takes the notification area with it, and a bar of ours needs a display it
+has been configured for. There are arrangements where neither is on screen — most easily by
+unplugging the display whose device name the bar was saved under — and then nothing can be reached
+by pointing at it.
+
+Three answers, in the order they are worth trying:
+
+- **Win+Alt+Home** opens the settings window. **Win+Alt+End** hands the machine back to Windows and
+  brings the taskbar with it. A keystroke needs nothing to be visible, which is the point; the log
+  says at startup whether they were registered, since something else may already own them.
+- ScweenSpit **will not hide the Windows taskbar** when it has no bar on any attached display. That
+  is not a trade of one taskbar for another, it is a machine with none, so it says so and keeps the
+  shell's.
+- `ScweenSpit.exe --restore` puts everything back without starting the app. It first asks any copy
+  already running to stand down — otherwise that copy's watchdog re-hides the taskbar within two
+  seconds and the rescue is undone before the message box has been read.
+
+Task Manager opens on Ctrl+Shift+Esc with no taskbar at all, and its **Run new task** will start
+that last one.
+
 ### Handing the machine back
 
 ScweenSpit changes things that outlive it: the shell's taskbar is hidden, its auto-hide state is
