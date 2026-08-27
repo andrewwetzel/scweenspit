@@ -254,6 +254,58 @@ public sealed class SettingsForm : Form
         startup.CheckedChanged += (_, _) => Startup.Set(startup.Checked);
         page.Controls.Add(startup);
 
+        page.Controls.Add(new Label
+        {
+            Text = "Installing", AutoSize = true, ForeColor = Theme.Text,
+            Font = Theme.Face(11f, FontStyle.Bold), Margin = new Padding(0, 20, 0, 2),
+        });
+
+        if (Installer.RunningInstalled)
+        {
+            page.Controls.Add(Theme.Caption(
+                $"Installed, and running from there.\n{Installer.InstalledExe}\n\n" +
+                "It is in the Start menu, and in Apps & features to remove."));
+        }
+        else
+        {
+            page.Controls.Add(Theme.Caption(
+                Installer.IsInstalled
+                    ? "Already installed, but this is not the installed copy. Installing again "
+                      + "replaces it with this one and restarts from there."
+                    : "Copies ScweenSpit into its own folder, puts it in the Start menu, and lists "
+                      + "it in Apps & features. Running it from the Downloads folder works, but "
+                      + "leaves nothing to start it by except finding that file again — and every "
+                      + "path it records, including the one it starts itself from at login, then "
+                      + "runs through Downloads."));
+
+            var install = Theme.Action("Install and restart from there", primary: true);
+            install.AutoSize = true;
+            install.Click += (_, _) =>
+            {
+                install.Enabled = false;
+                try
+                {
+                    var installed = Installer.Install();
+
+                    // Through the same handover an update uses: it waits for this process to let go
+                    // of the unpacked copy before starting its own.
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(installed)
+                    {
+                        Arguments = $"--replacing {Environment.ProcessId}",
+                        UseShellExecute = true,
+                    });
+                    quit();
+                }
+                catch (Exception ex)
+                {
+                    install.Enabled = true;
+                    Say(ex.Message, problem: true);
+                    Log.Write($"install failed: {ex}");
+                }
+            };
+            page.Controls.Add(install);
+        }
+
         var padding = Theme.Number(config.Padding, 0, 200, 2);
         padding.ValueChanged += (_, _) => { config.Padding = (int)padding.Value; Save(); };
         Row(page, "Gap around each zone (pixels)", padding);

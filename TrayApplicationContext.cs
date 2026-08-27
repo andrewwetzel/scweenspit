@@ -86,7 +86,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             RefitBars();
         };
 
-        hotkeys = new HotkeyWindow(OnHotkey, StandDown);
+        hotkeys = new HotkeyWindow(OnHotkey, StandDown, QuitForUninstall);
         hotkeys.CreateControl();
 
         tray = new NotifyIcon
@@ -194,6 +194,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             Checked = config.AutoClamp && hook.Running,
         });
+        items.Add(SwitchMenu());
         items.Add(new ToolStripMenuItem("Exclude active window's app", null, (_, _) => ExcludeActiveApp()));
         items.Add(new ToolStripSeparator());
 
@@ -209,6 +210,44 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem("Exit", null, (_, _) => { tray.Visible = false; ExitThread(); }));
+    }
+
+    /// <summary>
+    /// The individual switches, so standing part of ScweenSpit down does not mean opening a window
+    /// to do it. Handing back the whole machine is one item further down; this is for the times when
+    /// only one thing is in the way.
+    /// </summary>
+    private ToolStripMenuItem SwitchMenu()
+    {
+        var menu = new ToolStripMenuItem("Switches");
+        Theme.Dress(menu.DropDown);
+
+        void Add(string label, bool on, Action<bool> set, string? hint = null) =>
+            menu.DropDownItems.Add(new ToolStripMenuItem(label, null, (_, _) =>
+            {
+                set(!on);
+                config.Save();
+                ApplyChanges();
+            })
+            {
+                Checked = on,
+                ToolTipText = hint,
+            });
+
+        Add("Clamp maximised windows to zones", config.AutoClamp, v => config.AutoClamp = v);
+        Add("Drag windows into zones", config.DragToZone, v => config.DragToZone = v);
+        Add("Keep windows on one display", config.KeepOnOneDisplay, v => config.KeepOnOneDisplay = v);
+        menu.DropDownItems.Add(new ToolStripSeparator());
+
+        Add("Show ScweenSpit's taskbar", config.ShowBars, v => config.ShowBars = v);
+        Add("Hide the Windows taskbar", config.HideWindowsTaskbar, v => config.HideWindowsTaskbar = v,
+            "Kept on when ScweenSpit has no bar of its own on any attached display.");
+        menu.DropDownItems.Add(new ToolStripSeparator());
+
+        Add("Suppress Windows snap", config.SuppressWindowsSnap, v => config.SuppressWindowsSnap = v);
+        Add("Stop the minimise animation", config.StopMinimiseAnimation, v => config.StopMinimiseAnimation = v);
+
+        return menu;
     }
 
     /// <summary>
@@ -269,6 +308,17 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// back, and this one would undo it within two seconds — the watchdog re-hides the taskbar for
     /// as long as the setting says to. So this one stands down first.
     /// </summary>
+    /// <summary>
+    /// Asked to go away by a copy being uninstalled. An uninstall that reports success while the
+    /// program is still running, still hiding the taskbar, is not an uninstall.
+    /// </summary>
+    private void QuitForUninstall()
+    {
+        Log.Write("asked to quit by an uninstall");
+        tray.Visible = false;
+        ExitThread();
+    }
+
     private void StandDown()
     {
         Log.Write("--restore from another copy; standing down");
@@ -793,7 +843,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>Hidden window: RegisterHotKey needs an HWND and a WndProc to deliver WM_HOTKEY to.</summary>
-    private sealed class HotkeyWindow(Action<int> onHotkey, Action onStandDown) : NativeWindow
+    private sealed class HotkeyWindow(Action<int> onHotkey, Action onStandDown, Action onQuit) : NativeWindow
     {
         // Unparented on purpose. A message-only window would be tidier and would never receive the
         // broadcast below, which is the entire reason this one exists.
@@ -803,6 +853,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             if (m.Msg == WM_HOTKEY) onHotkey((int)m.WParam);
             else if (m.Msg != 0 && m.Msg == SystemRestore.StandDownMessage) onStandDown();
+            else if (m.Msg != 0 && m.Msg == SystemRestore.QuitMessage) onQuit();
             base.WndProc(ref m);
         }
     }

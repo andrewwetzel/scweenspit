@@ -23,6 +23,12 @@ public static class SystemRestore
     public static readonly uint StandDownMessage = Native.RegisterWindowMessage("ScweenSpit.StandDown");
 
     /// <summary>
+    /// Broadcast by a copy being uninstalled. Standing down is not enough there: the program is
+    /// being removed, and an uninstall that reports success while it is still running is a lie.
+    /// </summary>
+    public static readonly uint QuitMessage = Native.RegisterWindowMessage("ScweenSpit.Quit");
+
+    /// <summary>
     /// Undoes whatever <paramref name="config"/> records as outstanding, and clears the records it
     /// managed to act on. Returns the number of changes put back.
     /// </summary>

@@ -30,6 +30,24 @@ It downloads through `curl.exe` (in System32 since Windows 10 1803), falling bac
 Keep the file wherever you like: **Start with Windows** registers *it*, not the unpacked copy, so it
 re-checks the runtime and repairs the unpacked app on every login.
 
+## Installing
+
+**Settings → General → Install and restart from there.** ScweenSpit copies itself into
+`%LOCALAPPDATA%\Programs\ScweenSpit`, puts an entry in the Start menu, lists itself in Apps &
+features, and restarts from the new location.
+
+Running the downloaded file works and always has. What it costs is everything that follows from
+where that file happens to be: nothing to start it by except finding it again, a name like
+`ScweenSpit (5).exe` after the fifth download, and every path the program records — the run-at-login
+entry, the file an update replaces — pointing through the Downloads folder. That last one is not
+hypothetical: a run-at-login entry left pointing at a months-old download starts a months-old
+version at every login, and it holds the single-instance lock against the one you just downloaded.
+
+Removing it from Apps & features hands the machine back first — taskbar, snap, animation — then
+stops whatever is running, takes away the Start menu entry and the run-at-login entry, and removes
+both folders it put on disk. The configuration is left where it is: it is yours, it lives elsewhere,
+and reinstalling should find it.
+
 ## Build
 
 The .NET 8 SDK is all you need — and thanks to `EnableWindowsTargeting`, the project compiles
@@ -78,6 +96,11 @@ carry everything when the Windows taskbar is hidden, since there is nothing else
 **Layout for this display** switches the split on whichever display the pointer is on, with the
 current one ticked. A layout dragged into shape matches no preset, so it says *Custom* and how many
 zones it has rather than leaving nothing ticked, which reads as a menu that does not know.
+
+**Switches** is every setting worth reaching in a hurry — clamping, drag-to-zone, keeping windows on
+one display, either taskbar, snap, the minimise animation — each a tick you can turn off without
+opening a window to do it. Standing one thing down is a smaller ask than handing back the whole
+machine, and it used to need the settings window either way.
 
 **Drag zone dividers** puts the layout on screen with the dividers grabbable — the same editor
 the settings window opens, without having to find the settings window first, which on a machine

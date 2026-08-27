@@ -68,11 +68,20 @@ internal static class Program
         // Before the single-instance check, and before anything else: this exists for the machine
         // whose taskbar is missing, and the copy that hid it may still be running or may be long
         // gone. Either way there is nothing to coordinate with — it only puts settings back.
-        if (Environment.GetCommandLineArgs().Any(a =>
-                a.Equals("--restore", StringComparison.OrdinalIgnoreCase)))
+        var args = Environment.GetCommandLineArgs();
+
+        if (args.Any(a => a.Equals("--restore", StringComparison.OrdinalIgnoreCase)))
         {
             ApplicationConfiguration.Initialize();
             SystemRestore.RunFromCommandLine();
+            return;
+        }
+
+        // Run by Apps & Features. Puts the machine back before removing the program that changed it.
+        if (args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
+        {
+            ApplicationConfiguration.Initialize();
+            Installer.Uninstall();
             return;
         }
 
