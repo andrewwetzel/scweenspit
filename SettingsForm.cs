@@ -677,6 +677,13 @@ public sealed class SettingsForm : Form
                 "No effect on Windows 11 build 26200 and later: the menu's window can be moved, and " +
                 "reports its new position afterwards, but what is drawn stays where the shell put it."));
 
+            var machine = Theme.Toggle("Show this machine's load (CPU, RAM, disk)", settings.ShowMachine);
+            machine.CheckedChanged += (_, _) => { settings.ShowMachine = machine.Checked; Save(); };
+            page.Controls.Add(machine);
+            page.Controls.Add(Theme.Caption(
+                "Processor and memory as they are now, and how full the system drive is. Hover for " +
+                "the figures in full; clicking opens Task Manager."));
+
             var previews = Theme.Toggle("Live previews on hover", settings.ShowPreviews);
             previews.CheckedChanged += (_, _) => { settings.ShowPreviews = previews.Checked; Save(); };
             page.Controls.Add(previews);

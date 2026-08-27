@@ -12,7 +12,7 @@ public sealed class BarManager : IDisposable
     private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
                                            bool IconsOnly, bool ShowStatus, bool ShowUsage,
                                            int? Zone, bool Floating, int FloatMargin, int SideGap,
-                                           int EdgeGap, bool ShowStartButton, bool ShowPreviews);
+                                           int EdgeGap, bool ShowStartButton, bool ShowPreviews, bool ShowMachine);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
@@ -78,7 +78,7 @@ public sealed class BarManager : IDisposable
                                      settings.IconsOnly, settings.ShowStatus, settings.ShowUsage,
                                      settings.Zone, settings.Floating, settings.FloatMargin,
                                      settings.SideGap, settings.EdgeGap, settings.ShowStartButton,
-                                     settings.ShowPreviews);
+                                     settings.ShowPreviews, settings.ShowMachine);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 

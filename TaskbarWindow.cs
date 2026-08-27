@@ -79,7 +79,12 @@ public sealed class TaskbarWindow : Form
     private int hovered = -1, hoveredStatus = -1;
     private bool hoveredStart;
     private bool hoveredUsage;
-    private long lastStatusPoll;
+    private bool hoveredMachine;
+    private long lastStatusPoll, lastMachinePoll;
+
+    /// <summary>The machine's last reading. Kept, because the processor figure is a rate: asking for
+    /// it at paint time would difference two readings a few milliseconds apart and report noise.</summary>
+    private IReadOnlyList<Meter> machine = [];
 
     private (int Percent, bool Charging)? battery;
     private (int Percent, bool Muted)? volume;
@@ -302,6 +307,15 @@ public sealed class TaskbarWindow : Form
             link = SystemStatus.Link();
         }
 
+        // On its own schedule, and only while it is being shown: the processor figure is the
+        // difference between consecutive readings, so how often it is taken decides what it means.
+        // Two seconds is slow enough to read and long enough to average a spike into something true.
+        if (MachineVisible && now - lastMachinePoll > 2000)
+        {
+            lastMachinePoll = now;
+            machine = MachineLoad.Read();
+        }
+
         Invalidate();
     }
 
@@ -334,11 +348,13 @@ public sealed class TaskbarWindow : Form
     /// with no hint that anything further is needed. The strip renders its own unconfigured state.
     /// </summary>
     private bool UsageVisible => settings.ShowUsage;
+    private bool MachineVisible => settings.ShowMachine;
 
     private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
+    private int MachineExtent => MachineVisible ? MeterStrip.Extent(Vertical) : 0;
 
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => UsageExtent + TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent => UsageExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
@@ -347,9 +363,15 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, StatusStart, Width, UsageExtent)
         : new Rectangle(StatusStart, 0, UsageExtent, Height);
 
+    private Rectangle MachineArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent, Width, MachineExtent)
+        : new Rectangle(StatusStart + UsageExtent, 0, MachineExtent, Height);
+
+    private int TrayStart => StatusStart + UsageExtent + MachineExtent;
+
     private Rectangle TrayAt(int index) => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + index * StatusIcon, Width, StatusIcon)
-        : new Rectangle(StatusStart + UsageExtent + index * StatusIcon, 0, StatusIcon, Height);
+        ? new Rectangle(0, TrayStart + index * StatusIcon, Width, StatusIcon)
+        : new Rectangle(TrayStart + index * StatusIcon, 0, StatusIcon, Height);
 
     private Rectangle ClockArea => Vertical
         ? new Rectangle(0, Height - ClockExtent, Width, ClockExtent)
@@ -546,20 +568,24 @@ public sealed class TaskbarWindow : Form
 
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
+        bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
-        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage && start == hoveredStart) return;
+        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
+            && load == hoveredMachine && start == hoveredStart) return;
 
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
+        hoveredMachine = load;
         hoveredStart = start;
-        Cursor = under >= 0 || tray >= 0 || usage || start ? Cursors.Hand : Cursors.Default;
+        Cursor = under >= 0 || tray >= 0 || usage || load || start ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
         // like: five pixels of colour cannot say which limit it is, or when it resets. A button
         // showing a preview needs no tooltip — and would otherwise show both at once.
         bool previewing = Previewable(under);
         tips.SetToolTip(this, start ? "Start"
+                            : load ? MachineTip()
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
                             : under >= 0 && under < buttons.Count && !previewing ? Describe(buttons[under])
@@ -603,6 +629,10 @@ public sealed class TaskbarWindow : Form
                      monitor.Bounds, settings.Floating ? Math.Max(4, settings.FloatMargin) : 4);
     }
 
+    /// <summary>The machine's reading in words, where the figures beside the bars cannot fit.</summary>
+    private string MachineTip() =>
+        machine.Count == 0 ? "This machine — reading…" : string.Join(Environment.NewLine, machine.Select(m => m.Detail));
+
     private static string Describe(Button b) => b.Windows.Count switch
     {
         0 => $"{b.Label}  (not running)",
@@ -630,6 +660,7 @@ public sealed class TaskbarWindow : Form
         hovered = hoveredStatus = -1;
         hoveredStart = false;
         hoveredUsage = false;
+        hoveredMachine = false;
 
         // The preview closes itself once the pointer is over neither it nor the button: leaving the
         // bar is how you reach it, so a leave here cannot mean it is finished with.
@@ -668,6 +699,13 @@ public sealed class TaskbarWindow : Form
                 case Tray.Network: SystemStatus.Open("ms-settings:network"); break;
                 case Tray.Battery: SystemStatus.Open("ms-settings:batterysaver"); break;
             }
+            return;
+        }
+
+        if (MachineVisible && MachineArea.Contains(e.Location))
+        {
+            // Task Manager is where anyone would go next, and it opens with no taskbar at all.
+            SystemStatus.Open("taskmgr.exe");
             return;
         }
 
@@ -925,6 +963,13 @@ public sealed class TaskbarWindow : Form
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
             UsageStrip.Paint(g, strip, ClaudeUsage.Current);
+        }
+
+        if (MachineVisible)
+        {
+            var strip = MachineArea;
+            if (hoveredMachine) g.FillRectangle(hot, strip);
+            MeterStrip.Paint(g, strip, machine);
         }
 
         var items = TrayItems();

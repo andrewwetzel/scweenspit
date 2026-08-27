@@ -127,6 +127,12 @@ public sealed class BarSettings
     /// </summary>
     public bool ShowPreviews { get; set; } = true;
 
+    /// <summary>
+    /// The machine's own load beside the Claude limits: processor, memory, and how full the system
+    /// drive is. Off by default — a taskbar is not a monitoring tool unless asked to be.
+    /// </summary>
+    public bool ShowMachine { get; set; }
+
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
 

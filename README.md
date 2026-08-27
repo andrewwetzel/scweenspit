@@ -409,7 +409,22 @@ taskbar is hidden: it would otherwise be the one window with no way back to it.
 
 The Start glyph is drawn into the same box an application icon gets, at the same size, so the row
 reads as one row — a couple of pixels out of line is invisible anywhere else on a bar and obvious
-here. It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
+here. Beside the clock, the status cluster can carry two stacks of labelled bars. **Claude usage** is the
+limits from claude.ai — Session, Weekly, and the per-model one — each named, because three tracks
+and three percentages cannot say which limit is which, and the one that matters is usually not the
+fullest. **This machine's load** is the processor, memory, and how full the system drive is.
+
+Processor time is the awkward one: Windows reports totals since boot, so a rate only exists as the
+difference between two readings, and how often it is taken decides what the number means. It is
+taken every two seconds — slow enough to read, and long enough to average a spike into something
+true — and only while it is on screen. Kernel time already includes idle time, so the two totals
+together are elapsed rather than busy, and busy is what is left of one after the other.
+
+Disk is how full, not how busy: activity needs a performance counter, which is a package this has no
+other reason to take on, and how full is the one of the two that strands you. Hovering gives all
+three in full, and clicking opens Task Manager.
+
+It shows one icon per application, the way a Plasma task manager does — six Chrome windows are one
 thing you switch to, not six. The underline splits into a segment per open window, so a glance says
 both *running* and *how many*, and clicking walks through them rather than always raising the same
 one. A single window still toggles: raise it, click again to put it away.

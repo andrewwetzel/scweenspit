@@ -346,6 +346,28 @@ public static class Native
         finally { CloseHandle(handle); }
     }
 
+    // ---- machine load ------------------------------------------------------
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILETIME { public uint Low, High; }
+
+    /// <summary>Totals since boot. A rate comes from the difference between two readings.</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetSystemTimes(out FILETIME idle, out FILETIME kernel, out FILETIME user);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys;
+        public ulong ullTotalPageFile, ullAvailPageFile;
+        public ulong ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX buffer);
+
     // ---- animation ---------------------------------------------------------
     [StructLayout(LayoutKind.Sequential)]
     public struct ANIMATIONINFO { public uint cbSize; public int iMinAnimate; }
