@@ -152,10 +152,14 @@ reports several changes while it settles and everything downstream touches windo
 profile matches, the bars are re-applied: a display may have gone, and a bar reserving space on it
 has to go with it.
 
-Undocking to an arrangement with nothing saved for it leaves the settings alone — including a hidden
-taskbar, which on a laptop with nowhere else to go is the difference between a working machine and
-one you cannot reach anything from. So it says so, because the setting that fixes it is two clicks
-away and impossible to guess.
+Changing to an arrangement with nothing saved for it **stands ScweenSpit down** rather than carrying
+on. Carrying on is the unsafe direction: zones measured against a display that has been unplugged, a
+bar reserving space on it, and the shell's taskbar hidden in favour of one that is no longer
+anywhere. Standing down is always recoverable; being stranded on a laptop panel is not.
+
+Nothing is thrown away — the layouts stay, unenforced — and the arrangement it stood down *from* is
+remembered, so plugging the display back in picks up exactly where it left off. Saving a profile for
+an arrangement settles the question more firmly than any of this, and takes precedence.
 
 ### Keeping windows on one display
 

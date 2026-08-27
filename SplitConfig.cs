@@ -219,6 +219,22 @@ public sealed class SplitConfig
     /// </summary>
     public DisplayProfile? HandedBack { get; set; }
 
+    /// <summary>
+    /// The display arrangement ScweenSpit was in when it handed back, so plugging that monitor back
+    /// in picks up where it left off. Without this, undocking hands back safely and re-docking
+    /// leaves it handed back — which is safe and also useless.
+    /// </summary>
+    public string? HandedBackFrom { get; set; }
+
+    /// <summary>
+    /// Hand the machine back when the displays change to an arrangement with nothing saved for it.
+    ///
+    /// The unsafe direction is the automatic one: zones measured against a monitor that has been
+    /// unplugged, a bar reserving space on it, and the shell's taskbar hidden in favour of one that
+    /// is no longer anywhere. Handing back is always recoverable; being stranded is not.
+    /// </summary>
+    public bool HandBackOnUnknownDisplays { get; set; } = true;
+
     /// <summary>Master switch for the automatic maximize / borderless-fullscreen clamp.</summary>
     public bool AutoClamp { get; set; } = true;
 
@@ -592,6 +608,8 @@ public sealed class SplitConfig
         // config claiming to be older than the values it now holds and migrating them twice.
         Version = o.Version;
         HandedBack = o.HandedBack;
+        HandedBackFrom = o.HandedBackFrom;
+        HandBackOnUnknownDisplays = o.HandBackOnUnknownDisplays;
         AutoClamp = o.AutoClamp;
         DebounceMs = o.DebounceMs;
         Padding = o.Padding;

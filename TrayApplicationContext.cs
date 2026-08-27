@@ -325,11 +325,22 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (config.HandedBack is null) HandBackToWindows(); else ApplyChanges();
     }
 
-    private void HandBackToWindows()
+    /// <summary>
+    /// Stands everything down without throwing it away. <paramref name="returnTo"/> is the display
+    /// arrangement to pick up again in, when this is the displays changing rather than a decision.
+    /// </summary>
+    private void HandBackToWindows(string? returnTo = null)
     {
-        var before = new DisplayProfile { Name = "Before handing back" };
-        before.CaptureFrom(config);
-        config.HandedBack = before;
+        // Idempotent, or the second call captures the handed-back state as "what was on before" and
+        // taking over again would restore nothing at all.
+        if (config.HandedBack is null)
+        {
+            var before = new DisplayProfile { Name = "Before handing back" };
+            before.CaptureFrom(config);
+            config.HandedBack = before;
+        }
+
+        config.HandedBackFrom = returnTo;
 
         DisplayProfile.HandsOff().ApplyTo(config);
         config.Save();
@@ -345,6 +356,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         before.ApplyTo(config);
         config.HandedBack = null;
+        config.HandedBackFrom = null;
         config.Save();
         ApplyChanges();
 
@@ -595,33 +607,71 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void DisplaysChanged()
     {
         var now = DisplayTopology.Signature();
+        var was = topology;
         bool different = now != topology;
         topology = now;
 
         Log.Write($"displays now {now} — {DisplayTopology.Describe()}");
 
-        if (different && config.FollowDisplayChanges && config.Profiles.TryGetValue(now, out var profile))
+        if (different) Decide(now, was);
+
+        // Whether or not anything above matched: a display may have gone, and a bar reserving space
+        // on it has to go with it. Nothing else in the app watches for that.
+        ApplyChanges();
+    }
+
+    /// <summary>
+    /// What a change of displays means. In order of how much the user has said about it: an
+    /// arrangement they saved settings for, the one they were in when ScweenSpit last stood down,
+    /// then anything else.
+    /// </summary>
+    private void Decide(string now, string was)
+    {
+        // Back where we handed back from — the monitor is plugged in again. Picking up is the whole
+        // point of having recorded it; leaving it stood down would be safe and useless.
+        if (config.HandedBack is not null && now == config.HandedBackFrom)
+        {
+            TakeOverAgain();
+            return;
+        }
+
+        if (config.FollowDisplayChanges && config.Profiles.TryGetValue(now, out var profile))
         {
             profile.ApplyTo(config);
+
+            // The user said what this arrangement should look like, which settles the question more
+            // firmly than anything ScweenSpit decided on its own.
+            config.HandedBack = null;
+            config.HandedBackFrom = null;
+
             config.Save();
             Notify($"Switched to {profile.Name ?? now}.");
             Log.Write($"applied profile for {now}");
+            return;
         }
-        else if (different && config.HideWindowsTaskbar)
+
+        // Nothing saved for this arrangement. The automatic direction is the unsafe one: zones
+        // measured against a monitor that has been unplugged, a bar reserving space on it, and the
+        // shell's taskbar hidden in favour of one that is no longer anywhere. Stand down instead —
+        // that is always recoverable, and being stranded on a laptop panel is not.
+        if (config.HandBackOnUnknownDisplays)
         {
-            // Nothing saved for this arrangement, and the shell's taskbar is still hidden — which on
-            // a laptop that has just been undocked is the whole screen's worth of difference between
-            // a working machine and one with no way to reach anything. Say so, because the setting
-            // that fixes it is two clicks away and impossible to guess.
+            bool already = config.HandedBack is not null;
+            HandBackToWindows(returnTo: was);
+
+            if (!already)
+                Notify("Displays changed, so ScweenSpit stood down. Plug the display back in to pick "
+                     + "up again, or use Take ScweenSpit's settings back up.");
+            return;
+        }
+
+        if (config.HideWindowsTaskbar)
+        {
             Notify(config.FollowDisplayChanges
                 ? "New display arrangement. Save settings for it in Settings \u2192 Displays."
                 : "Displays changed. Following them is switched off in Settings \u2192 Displays.");
             Log.Write($"no profile for {now}; settings left as they are");
         }
-
-        // Whether or not a profile matched: a display may have gone, and a bar reserving space on it
-        // has to go with it. Nothing else in the app watches for that.
-        ApplyChanges();
     }
 
     /// <summary>Moves windows out from under any bar that has taken space they were occupying.</summary>

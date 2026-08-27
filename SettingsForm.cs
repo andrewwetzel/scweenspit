@@ -1093,6 +1093,16 @@ public sealed class SettingsForm : Form
         follow.CheckedChanged += (_, _) => { config.FollowDisplayChanges = follow.Checked; Save(); };
         page.Controls.Add(follow);
 
+        var standDown = Theme.Toggle("Stand down when the displays change to something unsaved",
+                                     config.HandBackOnUnknownDisplays);
+        standDown.CheckedChanged += (_, _) => { config.HandBackOnUnknownDisplays = standDown.Checked; Save(); };
+        page.Controls.Add(standDown);
+        page.Controls.Add(Theme.Caption(
+            "Unplug a monitor and ScweenSpit hands the machine back rather than carrying on with " +
+            "zones measured against a display that has gone, a bar reserving space on it, and the " +
+            "Windows taskbar hidden in favour of one that is nowhere. Plug the display back in and " +
+            "it picks up exactly where it left off. Nothing is thrown away either way."));
+
         bool saved = config.Profiles.ContainsKey(signature);
 
         var name = new TextBox
