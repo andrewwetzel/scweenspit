@@ -425,6 +425,16 @@ limits from claude.ai — Session, Weekly, and the per-model one — each named,
 and three percentages cannot say which limit is which, and the one that matters is usually not the
 fullest. **This machine's load** is the processor, memory, and how full the system drive is.
 
+A poll that comes back wrong retries in seconds rather than waiting out the interval, backing off to
+it over a few attempts. Coming out of sleep or on to a different network fails once and then works,
+and waiting three minutes to discover that leaves a wrong answer on screen for three minutes — so it
+also asks for a fresh reading when the machine resumes or the network changes.
+
+A single refusal is not called an expired key. The same 401 comes back from a connection that has
+not finished coming up, and announcing an expiry over that sends people to re-paste a key that was
+never wrong. It takes two in a row, seconds apart, and anything asked for explicitly starts that
+count again.
+
 Processor time is the awkward one: Windows reports totals since boot, so a rate only exists as the
 difference between two readings, and how often it is taken decides what the number means. It is
 taken every two seconds — slow enough to read, and long enough to average a spike into something

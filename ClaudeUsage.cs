@@ -13,7 +13,15 @@ public sealed record UsageLimit(string Label, int Percent, DateTimeOffset? Reset
 /// The result of the last poll. An empty <see cref="Limits"/> with no <see cref="Error"/> means we
 /// have not managed a first read yet, which the strip draws as a placeholder rather than as zero.
 /// </summary>
-public sealed record UsageReading(IReadOnlyList<UsageLimit> Limits, string? Error, bool NeedsKey);
+public sealed record UsageReading(IReadOnlyList<UsageLimit> Limits, string? Error, bool NeedsKey,
+                                 bool Transient = false)
+{
+    /// <summary>
+    /// Something being waited on rather than something wrong. A red "error" on the bar for a
+    /// connection that has not finished coming back is a lie about a machine that is fine.
+    /// </summary>
+    public bool Settled => !Transient;
+}
 
 /// <summary>
 /// Reads claude.ai usage limits for the strip the bar draws.
@@ -125,6 +133,8 @@ public static class ClaudeUsage
             life = new CancellationTokenSource();
             var token = life.Token;
             _ = Task.Run(() => Loop(token), token);
+
+            Listen();
         }
     }
 
@@ -191,6 +201,11 @@ public static class ClaudeUsage
     {
         // The flag as well as the signal: a request arriving while Poll is already running would
         // otherwise be lost, and saving a key would appear to do nothing for three minutes.
+        // A fresh judgement, not a continuation of a failing streak: an explicit request — a new key,
+        // "Check now", waking up — should need its own two rejections before anything is called
+        // expired, or one stale failure decides the answer to a question just asked.
+        failures = 0;
+
         wakeWanted = true;
         nudge?.TrySetResult();
     }
@@ -244,9 +259,57 @@ public static class ClaudeUsage
             life = null;
             enabled = false;
         }
+
+        if (!listening) return;
+        listening = false;
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerChanged;
+    }
+
+    private static bool listening;
+
+    /// <summary>
+    /// Asks for a poll when the machine comes back, rather than waiting out an interval that started
+    /// before it went away. Coming out of sleep or on to a different network is exactly when the
+    /// last reading is both stale and wrong, and it is the moment somebody looks at the bar.
+    /// </summary>
+    private static void Listen()
+    {
+        if (listening) return;
+        listening = true;
+
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerChanged;
+    }
+
+    private static void OnNetworkChanged(object? sender, EventArgs e)
+    {
+        Log.Write("usage: the network changed; asking for a fresh reading");
+        Refresh();
+    }
+
+    private static void OnPowerChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
+        Log.Write("usage: resumed; asking for a fresh reading");
+        Refresh();
     }
 
     // ---- polling -----------------------------------------------------------
+
+    /// <summary>
+    /// How many polls in a row have come back wrong. Resets on the first that does not.
+    /// </summary>
+    private static int failures;
+
+    /// <summary>
+    /// How long to wait after a failed poll. Not the configured interval: coming back from sleep or
+    /// on to a different network fails once and then works, and waiting three minutes to discover
+    /// that leaves a wrong answer on screen for three minutes. Backs off to the interval so a
+    /// genuinely dead connection is not asked every ten seconds all afternoon.
+    /// </summary>
+    private static int RetrySeconds(int interval) =>
+        Math.Min(interval, failures switch { <= 1 => 10, 2 => 30, 3 => 60, _ => interval });
 
     private static async Task Loop(CancellationToken token)
     {
@@ -260,11 +323,13 @@ public static class ClaudeUsage
                 // The loop must outlive any single failure: a bar that stops updating looks broken
                 // in a way that a bar showing a stale figure does not.
                 Log.Write($"claude usage poll failed: {ex.Message}");
-                current = new UsageReading([], "Could not read usage", false);
+                Failed(new UsageReading([], "Could not read usage", false));
             }
 
             int seconds;
             lock (gate) seconds = Math.Clamp(settings?.RefreshSeconds ?? 180, 30, 3600);
+
+            if (failures > 0) seconds = RetrySeconds(seconds);
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             nudge = wake;
@@ -314,7 +379,7 @@ public static class ClaudeUsage
         }
 
         var reply = Get($"{Origin}/api/organizations/{org}/usage", key!, org);
-        if (reply is null) { current = new UsageReading([], "claude.ai unreachable", false); return; }
+        if (reply is null) { Failed(new UsageReading([], "claude.ai unreachable", false)); return; }
 
         // Only from a reply that worked: an authentication failure can carry a session cookie of
         // its own, and adopting that would overwrite the user's good key with a rejected one -
@@ -324,7 +389,7 @@ public static class ClaudeUsage
         if (reply.Status is 401 or 403)
         {
             Log.WriteOnce($"usage-{reply.Status}", $"usage: claude.ai rejected the key ({reply.Status})");
-            current = new UsageReading([], "Session key expired", true);
+            Rejected();
             return;
         }
 
@@ -332,11 +397,34 @@ public static class ClaudeUsage
         {
             // A 404 here usually means the stored org is stale — drop it so the next poll re-resolves.
             if (reply.Status == 404) lock (gate) { if (settings is not null) settings.OrgId = null; }
-            current = new UsageReading([], $"claude.ai returned {reply.Status}", false);
+            Failed(new UsageReading([], $"claude.ai returned {reply.Status}", false));
             return;
         }
 
+        failures = 0;
         current = Parse(reply.Body, weekly, model);
+    }
+
+    /// <summary>Records a failed poll and shows what it was, so the retry gets shorter.</summary>
+    private static void Failed(UsageReading reading)
+    {
+        failures++;
+        current = reading;
+    }
+
+    /// <summary>
+    /// claude.ai refused the key. Not conclusive on its own: the same 401 comes back from a network
+    /// that has not finished connecting, and announcing an expired key over that sends people to
+    /// re-paste one that was never wrong. Said out loud only once it has happened twice, and until
+    /// then the retry is seconds away rather than an interval.
+    /// </summary>
+    private static void Rejected()
+    {
+        failures++;
+
+        current = failures >= 2
+            ? new UsageReading([], "Session key expired", true)
+            : new UsageReading([], "claude.ai refused the key once; checking again shortly", false, Transient: true);
     }
 
     /// <summary>
@@ -349,11 +437,11 @@ public static class ClaudeUsage
     private static string? ResolveOrg(string key)
     {
         var listing = Get($"{Origin}/api/organizations", key);
-        if (listing is null) { current = new UsageReading([], "claude.ai unreachable", false); return null; }
+        if (listing is null) { Failed(new UsageReading([], "claude.ai unreachable", false)); return null; }
 
         if (listing.Status is 401 or 403)
         {
-            current = new UsageReading([], "Session key expired", true);
+            Rejected();
             return null;
         }
 

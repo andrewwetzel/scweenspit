@@ -49,7 +49,7 @@ internal static class UsageStrip
 
         var (text, colour) = reading is { NeedsKey: true }
             ? (ClaudeUsage.HasKey ? "expired" : "set up", Theme.Accent)
-            : reading is { Error: not null } ? ("error", MeterStrip.High)
+            : reading is { Error: not null, Settled: true } ? ("error", MeterStrip.High)
             : ("···", Theme.Muted);
 
         int width = Math.Max(16, area.Width - 12);
