@@ -21,6 +21,7 @@ public static class Native
     // ---- window styles -----------------------------------------------------
     public const int GWL_STYLE   = -16;
     public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TOPMOST = 0x00000008;
 
     public const long WS_CAPTION       = 0x00C00000L;
     public const long WS_THICKFRAME    = 0x00040000L;

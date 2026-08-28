@@ -97,6 +97,17 @@ carry everything when the Windows taskbar is hidden, since there is nothing else
 current one ticked. A layout dragged into shape matches no preset, so it says *Custom* and how many
 zones it has rather than leaving nothing ticked, which reads as a menu that does not know.
 
+**Put windows back where they were** returns every window ScweenSpit has moved to the size and place
+it was when it first touched it, maximised ones included. Standing down otherwise stops new windows
+being put into zones and leaves every window already in one exactly where it is, which is not "back
+to normal" by any reading of it — so handing back does this too.
+
+**Drop always-on-top from every window** is for the leftovers of a run that was killed. A window
+raised over the taskbar and never lowered again stays above everything, no later run has any record
+of it, and the symptom — an application that will not come forward until whatever covers it is
+minimised — gives no hint of the cause. Not automatic, because a window somebody pinned on purpose
+looks exactly the same from here.
+
 **Switches** is every setting worth reaching in a hurry — clamping, drag-to-zone, keeping windows on
 one display, either taskbar, snap, the minimise animation — each a tick you can turn off without
 opening a window to do it. Standing one thing down is a smaller ask than handing back the whole

@@ -323,6 +323,87 @@ public sealed class WinEventHookService : IDisposable
     /// </summary>
     public int ArrangeOverlapping(RECT area) => Arrange(area);
 
+    // ---- putting windows back ----------------------------------------------
+
+    /// <summary>
+    /// What each window looked like before ScweenSpit first moved it, so standing down can put it
+    /// back. Only the first sighting is kept: every clamp after that is a rectangle of ours, and
+    /// recording those would hand back a zone.
+    /// </summary>
+    private readonly ConcurrentDictionary<IntPtr, (RECT Rect, bool Maximised)> beforeUs = new();
+
+    private void Remember(IntPtr hWnd)
+    {
+        if (beforeUs.ContainsKey(hWnd)) return;
+        if (!GetWindowRect(hWnd, out var rect)) return;
+
+        // Maximised is worth its own bit: a maximised window's rectangle is the whole display plus
+        // its invisible border, and putting that back as a plain rectangle gives a window that looks
+        // maximised, is not, and has its edges hanging off the screen.
+        beforeUs[hWnd] = (rect, ZoneManager.IsMaximized(hWnd));
+    }
+
+    /// <summary>
+    /// Puts every window we moved back the size and place it was. Returns how many were still there
+    /// to put back.
+    ///
+    /// This is what standing down means to somebody looking at the screen. Turning off the clamp
+    /// stops new windows being placed in zones and leaves every window already in one exactly where
+    /// it is — which is not "back to normal" by any reading of it.
+    /// </summary>
+    public int PutWindowsBack()
+    {
+        int moved = 0;
+
+        foreach (var (hWnd, was) in beforeUs)
+        {
+            if (!IsWindow(hWnd) || !IsWindowVisible(hWnd)) continue;
+
+            Touch(hWnd);
+
+            // Always-on-top goes with it. A window we raised over the taskbar and then left there
+            // is the one that cannot be brought to the front by clicking anything.
+            if ((GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+                ZoneManager.SetTopmost(hWnd, false);
+
+            if (was.Maximised) ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+            else if (!ZoneManager.ClampToZone(hWnd, was.Rect)) continue;
+
+            lastNormal.TryRemove(hWnd, out _);
+            moved++;
+        }
+
+        beforeUs.Clear();
+        Log.Write($"put {moved} window(s) back where they were");
+        return moved;
+    }
+
+    /// <summary>
+    /// Takes always-on-top off every ordinary window that has it, and reports how many.
+    ///
+    /// For the leftovers of a run that was killed: those windows are still above everything, this
+    /// process has no record of them, and the symptom — an application that will not come to the
+    /// front until whatever is over it is minimised — gives no hint of the cause. Deliberately not
+    /// automatic, because a window somebody pinned on purpose looks exactly the same from here.
+    /// </summary>
+    public static int DropAllTopmost()
+    {
+        int dropped = 0;
+
+        foreach (var window in WindowList.Enumerate())
+        {
+            var hWnd = window.Handle;
+            if ((GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) continue;
+            if (!IsClampTarget(hWnd)) continue;
+
+            ZoneManager.SetTopmost(hWnd, false);
+            Log.Write($"dropped always-on-top from {window.Process}: {window.Title}");
+            dropped++;
+        }
+
+        return dropped;
+    }
+
     // ---- live divider drag -------------------------------------------------
 
     /// <summary>
@@ -601,6 +682,7 @@ public sealed class WinEventHookService : IDisposable
     /// <summary>Stamps the reentrancy guard, then moves the window. The order matters.</summary>
     public void Apply(IntPtr hWnd, Zone zone)
     {
+        Remember(hWnd);
         Touch(hWnd);
 
         // Z-order is decided even when the rectangle is already right: a window can be in the
@@ -763,6 +845,9 @@ public sealed class WinEventHookService : IDisposable
                 if (!IsWindow(key)) allowedToSpan.TryRemove(key, out _);
             foreach (var key in madeTopmost.Keys)
                 if (!IsWindow(key)) madeTopmost.TryRemove(key, out _);
+
+            foreach (var key in beforeUs.Keys)
+                if (!IsWindow(key)) beforeUs.TryRemove(key, out _);
             foreach (var key in coversTaskbar.Keys)
                 if (!IsWindow(key)) coversTaskbar.TryRemove(key, out _);
         }

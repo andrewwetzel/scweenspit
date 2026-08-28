@@ -195,6 +195,27 @@ public sealed class TrayApplicationContext : ApplicationContext
             Checked = config.AutoClamp && hook.Running,
         });
         items.Add(SwitchMenu());
+        items.Add(new ToolStripMenuItem("Drop always-on-top from every window", null, (_, _) =>
+        {
+            int dropped = WinEventHookService.DropAllTopmost();
+            Notify(dropped > 0
+                ? $"Dropped always-on-top from {dropped} window(s)."
+                : "No window is pinned above the others.");
+        })
+        {
+            ToolTipText = "For a window left above everything by a run that was killed — the one "
+                        + "that will not come forward until whatever covers it is minimised.",
+        });
+
+        items.Add(new ToolStripMenuItem("Put windows back where they were", null, (_, _) =>
+        {
+            int back = hook.PutWindowsBack();
+            Notify(back > 0 ? $"Put {back} window(s) back." : "No windows to put back.");
+        })
+        {
+            ToolTipText = "Every window ScweenSpit has moved, returned to the size and place it was "
+                        + "when it first touched it.",
+        });
         items.Add(new ToolStripMenuItem("Exclude active window's app", null, (_, _) => ExcludeActiveApp()));
         items.Add(new ToolStripSeparator());
 
@@ -346,7 +367,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         config.Save();
         ApplyChanges();
 
-        Notify("Handed back to Windows. The taskbar is back, and your layouts are kept.");
+        // After ApplyChanges, which stops the hooks: standing down and leaving every window at the
+        // size of a zone is not standing down as far as anyone looking at the screen is concerned.
+        int back = hook.PutWindowsBack();
+
+        Notify(back > 0
+            ? $"Handed back to Windows. {back} window{(back == 1 ? "" : "s")} put back where {(back == 1 ? "it was" : "they were")}, and your layouts are kept."
+            : "Handed back to Windows. The taskbar is back, and your layouts are kept.");
         Log.Write("handed back to Windows");
     }
 

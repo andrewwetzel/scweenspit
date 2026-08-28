@@ -29,9 +29,30 @@ public static class WindowsSnap
             original[i] = Read(Settings[i].Get);
             Write(Settings[i].Set, 0);
         }
+
+        // All three off is almost certainly a previous run of this program that died before putting
+        // them back, not a preference. Windows ships them on; turning off Snap in Settings clears
+        // the first of the three and leaves the others alone; and nothing in the user interface
+        // turns off all three together except this. Recording that as "how the machine was" is how
+        // snapping stays broken for good — every restore afterwards faithfully puts back "off".
+        if (original.All(v => v == 0))
+        {
+            Log.Write("windows snap was already fully off — treating that as our own leftover, "
+                    + "and recording the Windows defaults to restore instead");
+            for (int i = 0; i < original.Length; i++) original[i] = 1;
+            return original;
+        }
+
         Log.Write($"windows snap suppressed (was: {string.Join(",", original)})");
         return original;
     }
+
+    /// <summary>
+    /// Whether a recorded set of originals says "everything off" — which no user chose, and which
+    /// would restore to a machine that cannot snap.
+    /// </summary>
+    public static bool IsAllOff(int[]? original) =>
+        original is { Length: > 0 } && original.All(v => v == 0);
 
     /// <summary>Puts back whatever <see cref="Suppress"/> reported. Tolerates a short/garbled array.</summary>
     public static void Restore(int[]? original)

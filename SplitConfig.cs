@@ -217,7 +217,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -498,6 +498,16 @@ public sealed class SplitConfig
         if (DebounceMs < 50) DebounceMs = 50;
         if (Padding < 0) Padding = 0;
         Exclude = Exclude.Where(e => !string.IsNullOrWhiteSpace(e)).Select(e => e.Trim()).Distinct().ToList();
+
+        // Not a bar setting, so it comes before them: a record of "everything was off" cannot be
+        // what the machine looked like before ScweenSpit, and restoring it is exactly why snapping
+        // stops working. Dropped, so the next suppression reads fresh values — which now refuse to
+        // believe all-off as well.
+        if (Version < 4 && WindowsSnap.IsAllOff(SnapRestore))
+        {
+            Log.Write("config v4: dropping a snap record of all-off; it cannot be what was there before");
+            SnapRestore = null;
+        }
 
         foreach (var bar in Bars.Values)
         {
