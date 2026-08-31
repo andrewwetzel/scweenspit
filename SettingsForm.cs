@@ -677,6 +677,16 @@ public sealed class SettingsForm : Form
                 "No effect on Windows 11 build 26200 and later: the menu's window can be moved, and " +
                 "reports its new position afterwards, but what is drawn stays where the shell put it."));
 
+            var badges = Theme.Toggle("Show notification counts on icons", settings.ShowBadges);
+            badges.CheckedChanged += (_, _) => { settings.ShowBadges = badges.Checked; Save(); };
+            page.Controls.Add(badges);
+            page.Controls.Add(Theme.Caption(
+                "Read from the count an application puts at the front of its own window title — " +
+                "\"(3) Microsoft Teams\". The badge Explorer's taskbar draws comes from an API that " +
+                "hands it to the shell and never hands it back, so a taskbar that is not Explorer's " +
+                "cannot ask what Explorer was told. Applications that count only in that badge, and " +
+                "not in their title, will not show one here."));
+
             var machine = Theme.Toggle("Show this machine's load (CPU, RAM, disk)", settings.ShowMachine);
             machine.CheckedChanged += (_, _) => { settings.ShowMachine = machine.Checked; Save(); };
             page.Controls.Add(machine);

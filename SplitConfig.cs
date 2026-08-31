@@ -133,6 +133,11 @@ public sealed class BarSettings
     /// </summary>
     public bool ShowMachine { get; set; }
 
+    /// <summary>
+    /// A count on an icon's corner when an application is announcing one in its window title.
+    /// </summary>
+    public bool ShowBadges { get; set; } = true;
+
     /// <summary>Icons alone, the way a real taskbar looks. Titles need roughly four times the room.</summary>
     public bool IconsOnly { get; set; } = true;
 

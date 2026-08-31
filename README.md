@@ -418,6 +418,20 @@ window's thread, which makes the call legitimate, and detaches immediately after
 ScweenSpit's own settings window is listed like any other application, which matters once the Windows
 taskbar is hidden: it would otherwise be the one window with no way back to it.
 
+**Notification counts** appear on an icon's corner when an application is announcing one — three
+waiting messages, twelve unread. Grouped buttons add their windows together, since six Chrome
+windows are one button and two waiting in each of them is four waiting.
+
+The count is read from the front of the window title, which is where applications put it so that it
+survives a window list: "(3) Microsoft Teams", "(12) Slack". Not from the badge Explorer draws — that
+one is handed to the shell through `ITaskbarList3` and the Store badge API, and nothing public hands
+it back, so a taskbar that is not Explorer's cannot ask what Explorer was told. An application that
+counts only there and not in its title shows nothing here.
+
+Only the very front of the title counts. A number in brackets further in is far more often part of a
+name — `Document (2).docx`, `screenshot (4).png` — and a badge on every second File Explorer window
+would read as a broken program rather than a useful one.
+
 The Start glyph is drawn into the same box an application icon gets, at the same size, so the row
 reads as one row — a couple of pixels out of line is invisible anywhere else on a bar and obvious
 here. Beside the clock, the status cluster can carry two stacks of labelled bars. **Claude usage** is the

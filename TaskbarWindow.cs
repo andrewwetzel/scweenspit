@@ -54,6 +54,14 @@ public sealed class TaskbarWindow : Form
             First is { AppId.Length: > 0 } w && ShellIcon.NameForAppId(w.AppId) is { } known ? known
             : First?.Process is { Length: > 0 } name ? name
             : NameOf(Id);
+
+        /// <summary>
+        /// What every window of this application is announcing, added up. Six Chrome windows behind
+        /// one icon are one button, and two waiting messages in each of them are four waiting
+        /// messages — a badge showing whichever window happened to be first would be a smaller
+        /// number than the truth.
+        /// </summary>
+        public int Badge => Windows.Sum(w => Badges.Count(w.Title) ?? 0);
     }
 
     private List<TaskWindow> windows = [];
@@ -513,6 +521,62 @@ public sealed class TaskbarWindow : Form
         return (LetterTile(named), false);
     }
 
+    /// <summary>
+    /// A count on the corner of an icon, the way every taskbar has drawn one. Sized from the icon
+    /// rather than fixed, so it stays in proportion on a bar of any thickness.
+    /// </summary>
+    private void PaintBadge(Graphics g, Rectangle icon, int count)
+    {
+        var text = Badges.Text(count);
+
+        int height = Math.Clamp(icon.Height * 5 / 9, 12, 22);
+        using var font = Theme.Face(height * 0.46f, FontStyle.Bold);
+
+        // Wide enough for what is in it: a circle for one digit, a lozenge for more, because two
+        // digits squeezed into a circle stop being readable at this size.
+        int width = Math.Max(height, (int)Math.Ceiling(g.MeasureString(text, font).Width) + height / 2);
+
+        // Top-right, and allowed to overhang: the corner of an icon is the least of it, and keeping
+        // the badge wholly inside would shrink it below reading size.
+        var box = new Rectangle(icon.Right - width + height / 4, icon.Top - height / 4, width, height);
+
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var ring = new SolidBrush(Theme.Panel))
+            Lozenge(g, Rectangle.Inflate(box, 2, 2), ring);   // a gap, so it reads as sitting on top
+
+        using (var fill = new SolidBrush(Badge))
+            Lozenge(g, box, fill);
+
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+        using var ink = new SolidBrush(Color.White);
+        g.DrawString(text, font, ink, box, format);
+
+        g.SmoothingMode = previous;
+    }
+
+    /// <summary>The colour of a waiting count. Loud on purpose — that is the whole job.</summary>
+    private static readonly Color Badge = Color.FromArgb(0xE0, 0x3B, 0x3B);
+
+    private static void Lozenge(Graphics g, Rectangle box, Brush brush)
+    {
+        int radius = box.Height / 2;
+        if (radius <= 1) { g.FillRectangle(brush, box); return; }
+
+        using var path = new GraphicsPath();
+        int d = radius * 2;
+        path.AddArc(box.X, box.Y, d, d, 90, 180);
+        path.AddArc(box.Right - d, box.Y, d, d, 270, 180);
+        path.CloseFigure();
+        g.FillPath(brush, path);
+    }
+
     private static Bitmap LetterTile(string label)
     {
         var tile = new Bitmap(32, 32);
@@ -633,13 +697,20 @@ public sealed class TaskbarWindow : Form
     private string MachineTip() =>
         machine.Count == 0 ? "This machine — reading…" : string.Join(Environment.NewLine, machine.Select(m => m.Detail));
 
-    private static string Describe(Button b) => b.Windows.Count switch
+    private static string Describe(Button b)
     {
-        0 => $"{b.Label}  (not running)",
-        1 => b.Windows[0].Minimised ? $"{b.Windows[0].Title}  (minimised)" : b.Windows[0].Title,
-        _ => $"{b.Label} — {b.Windows.Count} windows\n" +
-             string.Join("\n", b.Windows.Take(6).Select(w => "  " + w.Title)),
-    };
+        var text = b.Windows.Count switch
+        {
+            0 => $"{b.Label}  (not running)",
+            1 => b.Windows[0].Minimised ? $"{b.Windows[0].Title}  (minimised)" : b.Windows[0].Title,
+            _ => $"{b.Label} — {b.Windows.Count} windows\n" +
+                 string.Join("\n", b.Windows.Take(6).Select(w => "  " + w.Title)),
+        };
+
+        // Said in words as well as drawn: "3" on a corner does not say three of what, and the title
+        // it was read from is right there in the same tooltip to make the connection.
+        return b.Badge > 0 ? $"{text}\n\n{b.Badge} waiting" : text;
+    }
 
     private string TrayTip(Tray item) => item switch
     {
@@ -857,6 +928,8 @@ public sealed class TaskbarWindow : Form
                 ? icons.GetValueOrDefault(w!.Handle)
                 : fileIcons.GetValueOrDefault(button.Id);
 
+            int badge = settings.ShowBadges ? button.Badge : 0;
+
             if (icon is not null)
             {
                 var box = IconBox(slot);
@@ -867,6 +940,10 @@ public sealed class TaskbarWindow : Form
                               : button.Windows.All(x => x.Minimised) ? 0.62f
                               : 1f;
                 DrawIcon(g, icon, box, opacity);
+
+                // Over the icon, not beside it: the badge belongs to the application, and a slot has
+                // no room to put anything next to an icon that already fills it.
+                if (badge > 0) PaintBadge(g, box, badge);
             }
 
             if (settings.IconsOnly) continue;
