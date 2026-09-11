@@ -369,7 +369,10 @@ public sealed class ZoneManager(SplitConfig config)
     public static bool IsBorderlessFullscreen(IntPtr hWnd, RECT win, RECT monitorBounds)
     {
         long style = GetWindowLongPtr(hWnd, GWL_STYLE);
-        if ((style & (WS_CAPTION | WS_THICKFRAME)) != 0) return false;
+        // A window is titled if it has WS_CAPTION (WS_BORDER | WS_DLGFRAME).
+        // Chromeless windows, borderless fullscreen games, and PWAs lack WS_CAPTION
+        // even if they retain WS_THICKFRAME for DWM resize borders or shadows.
+        if ((style & WS_CAPTION) == WS_CAPTION) return false;
 
         return win.Left   <= monitorBounds.Left   + CoverSlack
             && win.Top    <= monitorBounds.Top    + CoverSlack

@@ -54,11 +54,13 @@ public sealed class WinEventHookService : IDisposable
     /// <summary>Overlay used to show where a dragged window would land. Optional.</summary>
     public ZoneOverlay? Overlay { get; set; }
 
-    // Apps like Chrome re-assert their fullscreen size once, just after we shrink them —
-    // inside the debounce window, where we are deaf. One bounded re-check settles it.
-    private readonly System.Windows.Forms.Timer verify = new();
-    private IntPtr verifyTarget;
-    private Zone verifyZone;
+    // Apps like Chrome re-assert their fullscreen size multiple times during their transition sequence —
+    // inside the debounce window, where we are deaf to ordinary moves. We re-check and re-clamp up to
+    // MaxRapidClamps times until the window settles in its zone.
+    private const int MaxRapidClamps = 6;
+    private readonly ConcurrentDictionary<IntPtr, (Zone Zone, int Attempts, long CheckAt)> pendingVerify = new();
+    private readonly System.Windows.Forms.Timer verify = new() { Interval = 100 };
+    private readonly ConcurrentDictionary<IntPtr, (int Count, long WindowStart)> clampRate = new();
 
     // The delegate must outlive the hook: the GC has no idea user32 holds a pointer to it.
     private WinEventDelegate? callback;
@@ -90,7 +92,7 @@ public sealed class WinEventHookService : IDisposable
     public WinEventHookService(ZoneManager zones)
     {
         this.zones = zones;
-        verify.Tick += (_, _) => { verify.Stop(); ReVerify(); };
+        verify.Tick += (_, _) => DrainVerify();
         dragTick.Tick += (_, _) => DragUpdate();
         postDrag.Tick += (_, _) => { postDrag.Stop(); ReconcileAfterDrag(); };
         settle.Tick += (_, _) => DrainPendingShow();
@@ -146,6 +148,8 @@ public sealed class WinEventHookService : IDisposable
         owners.Clear();
         allowedToSpan.Clear();
         pendingShow.Clear();
+        pendingVerify.Clear();
+        clampRate.Clear();
         settle.Stop();
         Log.Write("hooks removed");
     }
@@ -176,7 +180,21 @@ public sealed class WinEventHookService : IDisposable
             if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
             if (eventType == EVENT_OBJECT_SHOW)          { QueueShow(hWnd); return; }
 
-            if (IsSuppressed(hWnd) || !IsClampTarget(hWnd)) return;
+            if (!IsClampTarget(hWnd)) return;
+
+            // The reentrancy guard is there to ignore the echo of our own ClampToZone calls.
+            // But if the window is attempting to cover the monitor or maximize, it must not be
+            // ignored just because it arrived within the debounce window!
+            if (IsSuppressed(hWnd))
+            {
+                if (!GetWindowRect(hWnd, out var win) ||
+                    !ZoneManager.TryGetMonitor(hWnd, out var geo) ||
+                    !ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
+                {
+                    return;
+                }
+            }
+
             targetsSeen++;
             Reconcile(hWnd);
         }
@@ -226,6 +244,25 @@ public sealed class WinEventHookService : IDisposable
         {
             Log.WriteOnce($"excluded:{hWnd}", $"excluded: {owner} / {cls}");
             return;
+        }
+
+        long now = Environment.TickCount64;
+        var (count, windowStart) = clampRate.TryGetValue(hWnd, out var cr) ? cr : (0, now);
+        if (now - windowStart > 2_000)
+        {
+            count = 1;
+            windowStart = now;
+            clampRate[hWnd] = (count, windowStart);
+        }
+        else
+        {
+            count++;
+            clampRate[hWnd] = (count, windowStart);
+            if (count > MaxRapidClamps)
+            {
+                Log.WriteOnce($"stubborn:{hWnd}", $"0x{hWnd:X} ({owner}) re-asserted fullscreen {count} times; backing off");
+                return;
+            }
         }
 
         fullscreenSeen++;
@@ -513,6 +550,7 @@ public sealed class WinEventHookService : IDisposable
         if (GetCursorPos(out var start) && IsOnSizingBorder(hWnd, start)) return;
 
         dragWindow = hWnd;
+        pendingVerify.TryRemove(hWnd, out _);
         anchorZone = -1;
         dragDevice = "";
         dragTarget = null;
@@ -699,31 +737,59 @@ public sealed class WinEventHookService : IDisposable
         lastNormal[hWnd] = zone.Rect;
         Touch(hWnd); // restamp: the move itself is about to echo back as LOCATIONCHANGE
 
-        verifyTarget = hWnd;
-        verifyZone   = zone;
-        verify.Interval = zones.Config.DebounceMs + 60;
-        verify.Stop();
+        int attempts = pendingVerify.TryGetValue(hWnd, out var pv) ? pv.Attempts + 1 : 1;
+        pendingVerify[hWnd] = (zone, attempts, Environment.TickCount64 + zones.Config.DebounceMs + 60);
         verify.Start();
     }
 
     /// <summary>
-    /// Fires once just after the debounce expires. Never re-schedules itself, so a window that
-    /// insists on being fullscreen costs exactly one extra correction, not a ping-pong loop.
+    /// Re-checks windows that recently transitioned to fullscreen or maximize.
+    /// Apps like Chrome often re-assert their fullscreen size multiple times during their
+    /// transition sequence. Bounded re-checking clamps them until they settle.
     /// </summary>
-    private void ReVerify()
+    private void DrainVerify()
     {
-        var hWnd = verifyTarget;
-        verifyTarget = IntPtr.Zero;
+        long now = Environment.TickCount64;
 
-        if (hWnd == IntPtr.Zero || !IsClampTarget(hWnd)) return;
-        if (!GetWindowRect(hWnd, out var win)) return;
-        if (!ZoneManager.TryGetMonitor(hWnd, out var geo)) return;
-        if (!ZoneManager.NeedsClamp(hWnd, win, geo.Bounds)) return;
+        foreach (var (hWnd, state) in pendingVerify)
+        {
+            if (now < state.CheckAt) continue;
 
-        Log.Write($"re-verify {hWnd:X}: still fullscreen, re-clamping");
-        Touch(hWnd);
-        if (ZoneManager.ClampToZone(hWnd, verifyZone.Rect)) lastNormal[hWnd] = verifyZone.Rect;
-        Touch(hWnd);
+            if (!IsWindow(hWnd) || !IsClampTarget(hWnd))
+            {
+                pendingVerify.TryRemove(hWnd, out _);
+                continue;
+            }
+
+            if (!GetWindowRect(hWnd, out var win) ||
+                !ZoneManager.TryGetMonitor(hWnd, out var geo) ||
+                !ZoneManager.NeedsClamp(hWnd, win, geo.Bounds))
+            {
+                // Window is safely sitting in its zone or does not need clamp.
+                pendingVerify.TryRemove(hWnd, out _);
+                continue;
+            }
+
+            if (state.Attempts >= MaxRapidClamps)
+            {
+                Log.WriteOnce($"verify_stubborn:{hWnd}", $"0x{hWnd:X} ({OwnerProcess(hWnd)}) still fullscreen after {state.Attempts} re-checks; giving up");
+                pendingVerify.TryRemove(hWnd, out _);
+                continue;
+            }
+
+            Log.Write($"re-verify 0x{hWnd:X} (attempt {state.Attempts} of {MaxRapidClamps}): still fullscreen, re-clamping");
+            Touch(hWnd);
+            if (ZoneManager.ClampToZone(hWnd, state.Zone.Rect))
+            {
+                clamps++;
+                lastNormal[hWnd] = state.Zone.Rect;
+            }
+            Touch(hWnd);
+
+            pendingVerify[hWnd] = (state.Zone, state.Attempts + 1, now + zones.Config.DebounceMs + 60);
+        }
+
+        if (pendingVerify.IsEmpty) verify.Stop();
     }
 
     /// <summary>Process name that owns a window, or "?" if it cannot be resolved.</summary>
@@ -742,13 +808,12 @@ public sealed class WinEventHookService : IDisposable
     private string OwnerProcess(IntPtr hWnd) => owners.GetOrAdd(hWnd, OwnerProcessOf);
 
     /// <summary>
-    /// Drops any scheduled follow-up work. The verify timer holds a single pixel rectangle, which a
-    /// config reload or an on-screen zone edit invalidates.
+    /// Drops any scheduled follow-up work.
     /// </summary>
     public void CancelPending()
     {
         verify.Stop();
-        verifyTarget = IntPtr.Zero;
+        pendingVerify.Clear();
         postDrag.Stop();
         postDragWindow = IntPtr.Zero;
         pendingShow.Clear();
@@ -850,6 +915,10 @@ public sealed class WinEventHookService : IDisposable
                 if (!IsWindow(key)) beforeUs.TryRemove(key, out _);
             foreach (var key in coversTaskbar.Keys)
                 if (!IsWindow(key)) coversTaskbar.TryRemove(key, out _);
+            foreach (var key in pendingVerify.Keys)
+                if (!IsWindow(key)) pendingVerify.TryRemove(key, out _);
+            foreach (var key in clampRate.Keys)
+                if (!IsWindow(key)) clampRate.TryRemove(key, out _);
         }
 
         // WINEVENT_SKIPOWNPROCESS does not help here: we move *other* processes' windows,

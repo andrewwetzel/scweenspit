@@ -726,10 +726,11 @@ Three details that this design lives or dies by:
   which zone you had it in — the centre of a maximized window is always the centre of the
   screen. Each window's last non-fullscreen rectangle is remembered (falling back to
   `WINDOWPLACEMENT.rcNormalPosition`), so F11 in the 30% zone stays in the 30% zone.
-- **One re-check, never a loop.** Some apps re-assert their fullscreen size just after we
-  shrink them, during the debounce window where we are deliberately deaf. A single timer
-  fires once after the debounce and corrects it. It never re-schedules itself, so a
-  stubborn app costs one extra correction rather than a ping-pong fight.
+- **Bounded settling, never a loop.** Some apps (like Chrome PWAs entering HTML5 fullscreen)
+  re-assert their fullscreen size several times during their layout and transition sequence.
+  Events trying to cover the monitor are never blinded by debounce, and a scheduled verify
+  re-checks windows until they settle in their zone, capped by a per-window rate limiter to
+  prevent ping-pong loops with stubborn applications.
 - **Per-monitor geometry.** Zones come from `GetMonitorInfo().rcWork`, not
   `SystemInformation.WorkingArea` — the latter is primary-monitor-only and DPI-scaled,
   which breaks mixed-DPI multi-monitor setups. The process is PerMonitorV2 aware, so all
