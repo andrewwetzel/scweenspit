@@ -19,24 +19,44 @@ internal static class UsageStrip
     private static readonly Color BambuTitleColour = Color.FromArgb(120, 232, 160);
     private static readonly Color RemoteChatsTitleColour = Color.FromArgb(145, 215, 255);
 
-    /// <summary>Room the strip needs along the bar.</summary>
-    public static int Extent(bool vertical) => MeterStrip.UsageExtent(vertical);
+    /// <summary>Room the Claude strip needs along the bar.</summary>
+    public static int Extent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
+    {
+        int count = ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2;
+        return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+    }
+
+    /// <summary>Room the Antigravity strip needs along the bar.</summary>
+    public static int AntigravityExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
+    {
+        int count = AntigravityUsage.Current?.Limits.Count is > 0 and var c ? c : 2;
+        return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+    }
 
     /// <summary>Room the Bambu printer strip needs along the bar.</summary>
-    public static int BambuExtent(bool vertical) =>
-        MeterStrip.BambuExtent(vertical, BambuUsage.ConfiguredPrinterCount);
+    public static int BambuExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
+    {
+        int count = BambuUsage.Current?.Printers.Count is > 0 and var c ? c : BambuUsage.ConfiguredPrinterCount;
+        return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+    }
 
     /// <summary>Room the remote server chats strip needs along the bar.</summary>
-    public static int RemoteChatsExtent(bool vertical) =>
-        MeterStrip.BambuExtent(vertical, RemoteChatUsage.ConfiguredRowCount);
+    public static int RemoteChatsExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
+    {
+        int count = RemoteChatUsage.Current?.Rows.Count is > 0 and var c ? c : RemoteChatUsage.ConfiguredRowCount;
+        return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+    }
 
-    public static void Paint(Graphics g, Rectangle area, UsageReading? reading)
+    public static void Paint(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn = 3)
     {
         var limits = reading?.Limits ?? [];
         if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: false); return; }
 
         bool vertical = area.Height > area.Width;
-        bool useHeaderRow = !vertical && limits.Count <= 2;
+        int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
+        int cols = MeterStrip.ColumnsFor(vertical, limits.Count, maxRows);
+        int rowsPerCol = (int)Math.Ceiling(limits.Count / (double)cols);
+        bool useHeaderRow = !vertical && (rowsPerCol + 1 <= maxRows) && (area.Height - 2) / (rowsPerCol + 1) >= 11;
 
         var meters = new List<Meter>(limits.Count);
         for (int i = 0; i < limits.Count; i++)
@@ -72,34 +92,44 @@ internal static class UsageStrip
             headerTitle: useHeaderRow ? "Claude" : null,
             headerTag: null,
             headerColour: ClaudeTitleColour,
-            sparkleGlyph: false);
+            sparkleGlyph: false,
+            maxRowsPerColumn: maxRowsPerColumn);
     }
 
-    public static void PaintAntigravity(Graphics g, Rectangle area, UsageReading? reading)
+    public static void PaintAntigravity(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn = 3)
     {
         var limits = reading?.Limits ?? [];
         if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: true); return; }
 
         bool vertical = area.Height > area.Width;
+        int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
+        int cols = MeterStrip.ColumnsFor(vertical, limits.Count, maxRows);
+        int rowsPerCol = (int)Math.Ceiling(limits.Count / (double)cols);
+        bool useHeaderRow = !vertical && (rowsPerCol + 1 <= maxRows) && (area.Height - 2) / (rowsPerCol + 1) >= 11;
 
-        var meters = limits.Select(l =>
+        var meters = new List<Meter>(limits.Count);
+        for (int i = 0; i < limits.Count; i++)
         {
-            string displayLabel = vertical
+            var l = limits[i];
+            string displayLabel = vertical || !useHeaderRow
                 ? (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "AG 5h"
                  : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "AG 7d"
                  : l.Label)
                 : l.Label;
 
+            bool highlightFirst = !vertical && !useHeaderRow && i == 0;
             string detail = ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left
                 ? $"{l.Label}: {l.Percent}%  ({left})"
                 : $"{l.Label}: {l.Percent}%";
 
-            return new Meter(
+            meters.Add(new Meter(
                 displayLabel,
                 l.Percent,
                 detail,
-                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt));
-        }).ToList();
+                LabelColour: highlightFirst ? AntigravityTitleColour : null,
+                BoldLabel: highlightFirst,
+                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
+        }
 
         MeterStrip.Paint(
             g, area, meters,
@@ -107,10 +137,11 @@ internal static class UsageStrip
             headerTitle: "Antigravity",
             headerTag: "Pro·Flash",
             headerColour: AntigravityTitleColour,
-            sparkleGlyph: true);
+            sparkleGlyph: true,
+            maxRowsPerColumn: maxRowsPerColumn);
     }
 
-    public static void PaintBambu(Graphics g, Rectangle area, BambuReading? reading)
+    public static void PaintBambu(Graphics g, Rectangle area, BambuReading? reading, int maxRowsPerColumn = 3)
     {
         var printers = reading?.Printers ?? [];
         if (printers.Count == 0) { PaintBambuState(g, area, reading); return; }
@@ -205,10 +236,11 @@ internal static class UsageStrip
             headerTitle: "Bambu Lab",
             headerTag: $"{printers.Count}",
             headerColour: BambuTitleColour,
-            sparkleGlyph: false);
+            sparkleGlyph: false,
+            maxRowsPerColumn: maxRowsPerColumn);
     }
 
-    public static void PaintRemoteChats(Graphics g, Rectangle area, RemoteChatsReading? reading)
+    public static void PaintRemoteChats(Graphics g, Rectangle area, RemoteChatsReading? reading, int maxRowsPerColumn = 3)
     {
         var rows = reading?.Rows ?? [];
         if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading); return; }
@@ -309,13 +341,16 @@ internal static class UsageStrip
             headerTitle: "Remote Chats",
             headerTag: headerTag,
             headerColour: hdrCol,
-            sparkleGlyph: false);
+            sparkleGlyph: false,
+            maxRowsPerColumn: maxRowsPerColumn);
     }
 
     /// <summary>Nothing to plot yet: say which of the reasons it is, in the space a limit would use.</summary>
     private static void PaintState(Graphics g, Rectangle area, UsageReading? reading, bool isAntigravity)
     {
-        using var font = Theme.Face(7.5f, FontStyle.Bold);
+        float fontPt = Math.Clamp(area.Height * 0.16f, 7.5f, 12f);
+        int barThick = Math.Clamp(area.Height / 8, MeterStrip.BarThickness, 12);
+        using var font = Theme.Face(fontPt, FontStyle.Bold);
         using var centred = new StringFormat
         {
             Alignment = StringAlignment.Center,
@@ -332,20 +367,22 @@ internal static class UsageStrip
                : reading is { Error: not null, Settled: true } ? ("Claude · error", MeterStrip.High)
                : ("Claude ···", ClaudeTitleColour));
 
-        int width = Math.Max(16, area.Width - 12);
-        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
+        int width = Math.Max(16, area.Width - 16);
+        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - barThick - 6);
 
         using var brush = new SolidBrush(colour);
         g.DrawString(text, font, brush, label, centred);
 
         MeterStrip.Placeholder(g, new Rectangle(area.X + (area.Width - width) / 2,
-                                                area.Bottom - MeterStrip.BarThickness - 4, width,
-                                                MeterStrip.BarThickness));
+                                                area.Bottom - barThick - 5, width,
+                                                barThick));
     }
 
     private static void PaintBambuState(Graphics g, Rectangle area, BambuReading? reading)
     {
-        using var font = Theme.Face(7.5f, FontStyle.Bold);
+        float fontPt = Math.Clamp(area.Height * 0.16f, 7.5f, 12f);
+        int barThick = Math.Clamp(area.Height / 8, MeterStrip.BarThickness, 12);
+        using var font = Theme.Face(fontPt, FontStyle.Bold);
         using var centred = new StringFormat
         {
             Alignment = StringAlignment.Center,
@@ -361,20 +398,22 @@ internal static class UsageStrip
                     ? ("Bambu · error", MeterStrip.High)
                     : ("Bambu ···", BambuTitleColour);
 
-        int width = Math.Max(16, area.Width - 12);
-        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
+        int width = Math.Max(16, area.Width - 16);
+        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - barThick - 6);
 
         using var brush = new SolidBrush(colour);
         g.DrawString(text, font, brush, label, centred);
 
         MeterStrip.Placeholder(g, new Rectangle(area.X + (area.Width - width) / 2,
-                                                area.Bottom - MeterStrip.BarThickness - 4, width,
-                                                MeterStrip.BarThickness));
+                                                area.Bottom - barThick - 5, width,
+                                                barThick));
     }
 
     private static void PaintRemoteChatsState(Graphics g, Rectangle area, RemoteChatsReading? reading)
     {
-        using var font = Theme.Face(7.5f, FontStyle.Bold);
+        float fontPt = Math.Clamp(area.Height * 0.16f, 7.5f, 12f);
+        int barThick = Math.Clamp(area.Height / 8, MeterStrip.BarThickness, 12);
+        using var font = Theme.Face(fontPt, FontStyle.Bold);
         using var centred = new StringFormat
         {
             Alignment = StringAlignment.Center,
@@ -390,15 +429,15 @@ internal static class UsageStrip
                     ? ("Chats · error", MeterStrip.High)
                     : ("Chats ···", RemoteChatsTitleColour);
 
-        int width = Math.Max(16, area.Width - 12);
-        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
+        int width = Math.Max(16, area.Width - 16);
+        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - barThick - 6);
 
         using var brush = new SolidBrush(colour);
         g.DrawString(text, font, brush, label, centred);
 
         MeterStrip.Placeholder(g, new Rectangle(area.X + (area.Width - width) / 2,
-                                                area.Bottom - MeterStrip.BarThickness - 4, width,
-                                                MeterStrip.BarThickness));
+                                                area.Bottom - barThick - 5, width,
+                                                barThick));
     }
 
     /// <summary>The whole Claude reading in words, for the tooltip — where the numbers actually live.</summary>

@@ -27,28 +27,56 @@ internal static class MeterStrip
     public static readonly Color BambuDone = Color.FromArgb(0x2E, 0xA8, 0x8A);  // teal   — Bambu finished
     public static readonly Color Mid = Color.FromArgb(0xFA, 0xB2, 0x19);        // amber  — over half / paused
     public static readonly Color High = Color.FromArgb(0xD0, 0x3B, 0x3B);       // red    — nearly out / error
-    private static readonly Color SubtextColour = Color.FromArgb(172, 180, 198);
+    private static readonly Color DefaultLabelColour = Color.FromArgb(184, 192, 206);
+    private static readonly Color SubtextColour = Color.FromArgb(176, 184, 202);
+    private static readonly Color TrackTrough = Color.FromArgb(46, 52, 64);
+    private static readonly Color InnerDivider = Color.FromArgb(42, 46, 56);
 
     public const int BarThickness = 6;
 
-    /// <summary>Room for the widest name at the size it is drawn ("Claude 5h" / "Claude 7d").</summary>
-    private const int NameWidth = 54;
-    private const int ShortNameWidth = 36;
-    private const int FigureWidth = 30;
-    private const int SubtextWidth = 44;
+    /// <summary>How many side-by-side columns a horizontal strip uses for <paramref name="itemCount"/> rows.</summary>
+    public static int ColumnsFor(bool vertical, int itemCount, int maxRowsPerColumn = 3)
+    {
+        if (vertical) return 1;
+        int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
+        return Math.Max(1, (int)Math.Ceiling(Math.Max(1, itemCount) / (double)maxRows));
+    }
 
     /// <summary>Room a plain meter strip (CPU, RAM, disk) needs along the bar.</summary>
-    public static int Extent(bool vertical) => vertical ? 84 : 156;
+    public static int Extent(bool vertical, int itemCount = 3, int maxRowsPerColumn = 3,
+                             int barBreadth = 50, int scalePercent = 100)
+    {
+        if (vertical) return 84;
+        int cols = ColumnsFor(false, itemCount, maxRowsPerColumn);
+        double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
+        double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
+        int colW = (int)Math.Round(164 * hScale * uScale);
+        return cols * colW - (cols - 1) * 8;
+    }
 
     /// <summary>Room a usage strip with a reset-countdown column needs along the bar.</summary>
-    public static int UsageExtent(bool vertical) => vertical ? 96 : 208;
+    public static int UsageExtent(bool vertical, int itemCount = 2, int maxRowsPerColumn = 3,
+                                  int barBreadth = 50, int scalePercent = 100)
+    {
+        if (vertical) return 96;
+        int cols = ColumnsFor(false, itemCount, maxRowsPerColumn);
+        double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
+        double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
+        int colW = (int)Math.Round(216 * hScale * uScale);
+        return cols * colW - (cols - 1) * 8;
+    }
 
     /// <summary>Room the Bambu printer strip needs along the bar for <paramref name="printerCount"/> printers.</summary>
-    public static int BambuExtent(bool vertical, int printerCount)
+    public static int BambuExtent(bool vertical, int printerCount, int maxRowsPerColumn = 3,
+                                  int barBreadth = 50, int scalePercent = 100)
     {
-        if (!vertical) return 208;
-        int rows = Math.Max(2, printerCount);
-        return Math.Clamp(rows * 24 + 8, 72, 160);
+        if (vertical)
+        {
+            int rows = Math.Max(2, printerCount);
+            return Math.Clamp(rows * 24 + 8, 72, 160);
+        }
+
+        return UsageExtent(false, Math.Max(2, printerCount), maxRowsPerColumn, barBreadth, scalePercent);
     }
 
     /// <summary>The colour a bar takes at a given reading.</summary>
@@ -58,125 +86,201 @@ internal static class MeterStrip
     public static void Paint(Graphics g, Rectangle area, IReadOnlyList<Meter> meters,
                              Color? lowColour = null, string? headerTitle = null,
                              string? headerTag = null, Color? headerColour = null,
-                             bool sparkleGlyph = false)
+                             bool sparkleGlyph = false, int maxRowsPerColumn = 3)
     {
         if (meters.Count == 0) return;
 
         bool vertical = area.Height > area.Width;
         bool hasSubtext = meters.Any(m => !string.IsNullOrEmpty(m.Subtext));
 
-        // Only include the header row if there is enough vertical room to keep every meter row at
-        // least 9px tall (so 5 printers on a 50px bar use all 5 rows without clipping).
-        bool showHeader = !vertical && !string.IsNullOrEmpty(headerTitle)
-                          && (area.Height - 2) / (meters.Count + 1) >= 9;
-        int totalRows = meters.Count + (showHeader ? 1 : 0);
+        int maxRows = vertical ? meters.Count : Math.Clamp(maxRowsPerColumn, 1, 8);
+        int cols = vertical ? 1 : ColumnsFor(false, meters.Count, maxRows);
+        int meterRowsPerCol = (int)Math.Ceiling(meters.Count / (double)cols);
 
-        // A vertical bar is too narrow to put a name beside a track, so each meter takes two lines
-        // there and one here.
+        // Include the header row when it fits inside maxRows (e.g. Antigravity's 2 limits + 1 header
+        // = 3 rows, or 4 rows across 2 columns = 2 rows/col + 1 header = 3 rows) and each row gets
+        // enough vertical height to stay crisp.
+        bool showHeader = !vertical && !string.IsNullOrEmpty(headerTitle)
+                          && (meterRowsPerCol + 1 <= maxRows)
+                          && (area.Height - 2) / (meterRowsPerCol + 1) >= 11;
+        int totalRows = meterRowsPerCol + (showHeader ? 1 : 0);
+
         int minRowH = vertical ? 18 : (totalRows >= 4 ? 8 : 10);
-        int maxRowH = vertical ? 27 : 15;
-        int availH = Math.Max(totalRows * minRowH, area.Height - (totalRows >= 5 && !vertical ? 2 : 4));
+        int maxRowH = vertical ? 34 : 38;
+        int vPad = vertical ? 4 : (totalRows >= 5 ? 2 : (area.Height >= 56 ? 6 : 4));
+        int availH = Math.Max(totalRows * minRowH, area.Height - vPad);
         int rowHeight = Math.Clamp(availH / totalRows, minRowH, maxRowH);
         int top = area.Y + Math.Max(1, (area.Height - totalRows * rowHeight) / 2);
-        int barThick = vertical ? BarThickness : Math.Min(BarThickness, Math.Max(4, rowHeight - 4));
+        int barThick = vertical
+            ? Math.Clamp(rowHeight / 3, 6, 12)
+            : Math.Clamp((int)Math.Round(rowHeight * 0.50), 5, 16);
 
         bool compact = !vertical && rowHeight <= 9;
-        using var nameFont = Theme.Face(vertical ? 6.5f : (compact ? 6.3f : 7f));
-        using var boldNameFont = Theme.Face(vertical ? 6.5f : (compact ? 6.3f : 7f), FontStyle.Bold);
-        using var figureFont = Theme.Face(vertical && hasSubtext ? 6.5f : (compact ? 6.4f : 7.5f), FontStyle.Bold);
-        using var subFont = Theme.Face(compact ? 6.2f : 6.8f);
+        float scale = vertical ? 1f : Math.Clamp(rowHeight / 13.0f, 0.72f, 2.0f);
+        float namePt = vertical ? 6.8f : (compact ? 6.3f : Math.Clamp(7.2f * scale, 6.5f, 14f));
+        float figPt = vertical && hasSubtext ? 6.5f : (compact ? 6.4f : Math.Clamp(7.6f * scale, 6.8f, 14.5f));
+        float subPt = compact ? 6.2f : Math.Clamp(6.8f * scale, 6.2f, 13f);
+
+        using var nameFont = Theme.Face(namePt);
+        using var boldNameFont = Theme.Face(namePt, FontStyle.Bold);
+        using var figureFont = Theme.Face(figPt, FontStyle.Bold);
+        using var subFont = Theme.Face(subPt);
+        using var defaultLblBrush = new SolidBrush(DefaultLabelColour);
         using var muted = new SolidBrush(Theme.Muted);
         using var subBrush = new SolidBrush(SubtextColour);
+        using var innerSepPen = new Pen(InnerDivider, 1f);
+
+        int outerPad = vertical ? 4 : Math.Clamp((int)Math.Round(5 * scale), 4, 10);
+        int colGap = cols > 1 ? Math.Clamp((int)Math.Round(12 * scale), 10, 20) : 0;
 
         int meterStartRow = 0;
         if (showHeader)
         {
-            var hdrRow = new Rectangle(area.X + 4, top, area.Width - 8, rowHeight);
+            var hdrRow = new Rectangle(area.X + outerPad, top, Math.Max(16, area.Width - outerPad * 2), rowHeight);
             PaintHeaderRow(g, hdrRow, headerTitle!, headerTag, headerColour ?? Theme.Accent,
-                           sparkleGlyph, boldNameFont, nameFont, muted);
+                           sparkleGlyph, boldNameFont, nameFont, muted, scale);
             meterStartRow = 1;
         }
 
-        int nameW = hasSubtext ? NameWidth : ShortNameWidth;
+        int totalInnerW = Math.Max(16, area.Width - outerPad * 2);
+        int colWidth = cols == 1 ? totalInnerW : Math.Max(40, (totalInnerW - colGap * (cols - 1)) / cols);
 
-        for (int i = 0; i < meters.Count; i++)
+        using var centred = new StringFormat
         {
-            var meter = meters[i];
-            int r = meterStartRow + i;
-            var row = new Rectangle(area.X + 4, top + r * rowHeight, area.Width - 8, rowHeight);
+            Alignment = vertical ? StringAlignment.Center : StringAlignment.Near,
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter,
+            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+        };
+        using var figures = new StringFormat
+        {
+            Alignment = vertical ? StringAlignment.Center : StringAlignment.Far,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+        };
 
-            Rectangle name, track, figure, sub = Rectangle.Empty;
-            if (vertical)
-            {
-                name   = new Rectangle(row.X, row.Y, row.Width, 10);
-                track  = new Rectangle(row.X, row.Y + 10, row.Width, barThick);
-                figure = new Rectangle(row.X, row.Y + 10 + barThick, row.Width, Math.Max(8, rowHeight - barThick - 10));
-            }
-            else if (hasSubtext)
-            {
-                name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
-                sub    = new Rectangle(row.Right - SubtextWidth, row.Y, SubtextWidth, rowHeight);
-                figure = new Rectangle(sub.X - FigureWidth - 2, row.Y, FigureWidth, rowHeight);
-                track  = new Rectangle(row.X + nameW, row.Y + (rowHeight - barThick) / 2,
-                                       Math.Max(8, figure.X - (row.X + nameW) - 4), barThick);
-            }
-            else
-            {
-                name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
-                track  = new Rectangle(row.X + nameW, row.Y + (rowHeight - barThick) / 2,
-                                       Math.Max(8, row.Width - nameW - FigureWidth - 4), barThick);
-                figure = new Rectangle(row.Right - FigureWidth, row.Y, FigureWidth, rowHeight);
-            }
+        for (int c = 0; c < cols; c++)
+        {
+            int startIdx = c * meterRowsPerCol;
+            int countInCol = Math.Min(meterRowsPerCol, meters.Count - startIdx);
+            if (countInCol <= 0) break;
 
-            var barColour = meter.BarColour ?? Fill(meter.Percent, lowColour);
-            Track(g, track, meter.Percent, barColour);
+            int colX = area.X + outerPad + c * (colWidth + colGap);
 
-            using var centred = new StringFormat
+            if (c > 0 && !vertical)
             {
-                Alignment = vertical ? StringAlignment.Center : StringAlignment.Near,
-                LineAlignment = StringAlignment.Center,
-                Trimming = StringTrimming.EllipsisCharacter,
-                FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
-            };
-
-            if (meter.LabelColour is { } customLbl)
-            {
-                using var lblBrush = new SolidBrush(customLbl);
-                g.DrawString(meter.Label, meter.BoldLabel ? boldNameFont : nameFont, lblBrush, name, centred);
-            }
-            else
-            {
-                g.DrawString(meter.Label, meter.BoldLabel ? boldNameFont : nameFont, muted, name, centred);
+                int sepX = colX - colGap / 2;
+                int sepTop = top + meterStartRow * rowHeight + 2;
+                int sepBot = top + (meterStartRow + meterRowsPerCol) * rowHeight - 2;
+                if (sepBot > sepTop)
+                    g.DrawLine(innerSepPen, sepX, sepTop, sepX, sepBot);
             }
 
-            using var brush = new SolidBrush(barColour);
-            using var figures = new StringFormat
+            // Measure the widest label, figure, and subtext in this column so larger fonts never clip
+            // and short labels (like "A1M" or "CPU") donate their spare width to the progress bar.
+            bool colHasSubtext = false;
+            float maxLblW = 0f, maxFigW = g.MeasureString("100%", figureFont).Width, maxSubW = 0f;
+            for (int j = 0; j < countInCol; j++)
             {
-                Alignment = vertical ? StringAlignment.Center : StringAlignment.Far,
-                LineAlignment = StringAlignment.Center,
-                FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
-            };
+                var m = meters[startIdx + j];
+                float lw = g.MeasureString(m.Label, m.BoldLabel ? boldNameFont : nameFont).Width;
+                if (lw > maxLblW) maxLblW = lw;
 
-            string figText = meter.FigureText ?? $"{meter.Percent}%";
+                string ft = m.FigureText ?? $"{m.Percent}%";
+                float fw = g.MeasureString(ft, figureFont).Width;
+                if (fw > maxFigW) maxFigW = fw;
 
-            if (vertical && !string.IsNullOrEmpty(meter.Subtext))
-            {
-                string combined = figText == "—" ? meter.Subtext : $"{figText} · {meter.Subtext}";
-                g.DrawString(combined, figureFont, brush, figure, figures);
-            }
-            else
-            {
-                g.DrawString(figText, figureFont, brush, figure, figures);
-                if (!vertical && !string.IsNullOrEmpty(meter.Subtext))
+                if (!string.IsNullOrEmpty(m.Subtext))
                 {
-                    if (meter.SubtextColour is { } customSub)
+                    colHasSubtext = true;
+                    float sw = g.MeasureString(m.Subtext, subFont).Width;
+                    if (sw > maxSubW) maxSubW = sw;
+                }
+            }
+
+            int minNameW = (int)Math.Round((colHasSubtext ? 38 : 32) * scale);
+            int nameW = Math.Clamp(Math.Max(minNameW, (int)Math.Ceiling(maxLblW) + 4),
+                                   28, Math.Max(34, colWidth * 42 / 100));
+
+            int minFigW = (int)Math.Round(28 * scale);
+            int figW = Math.Clamp(Math.Max(minFigW, (int)Math.Ceiling(maxFigW) + 3),
+                                  26, Math.Max(30, colWidth * 24 / 100));
+
+            int subW = 0;
+            if (colHasSubtext)
+            {
+                int minSubW = (int)Math.Round(40 * scale);
+                subW = Math.Clamp(Math.Max(minSubW, (int)Math.Ceiling(maxSubW) + 4),
+                                  36, Math.Max(40, colWidth * 30 / 100));
+            }
+
+            int trackGap = Math.Clamp((int)Math.Round(4 * scale), 4, 8);
+
+            for (int j = 0; j < countInCol; j++)
+            {
+                var meter = meters[startIdx + j];
+                int r = meterStartRow + j;
+                var row = new Rectangle(colX, top + r * rowHeight, colWidth, rowHeight);
+
+                Rectangle name, track, figure, sub = Rectangle.Empty;
+                if (vertical)
+                {
+                    int nameH = Math.Max(10, (rowHeight - barThick) / 2);
+                    name   = new Rectangle(row.X, row.Y, row.Width, nameH);
+                    track  = new Rectangle(row.X, row.Y + nameH, row.Width, barThick);
+                    figure = new Rectangle(row.X, row.Y + nameH + barThick, row.Width, Math.Max(8, rowHeight - barThick - nameH));
+                }
+                else if (colHasSubtext)
+                {
+                    name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
+                    sub    = new Rectangle(row.Right - subW, row.Y, subW, rowHeight);
+                    figure = new Rectangle(sub.X - figW - 2, row.Y, figW, rowHeight);
+                    track  = new Rectangle(row.X + nameW + trackGap / 2, row.Y + (rowHeight - barThick) / 2,
+                                           Math.Max(10, figure.X - (row.X + nameW) - trackGap), barThick);
+                }
+                else
+                {
+                    name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
+                    figure = new Rectangle(row.Right - figW, row.Y, figW, rowHeight);
+                    track  = new Rectangle(row.X + nameW + trackGap / 2, row.Y + (rowHeight - barThick) / 2,
+                                           Math.Max(10, figure.X - (row.X + nameW) - trackGap), barThick);
+                }
+
+                var barColour = meter.BarColour ?? Fill(meter.Percent, lowColour);
+                Track(g, track, meter.Percent, barColour);
+
+                if (meter.LabelColour is { } customLbl)
+                {
+                    using var lblBrush = new SolidBrush(customLbl);
+                    g.DrawString(meter.Label, meter.BoldLabel ? boldNameFont : nameFont, lblBrush, name, centred);
+                }
+                else
+                {
+                    g.DrawString(meter.Label, meter.BoldLabel ? boldNameFont : nameFont, defaultLblBrush, name, centred);
+                }
+
+                using var brush = new SolidBrush(barColour);
+                string figText = meter.FigureText ?? $"{meter.Percent}%";
+
+                if (vertical && !string.IsNullOrEmpty(meter.Subtext))
+                {
+                    string combined = figText == "—" ? meter.Subtext : $"{figText} · {meter.Subtext}";
+                    g.DrawString(combined, figureFont, brush, figure, figures);
+                }
+                else
+                {
+                    g.DrawString(figText, figureFont, brush, figure, figures);
+                    if (!vertical && !string.IsNullOrEmpty(meter.Subtext))
                     {
-                        using var customSubBrush = new SolidBrush(customSub);
-                        g.DrawString(meter.Subtext, subFont, customSubBrush, sub, figures);
-                    }
-                    else
-                    {
-                        g.DrawString(meter.Subtext, subFont, subBrush, sub, figures);
+                        if (meter.SubtextColour is { } customSub)
+                        {
+                            using var customSubBrush = new SolidBrush(customSub);
+                            g.DrawString(meter.Subtext, subFont, customSubBrush, sub, figures);
+                        }
+                        else
+                        {
+                            g.DrawString(meter.Subtext, subFont, subBrush, sub, figures);
+                        }
                     }
                 }
             }
@@ -185,7 +289,7 @@ internal static class MeterStrip
 
     private static void PaintHeaderRow(Graphics g, Rectangle row, string title, string? tag,
                                        Color titleColour, bool sparkleGlyph,
-                                       Font titleFont, Font tagFont, Brush tagBrush)
+                                       Font titleFont, Font tagFont, Brush tagBrush, float scale)
     {
         var previous = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -196,10 +300,10 @@ internal static class MeterStrip
         if (sparkleGlyph)
         {
             // Draw a crisp 4-point Gemini/Antigravity star so it never depends on font coverage.
-            float cx = row.X + 4.5f;
+            float rOuter = Math.Clamp(4.2f * scale, 3.8f, 7.5f);
+            float rInner = rOuter * 0.34f;
+            float cx = row.X + rOuter + 0.5f;
             float cy = row.Y + row.Height / 2f;
-            float rOuter = 4.2f;
-            float rInner = 1.4f;
             var pts = new PointF[]
             {
                 new(cx, cy - rOuter),
@@ -212,14 +316,14 @@ internal static class MeterStrip
                 new(cx - rInner, cy - rInner),
             };
             g.FillPolygon(titleBrush, pts);
-            textX += 11;
+            textX += (int)Math.Ceiling(rOuter * 2 + 3 * scale);
         }
         else
         {
-            // Small diamond badge for Claude header when fewer than 3 rows are shown.
-            float cx = row.X + 4f;
+            // Small diamond badge for section headers.
+            float r = Math.Clamp(3.5f * scale, 3.2f, 6.2f);
+            float cx = row.X + r + 0.5f;
             float cy = row.Y + row.Height / 2f;
-            float r = 3.5f;
             var pts = new PointF[]
             {
                 new(cx, cy - r),
@@ -228,7 +332,7 @@ internal static class MeterStrip
                 new(cx - r, cy),
             };
             g.FillPolygon(titleBrush, pts);
-            textX += 10;
+            textX += (int)Math.Ceiling(r * 2 + 3 * scale);
         }
 
         g.SmoothingMode = previous;
@@ -260,13 +364,14 @@ internal static class MeterStrip
         var previous = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        using (var trough = new SolidBrush(Theme.Raised))
+        using (var trough = new SolidBrush(TrackTrough))
             Rounded(g, bar, trough);
 
         if (percent > 0)
         {
             // Always at least a sliver: 1% that renders as nothing reads as 0%.
-            int used = Math.Max(BarThickness, (int)Math.Round(bar.Width * percent / 100.0));
+            int minUsed = Math.Max(BarThickness, bar.Height);
+            int used = Math.Max(minUsed, (int)Math.Round(bar.Width * percent / 100.0));
             using var fill = new SolidBrush(fillColour ?? Fill(percent));
             Rounded(g, new Rectangle(bar.X, bar.Y, Math.Min(used, bar.Width), bar.Height), fill);
         }

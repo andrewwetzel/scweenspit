@@ -351,12 +351,12 @@ public sealed class TaskbarWindow : Form
         return items;
     }
 
-    private int ClockExtent => settings.ShowStatus ? (Vertical ? 48 : 88) : 0;
+    private int StatusIconSize => Vertical ? StatusIcon : Math.Clamp(Breadth * 3 / 5, 30, 44);
 
-    /// <summary>
-    /// Whether the claude.ai strip is drawn here: this bar has to want it, and the account has to be
-    /// configured. An enabled-but-keyless strip would be a permanent placeholder taking up room.
-    /// </summary>
+    private int ClockExtent => settings.ShowStatus
+        ? (Vertical ? 48 : Math.Clamp((int)Math.Round(Breadth * 1.76), 88, 136))
+        : 0;
+
     /// <summary>
     /// Shown whenever the bar is set to show it. Deliberately not also gated on usage tracking being
     /// configured: hiding it until a session key exists means ticking the box appears to do nothing,
@@ -368,14 +368,62 @@ public sealed class TaskbarWindow : Form
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
-    private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
-    private int AntigravityExtent => AntigravityVisible ? UsageStrip.Extent(Vertical) : 0;
-    private int RemoteChatsExtent => RemoteChatsVisible ? UsageStrip.RemoteChatsExtent(Vertical) : 0;
-    private int BambuExtent => BambuVisible ? UsageStrip.BambuExtent(Vertical) : 0;
-    private int MachineExtent => MachineVisible ? MeterStrip.Extent(Vertical) : 0;
+    private (int Usage, int Antigravity, int RemoteChats, int Bambu, int Machine) TrackerExtents()
+    {
+        int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
+        int scale = Math.Clamp(settings.TrackerScale, 80, 300);
+
+        int u = UsageVisible ? UsageStrip.Extent(Vertical, maxRows, Breadth, scale) : 0;
+        int a = AntigravityVisible ? UsageStrip.AntigravityExtent(Vertical, maxRows, Breadth, scale) : 0;
+        int r = RemoteChatsVisible ? UsageStrip.RemoteChatsExtent(Vertical, maxRows, Breadth, scale) : 0;
+        int b = BambuVisible ? UsageStrip.BambuExtent(Vertical, maxRows, Breadth, scale) : 0;
+        int m = MachineVisible ? MeterStrip.Extent(Vertical, Math.Max(3, machine.Count), maxRows, Breadth, scale) : 0;
+
+        int baseTotal = u + a + r + b + m;
+        if (!Vertical && baseTotal > 0 && Width > 0)
+        {
+            int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
+            int leftSlots = Math.Max(Leading + 4, Leading + buttons.Count + 2);
+            int available = Width - leftSlots * Slot - trayAndClock;
+
+            if (settings.ExpandTrackers && available > baseTotal)
+            {
+                double factor = Math.Min(1.65, available / (double)baseTotal);
+                u = (int)Math.Round(u * factor);
+                a = (int)Math.Round(a * factor);
+                r = (int)Math.Round(r * factor);
+                b = (int)Math.Round(b * factor);
+                m = (int)Math.Round(m * factor);
+            }
+            else if (available > 0 && available < baseTotal)
+            {
+                double factor = Math.Max(0.68, available / (double)baseTotal);
+                u = (int)Math.Round(u * factor);
+                a = (int)Math.Round(a * factor);
+                r = (int)Math.Round(r * factor);
+                b = (int)Math.Round(b * factor);
+                m = (int)Math.Round(m * factor);
+            }
+        }
+
+        return (u, a, r, b, m);
+    }
+
+    private int UsageExtent => TrackerExtents().Usage;
+    private int AntigravityExtent => TrackerExtents().Antigravity;
+    private int RemoteChatsExtent => TrackerExtents().RemoteChats;
+    private int BambuExtent => TrackerExtents().Bambu;
+    private int MachineExtent => TrackerExtents().Machine;
 
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent
+    {
+        get
+        {
+            var (u, a, r, b, m) = TrackerExtents();
+            return u + a + r + b + m + TrayItems().Count * StatusIconSize + ClockExtent;
+        }
+    }
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
@@ -403,8 +451,8 @@ public sealed class TaskbarWindow : Form
     private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent + MachineExtent;
 
     private Rectangle TrayAt(int index) => Vertical
-        ? new Rectangle(0, TrayStart + index * StatusIcon, Width, StatusIcon)
-        : new Rectangle(TrayStart + index * StatusIcon, 0, StatusIcon, Height);
+        ? new Rectangle(0, TrayStart + index * StatusIconSize, Width, StatusIconSize)
+        : new Rectangle(TrayStart + index * StatusIconSize, 0, StatusIconSize, Height);
 
     private Rectangle ClockArea => Vertical
         ? new Rectangle(0, Height - ClockExtent, Width, ClockExtent)
@@ -1222,11 +1270,13 @@ public sealed class TaskbarWindow : Form
                 g.DrawLine(divider, strip.X, strip.Y + 8, strip.X, strip.Bottom - 8);
         }
 
+        int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
+
         if (UsageVisible)
         {
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
-            UsageStrip.Paint(g, strip, ClaudeUsage.Current);
+            UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows);
         }
 
         if (AntigravityVisible)
@@ -1234,7 +1284,7 @@ public sealed class TaskbarWindow : Form
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
             if (UsageVisible) DrawStripSeparator(strip);
-            UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current);
+            UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows);
         }
 
         if (RemoteChatsVisible)
@@ -1242,7 +1292,7 @@ public sealed class TaskbarWindow : Form
             var strip = RemoteChatsArea;
             if (hoveredRemoteChats) g.FillRectangle(hot, strip);
             if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
-            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current);
+            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows);
         }
 
         if (BambuVisible)
@@ -1250,7 +1300,7 @@ public sealed class TaskbarWindow : Form
             var strip = BambuArea;
             if (hoveredBambu) g.FillRectangle(hot, strip);
             if (UsageVisible || AntigravityVisible || RemoteChatsVisible) DrawStripSeparator(strip);
-            UsageStrip.PaintBambu(g, strip, BambuUsage.Current);
+            UsageStrip.PaintBambu(g, strip, BambuUsage.Current, maxRows);
         }
 
         if (MachineVisible)
@@ -1258,7 +1308,7 @@ public sealed class TaskbarWindow : Form
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
             if (UsageVisible || AntigravityVisible || RemoteChatsVisible || BambuVisible) DrawStripSeparator(strip);
-            MeterStrip.Paint(g, strip, machine);
+            MeterStrip.Paint(g, strip, machine, maxRowsPerColumn: maxRows);
         }
 
         var items = TrayItems();
@@ -1283,7 +1333,7 @@ public sealed class TaskbarWindow : Form
     /// <summary>Our own split-screen glyph, the same one the tray icon uses.</summary>
     private void PaintHome(Graphics g, Rectangle area)
     {
-        int size = Math.Clamp(Math.Min(area.Width, area.Height) / 2, 12, 22);
+        int size = Math.Clamp(Math.Min(area.Width, area.Height) / 2, 12, 28);
         var box = new Rectangle(area.X + (area.Width - size) / 2, area.Y + (area.Height - size) / 2, size, size);
 
         int split = (int)Math.Round(box.Width * 0.68);
@@ -1296,8 +1346,9 @@ public sealed class TaskbarWindow : Form
 
     private void PaintClock(Graphics g)
     {
-        using var time = Theme.Face(Vertical ? 12f : 13f, FontStyle.Bold);
-        using var date = Theme.Face(Vertical ? 8f : 9f);
+        float clockScale = Vertical ? 1f : Math.Clamp(Height / 50f, 0.9f, 1.45f);
+        using var time = Theme.Face(Vertical ? 12f : 13f * clockScale, FontStyle.Bold);
+        using var date = Theme.Face(Vertical ? 8f : 9f * clockScale);
         using var brush = new SolidBrush(Theme.Text);
         using var faint = new SolidBrush(Theme.Muted);
         using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };

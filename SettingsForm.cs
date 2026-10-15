@@ -1034,6 +1034,29 @@ public sealed class SettingsForm : Form
             if (!BambuUsage.Enabled)
                 page.Controls.Add(Theme.Caption(
                     "Drawn next to the AI usage bars; streams live print status from Bambu Cloud once enabled."));
+
+            page.Controls.Add(new Label
+            {
+                Text = "Tracker size & layout", AutoSize = true, ForeColor = Theme.Text,
+                Font = Theme.Face(10.5f, FontStyle.Bold), Margin = new Padding(0, 12, 0, 2),
+            });
+
+            var expandTrackers = Theme.Toggle("Expand trackers into unused width on wide horizontal bars", settings.ExpandTrackers);
+            expandTrackers.CheckedChanged += (_, _) => { settings.ExpandTrackers = expandTrackers.Checked; Save(); };
+            page.Controls.Add(expandTrackers);
+
+            var trackerScale = Theme.Number(settings.TrackerScale, 80, 300, 10);
+            trackerScale.ValueChanged += (_, _) => { settings.TrackerScale = (int)trackerScale.Value; Save(); };
+            Row(page, "Tracker column width scale (%)", trackerScale);
+
+            var trackerRows = Theme.Number(settings.TrackerMaxRows, 1, 6, 1);
+            trackerRows.ValueChanged += (_, _) => { settings.TrackerMaxRows = (int)trackerRows.Value; Save(); };
+            Row(page, "Max rows per tracker column (horizontal bar)", trackerRows);
+            page.Controls.Add(Theme.Caption(
+                "3 puts 5 Bambu printers or multiple server rows into 2 side-by-side columns so every " +
+                "tracker matches the 3-row height. Lowering this to 2 wraps 3-row strips into 2 columns " +
+                "as well, making every bar and label much taller. Raising the bar's Thickness above " +
+                "50 px also scales up tracker fonts and bar thickness automatically."));
         }
     }
 

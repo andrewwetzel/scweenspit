@@ -169,6 +169,25 @@ public sealed class BarSettings
     /// </summary>
     public bool ShowRemoteChats { get; set; }
 
+    /// <summary>
+    /// Automatically stretch the enabled status/usage tracker strips into unused horizontal space on
+    /// a wide bar so their progress tracks and figures are larger and easier to read at a glance.
+    /// </summary>
+    public bool ExpandTrackers { get; set; } = true;
+
+    /// <summary>
+    /// Base width scale percentage for each tracker column (80%–300%). Default 125% gives longer
+    /// progress bars and breathing room on wide taskbars even before automatic expansion.
+    /// </summary>
+    public int TrackerScale { get; set; } = 125;
+
+    /// <summary>
+    /// Maximum meter rows stacked vertically in a single column on a horizontal bar before wrapping
+    /// into side-by-side columns (1–6). Default 3 keeps 5 Bambu printers or multiple remote servers
+    /// in 2 columns of 3 rows instead of cramping 5+ tiny rows into one column.
+    /// </summary>
+    public int TrackerMaxRows { get; set; } = 3;
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
