@@ -589,7 +589,7 @@ public static class ClaudeUsage
     /// Read fresh on each poll because Claude Code rewrites this file whenever it refreshes its
     /// token in the background.
     /// </summary>
-    private static string? ReadClaudeCodeToken(out string? plan)
+    internal static string? ReadClaudeCodeToken(out string? plan)
     {
         plan = null;
         try
@@ -617,6 +617,41 @@ public static class ClaudeUsage
             Log.WriteOnce("claude-code-creds", $"could not read Claude Code credentials: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Performs an authenticated GET against claude.ai using the stored browser session key (if any),
+    /// adopting any rotated session cookie along the way.
+    /// </summary>
+    internal static (int Status, string Body)? GetWithStoredSessionKey(string pathAndQuery)
+    {
+        string? stored, key, org;
+        lock (gate)
+        {
+            stored = settings?.SessionKey;
+            key = Secret.Unprotect(stored);
+            org = settings?.OrgId;
+        }
+
+        if (!Plausible(key)) return null;
+
+        var activeKey = key!;
+        if (string.IsNullOrWhiteSpace(org))
+        {
+            org = ResolveOrg(ref activeKey);
+            if (!string.IsNullOrWhiteSpace(org))
+            {
+                lock (gate)
+                {
+                    if (settings is not null) { settings.OrgId = org; persist?.Invoke(); }
+                }
+            }
+        }
+
+        var reply = Get($"{Origin}{pathAndQuery}", activeKey, org);
+        if (reply is null) return null;
+        if (reply.Status < 400) AdoptRotatedKey(reply, ref activeKey);
+        return (reply.Status, reply.Body);
     }
 
     /// <summary>

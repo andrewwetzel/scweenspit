@@ -529,6 +529,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         ClaudeUsage.Configure(config.Claude, SaveFromPoller);
         AntigravityUsage.Configure(config.Antigravity, SaveFromPoller);
+        RemoteChatUsage.Configure(config.RemoteChats, SaveFromPoller);
         BambuUsage.Configure(config.Bambu, SaveFromPoller);
     }
 
@@ -931,6 +932,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             foregroundWatch.Dispose();
             ClaudeUsage.Stop();      // stops the poll loops before the process winds down
             AntigravityUsage.Stop();
+            RemoteChatUsage.Stop();
             BambuUsage.Stop();
             StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations

@@ -767,6 +767,32 @@ public static class AntigravityUsage
         return ParseCloudCodeModelsFallback(modelsReply.Value.Body);
     }
 
+    /// <summary>
+    /// Returns a valid Google OAuth access token using either the stored refresh token or the local
+    /// Antigravity CLI token file, refreshing it automatically when needed.
+    /// </summary>
+    internal static string? GetValidAccessToken(bool forceRefresh = false)
+    {
+        string? storedRefresh;
+        lock (gate) storedRefresh = settings?.RefreshToken;
+
+        var refreshToken = Secret.Unprotect(storedRefresh);
+        string? cliAccess = null;
+        DateTimeOffset? cliExpiry = null;
+
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            if (!ReadCliTokens(out cliAccess, out var cliRefresh, out cliExpiry)
+                || string.IsNullOrWhiteSpace(cliRefresh))
+            {
+                return null;
+            }
+            refreshToken = cliRefresh;
+        }
+
+        return GetOrRefreshAccessToken(refreshToken, cliAccess, cliExpiry, forceRefresh);
+    }
+
     private static string? GetOrRefreshAccessToken(string refreshToken, string? cliAccess,
                                                    DateTimeOffset? cliExpiry, bool forceRefresh)
     {

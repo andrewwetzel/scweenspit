@@ -163,6 +163,12 @@ public sealed class BarSettings
     /// </summary>
     public bool ShowBambu { get; set; }
 
+    /// <summary>
+    /// Show live Claude Code and Antigravity remote server chat counts and states next to the AI
+    /// usage strips in the status cluster. Per-bar for the same reason <see cref="ShowUsage"/> is.
+    /// </summary>
+    public bool ShowRemoteChats { get; set; }
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
@@ -316,6 +322,80 @@ public sealed class BambuSettings
 
     /// <summary>Seconds between cloud device-list syncs (live status streams continuously over MQTT).</summary>
     public int RefreshSeconds { get; set; } = 60;
+}
+
+/// <summary>
+/// One server × service row (e.g. "lp-server-vm · Claude" or "hx525 · Antigravity") in the
+/// remote server chats taskbar strip, kept in the display order the user chooses in Settings.
+/// </summary>
+public sealed class RemoteServerRowConfig
+{
+    /// <summary>Stable key (`"{server}:{service}"`, e.g. `"lp-server-vm:Claude"`).</summary>
+    public string Id { get; set; } = "";
+
+    /// <summary>Normalized server name (e.g. `"lp-server-vm"`, `"hx525"`).</summary>
+    public string Server { get; set; } = "";
+
+    /// <summary>`"Claude"` or `"Antigravity"`.</summary>
+    public string Service { get; set; } = "";
+
+    /// <summary>Optional short label override for the taskbar strip (e.g. `"lp·Cl"`, `"hx525·AG"`).</summary>
+    public string? Label { get; set; }
+
+    /// <summary>Whether to draw this row in the taskbar strip.</summary>
+    public bool Enabled { get; set; } = true;
+
+    [JsonIgnore]
+    public string DisplayName => !string.IsNullOrWhiteSpace(Label) ? Label.Trim()
+                               : DefaultLabel(Server, Service);
+
+    public static string DefaultLabel(string server, string service)
+    {
+        string shortSrv = ShortServerName(server);
+        string shortSvc = string.Equals(service, "Antigravity", StringComparison.OrdinalIgnoreCase) ? "AG" : "Cl";
+        return $"{shortSrv}·{shortSvc}";
+    }
+
+    public static string ShortServerName(string server)
+    {
+        var s = (server ?? "").Trim();
+        if (s.EndsWith("-headless", StringComparison.OrdinalIgnoreCase))
+            s = s[..^9];
+        if (s.EndsWith("-server-vm", StringComparison.OrdinalIgnoreCase))
+            s = s[..^10];
+        else if (s.EndsWith("-vm", StringComparison.OrdinalIgnoreCase))
+            s = s[..^3];
+        else if (s.EndsWith("-server", StringComparison.OrdinalIgnoreCase))
+            s = s[..^7];
+        return s.Length > 7 ? s[..7] : (s.Length > 0 ? s : "srv");
+    }
+}
+
+/// <summary>
+/// Everything the remote server chats monitor strip needs. Polls Claude Code Remote Control
+/// (`api.anthropic.com/v1/environment_providers` &amp; `/v1/code/sessions`) and Antigravity Remote
+/// Control (`cloudcode-pa.googleapis.com/v1internal:listInstances` &amp; `:proxyCommand`) using the
+/// credentials already configured under Claude usage and Antigravity usage.
+/// </summary>
+public sealed class RemoteChatsSettings
+{
+    /// <summary>Master switch. Off means we never query remote sessions or instances.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Seconds between polls. Twenty seconds keeps chat counts and states responsive.</summary>
+    public int RefreshSeconds { get; set; } = 20;
+
+    /// <summary>
+    /// How many hours a recently finished or idle unarchived chat stays counted in the "Done" tally
+    /// before aging out into historical history.
+    /// </summary>
+    public int DoneWindowHours { get; set; } = 12;
+
+    /// <summary>
+    /// Known server × service rows in the top-to-bottom order they appear on the bar. Newly
+    /// discovered servers are appended automatically so manual ordering and labels are preserved.
+    /// </summary>
+    public List<RemoteServerRowConfig> Rows { get; set; } = new();
 }
 
 public sealed class MonitorLayout
@@ -479,6 +559,12 @@ public sealed class SplitConfig
     /// draw it is per-bar.
     /// </summary>
     public BambuSettings Bambu { get; set; } = new();
+
+    /// <summary>
+    /// The remote server chats strip (Claude Code &amp; Antigravity per server). Polled once for
+    /// the machine; which bars draw it is per-bar.
+    /// </summary>
+    public RemoteChatsSettings RemoteChats { get; set; } = new();
 
     public const string Fallback = "*";
 
@@ -697,6 +783,12 @@ public sealed class SplitConfig
         else
             Bambu.Region = "China";
 
+        RemoteChats ??= new RemoteChatsSettings();
+        RemoteChats.RefreshSeconds = Math.Clamp(RemoteChats.RefreshSeconds, 10, 600);
+        RemoteChats.DoneWindowHours = Math.Clamp(RemoteChats.DoneWindowHours, 1, 168);
+        RemoteChats.Rows ??= new();
+        RemoteChats.Rows.RemoveAll(r => r is null || string.IsNullOrWhiteSpace(r.Id));
+
         foreach (var layout in Monitors.Values)
         {
             // Fractions outside [0,1] would place a zone off the monitor entirely - a window sent
@@ -808,6 +900,7 @@ public sealed class SplitConfig
         Claude = o.Claude;
         Antigravity = o.Antigravity;
         Bambu = o.Bambu;
+        RemoteChats = o.RemoteChats;
     }
 
     /// <summary>

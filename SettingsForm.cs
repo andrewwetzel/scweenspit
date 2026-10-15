@@ -74,6 +74,7 @@ public sealed class SettingsForm : Form
         AddNav("Taskbar", ShowTaskbar);
         AddNav("Claude usage", ShowClaude);
         AddNav("Antigravity usage", ShowAntigravity);
+        AddNav("Remote chats", ShowRemoteChats);
         AddNav("Bambu printers", ShowBambu);
         AddNav("Exclusions", ShowExclusions);
         AddNav("Displays", ShowDisplays);
@@ -985,6 +986,31 @@ public sealed class SettingsForm : Form
                 page.Controls.Add(Theme.Caption(
                     "Drawn next to the Claude bars; reads from Google's Cloud Code API or the local Antigravity language server once enabled."));
 
+            var remoteChats = Theme.Toggle("Show remote server chat status (Claude & Antigravity)", settings.ShowRemoteChats);
+            remoteChats.CheckedChanged += (_, _) => { settings.ShowRemoteChats = remoteChats.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            page.Controls.Add(remoteChats);
+
+            if (settings.ShowRemoteChats && !RemoteChatUsage.Enabled)
+            {
+                page.Controls.Add(new Label
+                {
+                    Text = "⚠  The remote chat strip is on the bar, but tracking is still switched "
+                         + "off under Remote chats.",
+                    AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                    Font = Theme.Face(9f), Margin = new Padding(0, 2, 0, 4),
+                });
+
+                var setUpRemote = Theme.Action("Set up Remote chats", primary: true);
+                setUpRemote.AutoSize = true;
+                setUpRemote.Click += (_, _) => BeginInvoke(() => GoTo("Remote chats"));
+                page.Controls.Add(setUpRemote);
+            }
+
+            if (!RemoteChatUsage.Enabled)
+                page.Controls.Add(Theme.Caption(
+                    "Drawn to the right of the Claude & Antigravity usage bars; shows live chat counts, " +
+                    "chats needing interaction, and completed sessions per remote server."));
+
             var bambu = Theme.Toggle("Show Bambu printer status bars", settings.ShowBambu);
             bambu.CheckedChanged += (_, _) => { settings.ShowBambu = bambu.Checked; Save(); BeginInvoke(ShowTaskbar); };
             page.Controls.Add(bambu);
@@ -1802,6 +1828,274 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Turn the bars on per display under Taskbar ▸ Show Bambu printer status bars."));
+    }
+
+    private void ShowRemoteChats()
+    {
+        var page = Page("Remote server chat status",
+            "Track live Claude Code and Antigravity remote control chats across your servers " +
+            "(e.g. work vs. personal), showing how many chats are open, running, waiting on your " +
+            "input, or recently finished.");
+
+        var remote = config.RemoteChats;
+
+        var on = Theme.Toggle("Track remote Claude Code & Antigravity chats", remote.Enabled);
+        on.CheckedChanged += (_, _) =>
+        {
+            remote.Enabled = on.Checked;
+            if (remote.Enabled)
+            {
+                bool anyBarHadIt = false;
+                foreach (var b in config.Bars.Values)
+                {
+                    if (b.ShowRemoteChats) { anyBarHadIt = true; break; }
+                }
+                if (!anyBarHadIt)
+                {
+                    foreach (var b in config.Bars.Values) b.ShowRemoteChats = true;
+                }
+            }
+            Save();
+            BeginInvoke(ShowRemoteChats);
+        };
+        page.Controls.Add(on);
+
+        if (!remote.Enabled)
+        {
+            page.Controls.Add(Theme.Caption(
+                "While this is off, ScweenSpit does not poll Claude Code Remote Control or Antigravity Remote Control."));
+            return;
+        }
+
+        page.Controls.Add(Theme.Caption(
+            "Reuses your signed-in Claude Code credentials (~/.claude/.credentials.json or claude.ai session key) " +
+            "and Google Cloud Code OAuth token from the Claude usage and Antigravity usage tabs."));
+
+        // ---- Server × service row order & custom labels ---------------------
+        page.Controls.Add(new Label
+        {
+            Text = "Server × service rows & bar labels (top to bottom)",
+            AutoSize = true, Font = Theme.Face(11f, FontStyle.Bold),
+            ForeColor = Theme.Text, Margin = new Padding(0, 8, 0, 2),
+        });
+
+        page.Controls.Add(Theme.Caption(
+            "Use ↑ and ↓ to order rows on the taskbar strip. Uncheck any server × service pair you don't " +
+            "want displayed (for example if a server only runs Antigravity or only runs Claude). Keep " +
+            "short labels brief (e.g. lp·Cl, lp·AG, hx525·AG) so status badges stay compact."));
+
+        if (remote.Rows.Count == 0)
+        {
+            page.Controls.Add(new Label
+            {
+                Text = "No remote servers discovered yet — click 'Check now' below to scan your Claude & Antigravity remote instances.",
+                AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+                Margin = new Padding(0, 2, 0, 10),
+            });
+        }
+        else
+        {
+            var liveMap = RemoteChatUsage.Current?.Rows.ToDictionary(r => r.Id, StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < remote.Rows.Count; i++)
+            {
+                int index = i;
+                var rowCfg = remote.Rows[index];
+
+                var row = new FlowLayoutPanel
+                {
+                    AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                    WrapContents = false, Margin = new Padding(0, 1, 0, 2),
+                };
+
+                var posLabel = new Label
+                {
+                    Text = $"{index + 1}.", Width = 22, AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleRight, ForeColor = Theme.Muted,
+                    Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 5, 4, 0),
+                };
+                row.Controls.Add(posLabel);
+
+                var toggle = new CheckBox
+                {
+                    Checked = rowCfg.Enabled, AutoSize = true, ForeColor = Theme.Text,
+                    FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 6, 4, 0),
+                };
+                toggle.CheckedChanged += (_, _) =>
+                {
+                    rowCfg.Enabled = toggle.Checked;
+                    Save();
+                    RemoteChatUsage.NotifyRowsEdited();
+                };
+                row.Controls.Add(toggle);
+
+                var upBtn = Theme.Action("↑");
+                upBtn.Size = new Size(30, 26);
+                upBtn.Margin = new Padding(0, 2, 3, 2);
+                upBtn.Enabled = index > 0;
+                upBtn.Click += (_, _) =>
+                {
+                    if (index <= 0 || index >= remote.Rows.Count) return;
+                    (remote.Rows[index - 1], remote.Rows[index]) = (remote.Rows[index], remote.Rows[index - 1]);
+                    Save();
+                    RemoteChatUsage.NotifyRowsEdited();
+                    BeginInvoke(ShowRemoteChats);
+                };
+                row.Controls.Add(upBtn);
+
+                var downBtn = Theme.Action("↓");
+                downBtn.Size = new Size(30, 26);
+                downBtn.Margin = new Padding(0, 2, 8, 2);
+                downBtn.Enabled = index < remote.Rows.Count - 1;
+                downBtn.Click += (_, _) =>
+                {
+                    if (index < 0 || index >= remote.Rows.Count - 1) return;
+                    (remote.Rows[index + 1], remote.Rows[index]) = (remote.Rows[index], remote.Rows[index + 1]);
+                    Save();
+                    RemoteChatUsage.NotifyRowsEdited();
+                    BeginInvoke(ShowRemoteChats);
+                };
+                row.Controls.Add(downBtn);
+
+                string defaultShort = RemoteServerRowConfig.DefaultLabel(rowCfg.Server, rowCfg.Service);
+                var labelBox = new TextBox
+                {
+                    Text = rowCfg.Label ?? "", Width = 86, BackColor = Theme.Raised, ForeColor = Theme.Text,
+                    Font = Theme.Face(9f), BorderStyle = BorderStyle.FixedSingle,
+                    Margin = new Padding(0, 3, 8, 2),
+                    PlaceholderText = defaultShort,
+                };
+                labelBox.TextChanged += (_, _) =>
+                {
+                    rowCfg.Label = (labelBox.Text ?? "").Trim();
+                    Save();
+                    RemoteChatUsage.NotifyRowsEdited();
+                };
+                row.Controls.Add(labelBox);
+
+                string statusSummary = "";
+                if (liveMap is not null && liveMap.TryGetValue(rowCfg.Id, out var live))
+                {
+                    if (!live.Online)
+                        statusSummary = " — offline";
+                    else if (live.TotalCount == 0)
+                        statusSummary = " — 0 open chats";
+                    else
+                    {
+                        var parts = new List<string>();
+                        if (live.WaitingCount > 0) parts.Add($"{live.WaitingCount} need input");
+                        if (live.RunningCount > 0) parts.Add($"{live.RunningCount} running");
+                        if (live.DoneCount > 0) parts.Add($"{live.DoneCount} done/idle");
+                        statusSummary = $" — {live.TotalCount} open ({string.Join(", ", parts)})";
+                    }
+                }
+
+                bool isAg = string.Equals(rowCfg.Service, "Antigravity", StringComparison.OrdinalIgnoreCase);
+                string svcName = isAg ? "Antigravity" : "Claude Code";
+                var infoLabel = new Label
+                {
+                    Text = $"{rowCfg.Server} · {svcName}{statusSummary}",
+                    AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(9f),
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 6, 0, 0),
+                };
+                infoLabel.Click += (_, _) =>
+                {
+                    var svc = isAg ? RemoteChatService.Antigravity : RemoteChatService.Claude;
+                    RemoteChatUsage.OpenService(svc);
+                };
+                row.Controls.Add(infoLabel);
+
+                page.Controls.Add(row);
+            }
+        }
+
+        var doneHours = Theme.Number(remote.DoneWindowHours, 1, 168, 1);
+        doneHours.ValueChanged += (_, _) => { remote.DoneWindowHours = (int)doneHours.Value; Save(); };
+        Row(page, "Hours to keep idle/finished chats in live count", doneHours);
+
+        var interval = Theme.Number(remote.RefreshSeconds, 10, 300, 5);
+        interval.ValueChanged += (_, _) => { remote.RefreshSeconds = (int)interval.Value; Save(); };
+        Row(page, "Seconds between remote chat checks", interval);
+
+        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 10, 0, 4) };
+
+        var check = Theme.Action("Check now", primary: true);
+        check.AutoSize = true;
+        check.Click += (_, _) =>
+        {
+            RemoteChatUsage.Refresh();
+            Say("Checking remote Claude & Antigravity chats…");
+        };
+        actions.Controls.Add(check);
+
+        var openClaude = Theme.Action("Open claude.ai/code");
+        openClaude.AutoSize = true;
+        openClaude.Click += (_, _) => RemoteChatUsage.OpenService(RemoteChatService.Claude);
+        actions.Controls.Add(openClaude);
+
+        var openAg = Theme.Action("Open antigravity.google");
+        openAg.AutoSize = true;
+        openAg.Click += (_, _) => RemoteChatUsage.OpenService(RemoteChatService.Antigravity);
+        actions.Controls.Add(openAg);
+
+        var diagnosis = new TextBox
+        {
+            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Visible = false,
+            Width = 460, Height = 160, BackColor = Theme.Raised, ForeColor = Theme.Muted,
+            Font = new Font(FontFamily.GenericMonospace, 8.5f), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 8, 0, 8),
+        };
+
+        var test = Theme.Action("Test connection");
+        test.AutoSize = true;
+        test.Click += async (_, _) =>
+        {
+            test.Enabled = false;
+            diagnosis.Visible = true;
+            diagnosis.Text = "Querying Claude Code & Antigravity remote control endpoints…";
+            try
+            {
+                diagnosis.Text = await Task.Run(RemoteChatUsage.SelfTest);
+            }
+            catch (Exception ex) { diagnosis.Text = ex.Message; }
+            finally { test.Enabled = true; }
+        };
+        actions.Controls.Add(test);
+        page.Controls.Add(actions);
+
+        page.Controls.Add(Theme.Caption(
+            "Lists discovered remote bridges/instances and every live session on each server without " +
+            "exposing any OAuth token or session key."));
+        page.Controls.Add(diagnosis);
+
+        var state = new Label
+        {
+            AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+            MaximumSize = new Size(460, 0), Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(state);
+
+        int lastRowCount = remote.Rows.Count;
+        void Report()
+        {
+            state.Text = UsageStrip.RemoteChatsTip(RemoteChatUsage.Current);
+            if (remote.Rows.Count != lastRowCount && !IsDisposed)
+            {
+                lastRowCount = remote.Rows.Count;
+                BeginInvoke(ShowRemoteChats);
+            }
+        }
+        Report();
+
+        var watch = new System.Windows.Forms.Timer { Interval = 1500 };
+        watch.Tick += (_, _) => Report();
+        watch.Start();
+        page.Disposed += (_, _) => { watch.Stop(); watch.Dispose(); };
+
+        page.Controls.Add(Theme.Caption(
+            "Turn the strip on per display under Taskbar ▸ Show remote server chat status."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)

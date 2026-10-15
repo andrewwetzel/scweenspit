@@ -88,6 +88,7 @@ public sealed class TaskbarWindow : Form
     private bool hoveredStart;
     private bool hoveredUsage;
     private bool hoveredAntigravity;
+    private bool hoveredRemoteChats;
     private bool hoveredBambu;
     private bool hoveredMachine;
     private long lastStatusPoll, lastMachinePoll;
@@ -363,16 +364,18 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private bool UsageVisible => settings.ShowUsage;
     private bool AntigravityVisible => settings.ShowAntigravity;
+    private bool RemoteChatsVisible => settings.ShowRemoteChats;
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
     private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
     private int AntigravityExtent => AntigravityVisible ? UsageStrip.Extent(Vertical) : 0;
+    private int RemoteChatsExtent => RemoteChatsVisible ? UsageStrip.RemoteChatsExtent(Vertical) : 0;
     private int BambuExtent => BambuVisible ? UsageStrip.BambuExtent(Vertical) : 0;
     private int MachineExtent => MachineVisible ? MeterStrip.Extent(Vertical) : 0;
 
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => UsageExtent + AntigravityExtent + BambuExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent => UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
@@ -385,15 +388,19 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, StatusStart + UsageExtent, Width, AntigravityExtent)
         : new Rectangle(StatusStart + UsageExtent, 0, AntigravityExtent, Height);
 
+    private Rectangle RemoteChatsArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, RemoteChatsExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, RemoteChatsExtent, Height);
+
     private Rectangle BambuArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, BambuExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, BambuExtent, Height);
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent, Width, BambuExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent, 0, BambuExtent, Height);
 
     private Rectangle MachineArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + BambuExtent, Width, MachineExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + BambuExtent, 0, MachineExtent, Height);
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent, Width, MachineExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent, 0, MachineExtent, Height);
 
-    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + BambuExtent + MachineExtent;
+    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent + MachineExtent;
 
     private Rectangle TrayAt(int index) => Vertical
         ? new Rectangle(0, TrayStart + index * StatusIcon, Width, StatusIcon)
@@ -651,21 +658,24 @@ public sealed class TaskbarWindow : Form
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
         bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
+        bool remoteChats = RemoteChatsVisible && RemoteChatsArea.Contains(e.Location);
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
         if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
-            && antigravity == hoveredAntigravity && bambu == hoveredBambu
-            && load == hoveredMachine && start == hoveredStart) return;
+            && antigravity == hoveredAntigravity && remoteChats == hoveredRemoteChats
+            && bambu == hoveredBambu && load == hoveredMachine && start == hoveredStart) return;
 
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
         hoveredAntigravity = antigravity;
+        hoveredRemoteChats = remoteChats;
         hoveredBambu = bambu;
         hoveredMachine = load;
         hoveredStart = start;
-        Cursor = under >= 0 || tray >= 0 || usage || antigravity || bambu || load || start ? Cursors.Hand : Cursors.Default;
+        Cursor = under >= 0 || tray >= 0 || usage || antigravity || remoteChats || bambu || load || start
+            ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
         // like: five pixels of colour cannot say which limit it is, or when it resets. A button
@@ -674,6 +684,7 @@ public sealed class TaskbarWindow : Form
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
                             : bambu ? UsageStrip.BambuTip(BambuUsage.Current)
+                            : remoteChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current)
                             : antigravity ? UsageStrip.AntigravityTip(AntigravityUsage.Current)
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
@@ -757,6 +768,7 @@ public sealed class TaskbarWindow : Form
         hoveredStart = false;
         hoveredUsage = false;
         hoveredAntigravity = false;
+        hoveredRemoteChats = false;
         hoveredBambu = false;
         hoveredMachine = false;
 
@@ -791,6 +803,21 @@ public sealed class TaskbarWindow : Form
                 SettingsRequested.Invoke("Antigravity usage");
             else
                 MenuRequested?.Invoke(Cursor.Position);
+            return;
+        }
+
+        if (RemoteChatsVisible && RemoteChatsArea.Contains(e.Location))
+        {
+            if (!RemoteChatUsage.Enabled || RemoteChatUsage.Current is { NeedsAuth: true })
+            {
+                if (SettingsRequested is not null)
+                    SettingsRequested.Invoke("Remote chats");
+                else
+                    MenuRequested?.Invoke(Cursor.Position);
+                return;
+            }
+
+            ShowRemoteChatsMenu(Cursor.Position);
             return;
         }
 
@@ -938,6 +965,102 @@ public sealed class TaskbarWindow : Form
         }
 
         if (menu.Items.Count > 0) menu.Show(at); else menu.Dispose();
+    }
+
+    /// <summary>
+    /// Popup menu when the remote server chats strip is clicked, showing every server × service and
+    /// each live, waiting-for-input, or finished chat so any chat can be opened directly.
+    /// </summary>
+    private void ShowRemoteChatsMenu(Point at)
+    {
+        var menu = Theme.Menu();
+        var reading = RemoteChatUsage.Current;
+        var rows = reading?.Rows ?? [];
+
+        if (rows.Count == 0)
+        {
+            var empty = new ToolStripMenuItem(reading?.Error ?? "No remote chats found yet")
+            {
+                Enabled = false,
+                ForeColor = Theme.Muted,
+            };
+            menu.Items.Add(empty);
+        }
+        else
+        {
+            for (int r = 0; r < rows.Count; r++)
+            {
+                var row = rows[r];
+                if (r > 0) menu.Items.Add(new ToolStripSeparator());
+
+                string svcName = row.Service == RemoteChatService.Antigravity ? "Antigravity" : "Claude";
+                var header = new ToolStripMenuItem(
+                    $"{row.Server} · {svcName} — {RemoteChatUsage.DescribeRow(row)}",
+                    null,
+                    (_, _) => RemoteChatUsage.OpenService(row.Service))
+                {
+                    Font = Theme.Face(9f, FontStyle.Bold),
+                    ForeColor = row.WaitingCount > 0
+                        ? Color.FromArgb(255, 210, 115)
+                        : row.Service == RemoteChatService.Antigravity
+                            ? Color.FromArgb(196, 160, 255)
+                            : Color.FromArgb(130, 185, 250),
+                };
+                menu.Items.Add(header);
+
+                foreach (var chat in row.Chats.Take(10))
+                {
+                    var captured = chat;
+                    string prefix = chat.State switch
+                    {
+                        RemoteChatState.Waiting => "  ⚠ [Needs input] ",
+                        RemoteChatState.Running => "  ● [Running] ",
+                        _ => "  ✓ [Done] ",
+                    };
+                    string repo = !string.IsNullOrWhiteSpace(chat.Repo) ? $"({chat.Repo}) " : "";
+                    var item = new ToolStripMenuItem(
+                        prefix + repo + Shorten(chat.Title),
+                        null,
+                        (_, _) => RemoteChatUsage.OpenChat(captured))
+                    {
+                        ForeColor = chat.State switch
+                        {
+                            RemoteChatState.Waiting => Color.FromArgb(255, 210, 115),
+                            RemoteChatState.Running => Theme.Text,
+                            _ => Color.FromArgb(145, 220, 195),
+                        },
+                        ToolTipText = !string.IsNullOrWhiteSpace(chat.Detail)
+                            ? $"{chat.Title}\n{chat.Detail}"
+                            : chat.Title,
+                    };
+                    menu.Items.Add(item);
+                }
+
+                if (row.Chats.Count > 10)
+                {
+                    menu.Items.Add(new ToolStripMenuItem($"  +{row.Chats.Count - 10} more…", null,
+                        (_, _) => RemoteChatUsage.OpenService(row.Service))
+                    {
+                        ForeColor = Theme.Muted,
+                    });
+                }
+            }
+        }
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Open Claude Code web (claude.ai/code)", null,
+            (_, _) => SystemStatus.Open(RemoteChatUsage.ClaudeCodeWebUrl)));
+        menu.Items.Add(new ToolStripMenuItem("Refresh remote chats now", null,
+            (_, _) => RemoteChatUsage.Refresh()));
+        menu.Items.Add(new ToolStripMenuItem("Remote chats settings…", null, (_, _) =>
+        {
+            if (SettingsRequested is not null)
+                SettingsRequested.Invoke("Remote chats");
+            else
+                MenuRequested?.Invoke(Cursor.Position);
+        }));
+
+        menu.Show(at);
     }
 
     /// <summary>A window title is a sentence often enough that a menu built from them is unusable.</summary>
@@ -1114,11 +1237,19 @@ public sealed class TaskbarWindow : Form
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current);
         }
 
+        if (RemoteChatsVisible)
+        {
+            var strip = RemoteChatsArea;
+            if (hoveredRemoteChats) g.FillRectangle(hot, strip);
+            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
+            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current);
+        }
+
         if (BambuVisible)
         {
             var strip = BambuArea;
             if (hoveredBambu) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
+            if (UsageVisible || AntigravityVisible || RemoteChatsVisible) DrawStripSeparator(strip);
             UsageStrip.PaintBambu(g, strip, BambuUsage.Current);
         }
 
@@ -1126,7 +1257,7 @@ public sealed class TaskbarWindow : Form
         {
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible || BambuVisible) DrawStripSeparator(strip);
+            if (UsageVisible || AntigravityVisible || RemoteChatsVisible || BambuVisible) DrawStripSeparator(strip);
             MeterStrip.Paint(g, strip, machine);
         }
 

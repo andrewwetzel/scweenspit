@@ -17,6 +17,7 @@ internal static class UsageStrip
     private static readonly Color ClaudeTitleColour = Color.FromArgb(130, 185, 250);
     private static readonly Color AntigravityTitleColour = Color.FromArgb(196, 160, 255);
     private static readonly Color BambuTitleColour = Color.FromArgb(120, 232, 160);
+    private static readonly Color RemoteChatsTitleColour = Color.FromArgb(145, 215, 255);
 
     /// <summary>Room the strip needs along the bar.</summary>
     public static int Extent(bool vertical) => MeterStrip.UsageExtent(vertical);
@@ -24,6 +25,10 @@ internal static class UsageStrip
     /// <summary>Room the Bambu printer strip needs along the bar.</summary>
     public static int BambuExtent(bool vertical) =>
         MeterStrip.BambuExtent(vertical, BambuUsage.ConfiguredPrinterCount);
+
+    /// <summary>Room the remote server chats strip needs along the bar.</summary>
+    public static int RemoteChatsExtent(bool vertical) =>
+        MeterStrip.BambuExtent(vertical, RemoteChatUsage.ConfiguredRowCount);
 
     public static void Paint(Graphics g, Rectangle area, UsageReading? reading)
     {
@@ -203,6 +208,110 @@ internal static class UsageStrip
             sparkleGlyph: false);
     }
 
+    public static void PaintRemoteChats(Graphics g, Rectangle area, RemoteChatsReading? reading)
+    {
+        var rows = reading?.Rows ?? [];
+        if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading); return; }
+
+        int totalWaiting = 0, totalChats = 0;
+        var meters = new List<Meter>(rows.Count);
+
+        foreach (var r in rows)
+        {
+            totalWaiting += r.WaitingCount;
+            totalChats += r.TotalCount;
+
+            string detail = $"{r.Label}: {RemoteChatUsage.DescribeRow(r)}";
+            Color svcBar = r.Service == RemoteChatService.Antigravity ? MeterStrip.VioletLow : MeterStrip.Low;
+            Color svcTitle = r.Service == RemoteChatService.Antigravity ? AntigravityTitleColour : ClaudeTitleColour;
+
+            int pct;
+            Color barCol;
+            Color? lblCol;
+            bool bold;
+            string figText;
+            string subText;
+            Color? subCol;
+
+            if (r.WaitingCount > 0)
+            {
+                pct = 100;
+                barCol = MeterStrip.Mid;
+                lblCol = Color.FromArgb(255, 210, 115);
+                bold = true;
+                figText = $"{r.TotalCount}!";
+                subText = r.RunningCount > 0 ? $"{r.WaitingCount}! {r.RunningCount}r"
+                        : r.DoneCount > 0 ? $"{r.WaitingCount}! {r.DoneCount}✓"
+                        : $"{r.WaitingCount} wait";
+                subCol = MeterStrip.Mid;
+            }
+            else if (r.RunningCount > 0)
+            {
+                pct = Math.Clamp(r.RunningCount * 35 + r.DoneCount * 15, 25, 100);
+                barCol = svcBar;
+                lblCol = svcTitle;
+                bold = true;
+                figText = $"{r.TotalCount}";
+                subText = r.DoneCount > 0 ? $"{r.RunningCount}r {r.DoneCount}✓" : $"{r.RunningCount} run";
+                subCol = svcTitle;
+            }
+            else if (r.DoneCount > 0)
+            {
+                pct = 100;
+                barCol = MeterStrip.BambuDone;
+                lblCol = Color.FromArgb(145, 220, 195);
+                bold = false;
+                figText = $"{r.TotalCount}";
+                subText = $"{r.DoneCount} done";
+                subCol = Color.FromArgb(130, 220, 190);
+            }
+            else if (r.Online)
+            {
+                pct = 0;
+                barCol = Theme.Muted;
+                lblCol = null;
+                bold = false;
+                figText = "0";
+                subText = "Idle";
+                subCol = Theme.Muted;
+            }
+            else
+            {
+                pct = 0;
+                barCol = Theme.Muted;
+                lblCol = null;
+                bold = false;
+                figText = "—";
+                subText = "Off";
+                subCol = Theme.Muted;
+            }
+
+            meters.Add(new Meter(
+                r.Label,
+                pct,
+                detail,
+                LabelColour: lblCol,
+                BoldLabel: bold,
+                Subtext: subText,
+                BarColour: barCol,
+                FigureText: figText,
+                SubtextColour: subCol));
+        }
+
+        string headerTag = totalWaiting > 0
+            ? $"{totalWaiting}! · {totalChats}"
+            : $"{totalChats} live";
+        Color hdrCol = totalWaiting > 0 ? Color.FromArgb(255, 210, 115) : RemoteChatsTitleColour;
+
+        MeterStrip.Paint(
+            g, area, meters,
+            lowColour: MeterStrip.Low,
+            headerTitle: "Remote Chats",
+            headerTag: headerTag,
+            headerColour: hdrCol,
+            sparkleGlyph: false);
+    }
+
     /// <summary>Nothing to plot yet: say which of the reasons it is, in the space a limit would use.</summary>
     private static void PaintState(Graphics g, Rectangle area, UsageReading? reading, bool isAntigravity)
     {
@@ -251,6 +360,35 @@ internal static class UsageStrip
                 : reading is { Error: not null, Settled: true }
                     ? ("Bambu · error", MeterStrip.High)
                     : ("Bambu ···", BambuTitleColour);
+
+        int width = Math.Max(16, area.Width - 12);
+        var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
+
+        using var brush = new SolidBrush(colour);
+        g.DrawString(text, font, brush, label, centred);
+
+        MeterStrip.Placeholder(g, new Rectangle(area.X + (area.Width - width) / 2,
+                                                area.Bottom - MeterStrip.BarThickness - 4, width,
+                                                MeterStrip.BarThickness));
+    }
+
+    private static void PaintRemoteChatsState(Graphics g, Rectangle area, RemoteChatsReading? reading)
+    {
+        using var font = Theme.Face(7.5f, FontStyle.Bold);
+        using var centred = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+
+        (string text, Color colour) = !RemoteChatUsage.Enabled
+            ? ("Chats · set up", RemoteChatsTitleColour)
+            : reading is { NeedsAuth: true }
+                ? ("Chats · sign in", RemoteChatsTitleColour)
+                : reading is { Error: not null, Settled: true }
+                    ? ("Chats · error", MeterStrip.High)
+                    : ("Chats ···", RemoteChatsTitleColour);
 
         int width = Math.Max(16, area.Width - 12);
         var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
@@ -360,6 +498,61 @@ internal static class UsageStrip
 
             if (p.NozzleTemp is > 0 && p.BedTemp is > 0 && p.State is BambuPrinterState.Printing or BambuPrinterState.Preparing)
                 text.Append($" [{p.NozzleTemp:0}°C / {p.BedTemp:0}°C]");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>Full tooltip breakdown of remote server chats across Claude Code and Antigravity.</summary>
+    public static string RemoteChatsTip(RemoteChatsReading? reading)
+    {
+        if (!RemoteChatUsage.Enabled)
+            return "Remote server chats — switched off (Settings ▸ Remote chats)";
+        if (reading is null)
+            return "Remote server chats — starting up";
+        if (reading.NeedsAuth)
+            return $"Remote server chats — {reading.Error ?? "sign in under Claude usage or Antigravity usage"}";
+        if (reading.Rows.Count == 0 && reading.Error is not null)
+            return $"Remote server chats — {reading.Error}";
+        if (reading.Rows.Count == 0)
+            return "Remote server chats — no enabled servers found yet";
+
+        int waiting = reading.Rows.Sum(r => r.WaitingCount);
+        int running = reading.Rows.Sum(r => r.RunningCount);
+        int done = reading.Rows.Sum(r => r.DoneCount);
+
+        var summary = new List<string>();
+        if (waiting > 0) summary.Add($"{waiting} need input");
+        if (running > 0) summary.Add($"{running} running");
+        if (done > 0) summary.Add($"{done} done");
+        if (summary.Count == 0) summary.Add("all idle");
+
+        var text = new StringBuilder($"Remote Chats — {string.Join(", ", summary)} (click for menu)");
+        foreach (var row in reading.Rows)
+        {
+            text.AppendLine();
+            string svcName = row.Service == RemoteChatService.Antigravity ? "Antigravity" : "Claude";
+            text.Append($"• {row.Server} · {svcName}: {RemoteChatUsage.DescribeRow(row)}");
+
+            foreach (var c in row.Chats.Take(4))
+            {
+                text.AppendLine();
+                string badge = c.State switch
+                {
+                    RemoteChatState.Waiting => "⚠ WAIT",
+                    RemoteChatState.Running => "● RUN",
+                    _ => "✓ DONE",
+                };
+                string repoPrefix = !string.IsNullOrWhiteSpace(c.Repo) ? $"[{c.Repo}] " : "";
+                string shortTitle = c.Title.Length <= 48 ? c.Title : c.Title[..45].TrimEnd() + "…";
+                text.Append($"    {badge}: {repoPrefix}{shortTitle}");
+            }
+
+            if (row.Chats.Count > 4)
+            {
+                text.AppendLine();
+                text.Append($"    +{row.Chats.Count - 4} more…");
+            }
         }
 
         return text.ToString();
