@@ -88,6 +88,7 @@ public sealed class TaskbarWindow : Form
     private bool hoveredStart;
     private bool hoveredUsage;
     private bool hoveredAntigravity;
+    private bool hoveredBambu;
     private bool hoveredMachine;
     private long lastStatusPoll, lastMachinePoll;
 
@@ -361,14 +362,16 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private bool UsageVisible => settings.ShowUsage;
     private bool AntigravityVisible => settings.ShowAntigravity;
+    private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
     private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
     private int AntigravityExtent => AntigravityVisible ? UsageStrip.Extent(Vertical) : 0;
+    private int BambuExtent => BambuVisible ? UsageStrip.BambuExtent(Vertical) : 0;
     private int MachineExtent => MachineVisible ? MeterStrip.Extent(Vertical) : 0;
 
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => UsageExtent + AntigravityExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent => UsageExtent + AntigravityExtent + BambuExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
@@ -381,11 +384,15 @@ public sealed class TaskbarWindow : Form
         ? new Rectangle(0, StatusStart + UsageExtent, Width, AntigravityExtent)
         : new Rectangle(StatusStart + UsageExtent, 0, AntigravityExtent, Height);
 
-    private Rectangle MachineArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, MachineExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, MachineExtent, Height);
+    private Rectangle BambuArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, BambuExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, BambuExtent, Height);
 
-    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + MachineExtent;
+    private Rectangle MachineArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + BambuExtent, Width, MachineExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + BambuExtent, 0, MachineExtent, Height);
+
+    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + BambuExtent + MachineExtent;
 
     private Rectangle TrayAt(int index) => Vertical
         ? new Rectangle(0, TrayStart + index * StatusIcon, Width, StatusIcon)
@@ -643,18 +650,21 @@ public sealed class TaskbarWindow : Form
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
         bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
+        bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
         if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
-            && antigravity == hoveredAntigravity && load == hoveredMachine && start == hoveredStart) return;
+            && antigravity == hoveredAntigravity && bambu == hoveredBambu
+            && load == hoveredMachine && start == hoveredStart) return;
 
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
         hoveredAntigravity = antigravity;
+        hoveredBambu = bambu;
         hoveredMachine = load;
         hoveredStart = start;
-        Cursor = under >= 0 || tray >= 0 || usage || antigravity || load || start ? Cursors.Hand : Cursors.Default;
+        Cursor = under >= 0 || tray >= 0 || usage || antigravity || bambu || load || start ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
         // like: five pixels of colour cannot say which limit it is, or when it resets. A button
@@ -662,6 +672,7 @@ public sealed class TaskbarWindow : Form
         bool previewing = Previewable(under);
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
+                            : bambu ? UsageStrip.BambuTip(BambuUsage.Current)
                             : antigravity ? UsageStrip.AntigravityTip(AntigravityUsage.Current)
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
@@ -745,6 +756,7 @@ public sealed class TaskbarWindow : Form
         hoveredStart = false;
         hoveredUsage = false;
         hoveredAntigravity = false;
+        hoveredBambu = false;
         hoveredMachine = false;
 
         // The preview closes itself once the pointer is over neither it nor the button: leaving the
@@ -776,6 +788,15 @@ public sealed class TaskbarWindow : Form
         {
             if (SettingsRequested is not null)
                 SettingsRequested.Invoke("Antigravity usage");
+            else
+                MenuRequested?.Invoke(Cursor.Position);
+            return;
+        }
+
+        if (BambuVisible && BambuArea.Contains(e.Location))
+        {
+            if (SettingsRequested is not null)
+                SettingsRequested.Invoke("Bambu printers");
             else
                 MenuRequested?.Invoke(Cursor.Position);
             return;
@@ -1086,11 +1107,19 @@ public sealed class TaskbarWindow : Form
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current);
         }
 
+        if (BambuVisible)
+        {
+            var strip = BambuArea;
+            if (hoveredBambu) g.FillRectangle(hot, strip);
+            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
+            UsageStrip.PaintBambu(g, strip, BambuUsage.Current);
+        }
+
         if (MachineVisible)
         {
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
+            if (UsageVisible || AntigravityVisible || BambuVisible) DrawStripSeparator(strip);
             MeterStrip.Paint(g, strip, machine);
         }
 

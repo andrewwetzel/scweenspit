@@ -500,6 +500,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         ClaudeUsage.Configure(config.Claude, SaveFromPoller);
         AntigravityUsage.Configure(config.Antigravity, SaveFromPoller);
+        BambuUsage.Configure(config.Bambu, SaveFromPoller);
     }
 
     private void ApplySnapSuppression()
@@ -900,6 +901,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             foregroundWatch.Dispose();
             ClaudeUsage.Stop();      // stops the poll loops before the process winds down
             AntigravityUsage.Stop();
+            BambuUsage.Stop();
             StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();

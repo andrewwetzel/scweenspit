@@ -74,6 +74,7 @@ public sealed class SettingsForm : Form
         AddNav("Taskbar", ShowTaskbar);
         AddNav("Claude usage", ShowClaude);
         AddNav("Antigravity usage", ShowAntigravity);
+        AddNav("Bambu printers", ShowBambu);
         AddNav("Exclusions", ShowExclusions);
         AddNav("Displays", ShowDisplays);
         AddNav("Updates", ShowUpdates);
@@ -756,6 +757,30 @@ public sealed class SettingsForm : Form
             if (!AntigravityUsage.Enabled)
                 page.Controls.Add(Theme.Caption(
                     "Drawn next to the Claude bars; reads from Google's Cloud Code API or the local Antigravity language server once enabled."));
+
+            var bambu = Theme.Toggle("Show Bambu printer status bars", settings.ShowBambu);
+            bambu.CheckedChanged += (_, _) => { settings.ShowBambu = bambu.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            page.Controls.Add(bambu);
+
+            if (settings.ShowBambu && !BambuUsage.Enabled)
+            {
+                page.Controls.Add(new Label
+                {
+                    Text = "⚠  The Bambu printer strip is on the bar, but tracking is still switched "
+                         + "off under Bambu printers.",
+                    AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                    Font = Theme.Face(9f), Margin = new Padding(0, 2, 0, 4),
+                });
+
+                var setUpBambu = Theme.Action("Set up Bambu printers", primary: true);
+                setUpBambu.AutoSize = true;
+                setUpBambu.Click += (_, _) => BeginInvoke(() => GoTo("Bambu printers"));
+                page.Controls.Add(setUpBambu);
+            }
+
+            if (!BambuUsage.Enabled)
+                page.Controls.Add(Theme.Caption(
+                    "Drawn next to the AI usage bars; streams live print status from Bambu Cloud once enabled."));
         }
     }
 
@@ -1124,6 +1149,417 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Turn the bars on per display under Taskbar ▸ Show Antigravity usage bars."));
+    }
+
+    private void ShowBambu()
+    {
+        var bambu = config.Bambu;
+        var page = Page("Bambu printers",
+            "Live status of your Bambu Lab printers from Bambu Cloud, drawn as a stack of rows " +
+            "right next to your AI session monitors on any bar that asks for them.");
+
+        page.Controls.Add(Theme.Caption(
+            "Connects to Bambu Cloud (api.bambulab.com + MQTT over TLS) to discover your bound " +
+            "printers and stream live progress, remaining time, and error/finish states in real time. " +
+            "Reorder your printers below so the lines on the bar match their order in your closet."));
+
+        var on = Theme.Toggle("Track Bambu Lab printers", bambu.Enabled);
+        on.CheckedChanged += (_, _) =>
+        {
+            bambu.Enabled = on.Checked;
+            Save();
+            if (bambu.Enabled) BambuUsage.Refresh();
+            BeginInvoke(ShowBambu);
+        };
+        page.Controls.Add(on);
+
+        if (!bambu.Enabled)
+        {
+            page.Controls.Add(Theme.Caption(
+                "While this is off, ScweenSpit never connects to Bambu Cloud or its MQTT broker."));
+            return;
+        }
+
+        bool signedIn = BambuUsage.HasSignedInAccount;
+        string? signedEmail = BambuUsage.SignedInEmail;
+        bool mqttUp = BambuUsage.Current?.MqttConnected == true;
+
+        page.Controls.Add(new Label
+        {
+            Text = signedIn
+                ? $"● Signed in to Bambu Cloud{(signedEmail is not null ? $" as {signedEmail}" : "")}" +
+                  (mqttUp ? " — live MQTT stream connected" : "")
+                : "○ Not signed in to Bambu Cloud — sign in below to load your printers",
+            AutoSize = true, MaximumSize = new Size(490, 0),
+            ForeColor = signedIn ? Color.FromArgb(110, 210, 140) : Theme.Muted,
+            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 6, 0, 6),
+        });
+
+        var region = Theme.Choice(["Global", "China"], bambu.Region);
+        region.SelectedIndexChanged += (_, _) =>
+        {
+            if (region.SelectedItem is string r)
+            {
+                bambu.Region = r;
+                Save();
+            }
+        };
+        Row(page, "Bambu Cloud region", region);
+
+        var emailBox = new TextBox
+        {
+            Width = 300, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = Theme.Face(), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 2, 0, 6),
+            Text = bambu.AccountEmail ?? "",
+            PlaceholderText = "you@example.com",
+        };
+        Row(page, "Bambu account email", emailBox);
+
+        var passwordBox = new TextBox
+        {
+            Width = 300, UseSystemPasswordChar = true, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = Theme.Face(), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 2, 0, 6),
+            PlaceholderText = signedIn ? "Signed in — enter password only to sign in again" : "Password",
+        };
+        Row(page, "Password", passwordBox);
+
+        var codePanel = new FlowLayoutPanel
+        {
+            AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0, 2, 0, 6),
+            Visible = BambuUsage.PendingSignInStep is BambuSignInStep.NeedsEmailCode or BambuSignInStep.NeedsTfaCode,
+        };
+
+        var codeLabel = new Label
+        {
+            Text = BambuUsage.PendingSignInStep == BambuSignInStep.NeedsTfaCode
+                ? "2FA code"
+                : "6-digit email code",
+            AutoSize = true, ForeColor = Color.FromArgb(235, 185, 110),
+            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 7, 10, 0),
+        };
+        codePanel.Controls.Add(codeLabel);
+
+        var codeBox = new TextBox
+        {
+            Width = 120, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = Theme.Face(), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 4, 8, 4), PlaceholderText = "123456",
+        };
+        codePanel.Controls.Add(codeBox);
+
+        var verifyBtn = Theme.Action("Verify code", primary: true);
+        verifyBtn.Width = 125;
+        verifyBtn.Click += async (_, _) =>
+        {
+            verifyBtn.Enabled = false;
+            Say("Verifying code with Bambu Cloud…");
+            try
+            {
+                string selectedRegion = region.SelectedItem as string ?? bambu.Region;
+                var (step, msg) = await BambuUsage.CompleteVerificationAsync(
+                    codeBox.Text, emailBox.Text, selectedRegion);
+                Say(msg, problem: step != BambuSignInStep.SignedIn);
+                if (step == BambuSignInStep.SignedIn && !IsDisposed)
+                {
+                    Save();
+                    BeginInvoke(ShowBambu);
+                }
+            }
+            finally
+            {
+                if (!verifyBtn.IsDisposed) verifyBtn.Enabled = true;
+            }
+        };
+        codePanel.Controls.Add(verifyBtn);
+
+        var authButtons = new FlowLayoutPanel
+        {
+            AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0, 2, 0, 4),
+        };
+
+        var signInBtn = Theme.Action(signedIn ? "Re-sign in" : "Sign in", primary: !signedIn);
+        signInBtn.AutoSize = true;
+        signInBtn.Click += async (_, _) =>
+        {
+            signInBtn.Enabled = false;
+            Say("Signing in to Bambu Cloud…");
+            try
+            {
+                string selectedRegion = region.SelectedItem as string ?? bambu.Region;
+                var (step, msg) = await BambuUsage.SignInAsync(
+                    selectedRegion, emailBox.Text, passwordBox.Text);
+                Say(msg, problem: step == BambuSignInStep.Failed);
+
+                if (step == BambuSignInStep.SignedIn && !IsDisposed)
+                {
+                    Save();
+                    BeginInvoke(ShowBambu);
+                }
+                else if (step is BambuSignInStep.NeedsEmailCode or BambuSignInStep.NeedsTfaCode && !codePanel.IsDisposed)
+                {
+                    codeLabel.Text = step == BambuSignInStep.NeedsTfaCode ? "2FA code" : "6-digit email code";
+                    codePanel.Visible = true;
+                    codeBox.Focus();
+                }
+            }
+            finally
+            {
+                if (!signInBtn.IsDisposed) signInBtn.Enabled = true;
+            }
+        };
+        authButtons.Controls.Add(signInBtn);
+
+        var sendCodeBtn = Theme.Action("Send email code");
+        sendCodeBtn.AutoSize = true;
+        sendCodeBtn.Click += async (_, _) =>
+        {
+            sendCodeBtn.Enabled = false;
+            try
+            {
+                string selectedRegion = region.SelectedItem as string ?? bambu.Region;
+                var (ok, msg) = await BambuUsage.RequestEmailCodeAsync(selectedRegion, emailBox.Text);
+                Say(msg, problem: !ok);
+                if (ok && !codePanel.IsDisposed)
+                {
+                    codeLabel.Text = "6-digit email code";
+                    codePanel.Visible = true;
+                    codeBox.Focus();
+                }
+            }
+            finally
+            {
+                if (!sendCodeBtn.IsDisposed) sendCodeBtn.Enabled = true;
+            }
+        };
+        authButtons.Controls.Add(sendCodeBtn);
+
+        if (signedIn)
+        {
+            var signOutBtn = Theme.Action("Sign out");
+            signOutBtn.AutoSize = true;
+            signOutBtn.Click += (_, _) =>
+            {
+                BambuUsage.SignOut();
+                Say("Signed out of Bambu Cloud.");
+                BeginInvoke(ShowBambu);
+            };
+            authButtons.Controls.Add(signOutBtn);
+        }
+
+        page.Controls.Add(authButtons);
+        page.Controls.Add(codePanel);
+
+        page.Controls.Add(Theme.Caption(
+            "Bambu Lab normally sends a 6-digit verification code to your email on first sign-in. " +
+            "Your token is encrypted to this Windows account with DPAPI and refreshed automatically."));
+
+        // ---- Printer order & custom short labels ---------------------------
+        page.Controls.Add(new Label
+        {
+            Text = "Closet printer order & bar labels (top to bottom)",
+            AutoSize = true, Font = Theme.Face(11f, FontStyle.Bold),
+            ForeColor = Theme.Text, Margin = new Padding(0, 8, 0, 2),
+        });
+
+        page.Controls.Add(Theme.Caption(
+            "Use ↑ and ↓ to match the physical row in your closet. Each enabled printer gets one " +
+            "horizontal line on the taskbar. Keep the short label brief (2–6 characters, e.g. P1–P5) " +
+            "so the progress bar and time remaining have plenty of room."));
+
+        if (bambu.Printers.Count == 0)
+        {
+            page.Controls.Add(new Label
+            {
+                Text = signedIn
+                    ? "No bound printers loaded yet — click 'Check now' below to sync from Bambu Cloud."
+                    : "Sign in above to load your 5 printers and arrange their order.",
+                AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+                Margin = new Padding(0, 2, 0, 10),
+            });
+        }
+        else
+        {
+            var liveMap = BambuUsage.Current?.Printers.ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < bambu.Printers.Count; i++)
+            {
+                int index = i;
+                var printer = bambu.Printers[index];
+
+                var row = new FlowLayoutPanel
+                {
+                    AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                    WrapContents = false, Margin = new Padding(0, 1, 0, 2),
+                };
+
+                var posLabel = new Label
+                {
+                    Text = $"{index + 1}.", Width = 22, AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleRight, ForeColor = Theme.Muted,
+                    Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 5, 4, 0),
+                };
+                row.Controls.Add(posLabel);
+
+                var toggle = new CheckBox
+                {
+                    Checked = printer.Enabled, AutoSize = true, ForeColor = Theme.Text,
+                    FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 6, 4, 0),
+                };
+                toggle.CheckedChanged += (_, _) =>
+                {
+                    printer.Enabled = toggle.Checked;
+                    Save();
+                    BambuUsage.NotifyPrintersEdited();
+                };
+                row.Controls.Add(toggle);
+
+                var upBtn = Theme.Action("↑");
+                upBtn.Size = new Size(30, 26);
+                upBtn.Margin = new Padding(0, 2, 3, 2);
+                upBtn.Enabled = index > 0;
+                upBtn.Click += (_, _) =>
+                {
+                    if (index <= 0 || index >= bambu.Printers.Count) return;
+                    (bambu.Printers[index - 1], bambu.Printers[index]) = (bambu.Printers[index], bambu.Printers[index - 1]);
+                    Save();
+                    BambuUsage.NotifyPrintersEdited();
+                    BeginInvoke(ShowBambu);
+                };
+                row.Controls.Add(upBtn);
+
+                var downBtn = Theme.Action("↓");
+                downBtn.Size = new Size(30, 26);
+                downBtn.Margin = new Padding(0, 2, 8, 2);
+                downBtn.Enabled = index < bambu.Printers.Count - 1;
+                downBtn.Click += (_, _) =>
+                {
+                    if (index < 0 || index >= bambu.Printers.Count - 1) return;
+                    (bambu.Printers[index + 1], bambu.Printers[index]) = (bambu.Printers[index], bambu.Printers[index + 1]);
+                    Save();
+                    BambuUsage.NotifyPrintersEdited();
+                    BeginInvoke(ShowBambu);
+                };
+                row.Controls.Add(downBtn);
+
+                var labelBox = new TextBox
+                {
+                    Text = printer.Label ?? "", Width = 64, BackColor = Theme.Raised, ForeColor = Theme.Text,
+                    Font = Theme.Face(9f), BorderStyle = BorderStyle.FixedSingle,
+                    Margin = new Padding(0, 3, 8, 2),
+                    PlaceholderText = $"P{index + 1}",
+                };
+                labelBox.TextChanged += (_, _) =>
+                {
+                    printer.Label = (labelBox.Text ?? "").Trim();
+                    Save();
+                    BambuUsage.NotifyPrintersEdited();
+                };
+                row.Controls.Add(labelBox);
+
+                string statusSummary = "";
+                if (liveMap is not null && liveMap.TryGetValue(printer.Id, out var live))
+                {
+                    statusSummary = live.State switch
+                    {
+                        BambuPrinterState.Printing => $" — Printing {live.Percent}% ({live.RemainingMinutes}m left)",
+                        BambuPrinterState.Preparing => $" — Preparing ({live.Percent}%)",
+                        BambuPrinterState.Error => $" — ERROR ({live.ErrorText ?? "alert"})",
+                        BambuPrinterState.Paused => $" — Paused ({live.Percent}%)",
+                        BambuPrinterState.Finished => " — Finished (100%)",
+                        BambuPrinterState.Idle => " — Idle",
+                        _ => " — Offline",
+                    };
+                }
+
+                string modelPart = !string.IsNullOrWhiteSpace(printer.Model) ? $" ({printer.Model})" : "";
+                var infoLabel = new Label
+                {
+                    Text = $"{printer.Name}{modelPart}{statusSummary}",
+                    AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(9f),
+                    Margin = new Padding(0, 6, 0, 0),
+                };
+                row.Controls.Add(infoLabel);
+
+                page.Controls.Add(row);
+            }
+        }
+
+        var interval = Theme.Number(bambu.RefreshSeconds, 15, 600, 15);
+        interval.ValueChanged += (_, _) => { bambu.RefreshSeconds = (int)interval.Value; Save(); };
+        Row(page, "Seconds between cloud syncs", interval);
+
+        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 10, 0, 4) };
+
+        var check = Theme.Action("Check now", primary: signedIn);
+        check.AutoSize = true;
+        check.Click += (_, _) =>
+        {
+            BambuUsage.Refresh();
+            Say("Syncing printers with Bambu Cloud…");
+        };
+        actions.Controls.Add(check);
+
+        var diagnosis = new TextBox
+        {
+            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Visible = false,
+            Width = 460, Height = 140, BackColor = Theme.Raised, ForeColor = Theme.Muted,
+            Font = new Font(FontFamily.GenericMonospace, 8.5f), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 8, 0, 8),
+        };
+
+        var test = Theme.Action("Test connection");
+        test.AutoSize = true;
+        test.Click += async (_, _) =>
+        {
+            test.Enabled = false;
+            diagnosis.Visible = true;
+            diagnosis.Text = "Checking Bambu Cloud & MQTT connection…";
+            try
+            {
+                diagnosis.Text = await Task.Run(BambuUsage.SelfTest);
+            }
+            catch (Exception ex) { diagnosis.Text = ex.Message; }
+            finally { test.Enabled = true; }
+        };
+        actions.Controls.Add(test);
+        page.Controls.Add(actions);
+
+        page.Controls.Add(Theme.Caption(
+            "Verifies your Bambu Cloud token, lists bound printers, and reports the live MQTT state " +
+            "for each printer without including any token or password."));
+        page.Controls.Add(diagnosis);
+
+        var state = new Label
+        {
+            AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+            MaximumSize = new Size(460, 0), Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(state);
+
+        int lastPrinterCount = bambu.Printers.Count;
+        void Report()
+        {
+            state.Text = UsageStrip.BambuTip(BambuUsage.Current);
+            if (bambu.Printers.Count != lastPrinterCount && !IsDisposed)
+            {
+                lastPrinterCount = bambu.Printers.Count;
+                BeginInvoke(ShowBambu);
+            }
+        }
+        Report();
+
+        var watch = new System.Windows.Forms.Timer { Interval = 1500 };
+        watch.Tick += (_, _) => Report();
+        watch.Start();
+        page.Disposed += (_, _) => { watch.Stop(); watch.Dispose(); };
+
+        page.Controls.Add(Theme.Caption(
+            "Turn the bars on per display under Taskbar ▸ Show Bambu printer status bars."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)

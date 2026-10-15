@@ -157,6 +157,12 @@ public sealed class BarSettings
     /// </summary>
     public bool ShowAntigravity { get; set; }
 
+    /// <summary>
+    /// Show the Bambu Lab printer status bars next to the AI usage strips in the status cluster.
+    /// Per-bar for the same reason <see cref="ShowUsage"/> is.
+    /// </summary>
+    public bool ShowBambu { get; set; }
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
@@ -248,6 +254,68 @@ public sealed class AntigravitySettings
 
     /// <summary>Show the seven-day Gemini (Pro &amp; Flash) limit under the five-hour session one.</summary>
     public bool ShowWeekly { get; set; } = true;
+}
+
+/// <summary>
+/// One Bambu Lab printer bound to the user's cloud account, kept in the display order the user
+/// chooses in Settings (e.g. matching a physical row of printers in a closet).
+/// </summary>
+public sealed class BambuPrinterConfig
+{
+    /// <summary>Hardware serial number (`dev_id` from Bambu Cloud).</summary>
+    public string Id { get; set; } = "";
+
+    /// <summary>Device name reported by Bambu Cloud.</summary>
+    public string Name { get; set; } = "";
+
+    /// <summary>Optional short label override for the taskbar strip; falls back to <see cref="Name"/>.</summary>
+    public string? Label { get; set; }
+
+    /// <summary>Product/model name (e.g. "P1S", "X1 Carbon", "A1").</summary>
+    public string? Model { get; set; }
+
+    /// <summary>Whether to draw this printer's row in the taskbar strip.</summary>
+    public bool Enabled { get; set; } = true;
+
+    [JsonIgnore]
+    public string DisplayName => !string.IsNullOrWhiteSpace(Label) ? Label.Trim()
+                               : !string.IsNullOrWhiteSpace(Name) ? Name.Trim()
+                               : Id;
+}
+
+/// <summary>
+/// Everything the Bambu Lab printer monitor strip needs. Authenticates with Bambu Cloud to discover
+/// bound printers and streams live telemetry (`gcode_state`, `mc_percent`, `mc_remaining_time`,
+/// `print_error`, etc.) over Bambu's Cloud MQTT broker on port 8883.
+/// </summary>
+public sealed class BambuSettings
+{
+    /// <summary>Master switch. Off means we never query Bambu Cloud or open an MQTT connection.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>"Global" (`api.bambulab.com` / `us.mqtt.bambulab.com`) or "China" (`api.bambulab.cn` / `cn.mqtt.bambulab.com`).</summary>
+    public string Region { get; set; } = "Global";
+
+    /// <summary>Email address of the signed-in Bambu Lab account.</summary>
+    public string? AccountEmail { get; set; }
+
+    /// <summary>Resolved Cloud MQTT username (`u_&lt;uid&gt;`).</summary>
+    public string? MqttUsername { get; set; }
+
+    /// <summary>Bambu Cloud JWT access token, encrypted to this Windows account by DPAPI.</summary>
+    public string? AccessToken { get; set; }
+
+    /// <summary>Bambu Cloud refresh token (when issued), encrypted to this Windows account by DPAPI.</summary>
+    public string? RefreshToken { get; set; }
+
+    /// <summary>
+    /// Known printers in the top-to-bottom order they should appear on the bar. Newly discovered
+    /// cloud printers are appended so manual reordering in Settings is preserved.
+    /// </summary>
+    public List<BambuPrinterConfig> Printers { get; set; } = new();
+
+    /// <summary>Seconds between cloud device-list syncs (live status streams continuously over MQTT).</summary>
+    public int RefreshSeconds { get; set; } = 60;
 }
 
 public sealed class MonitorLayout
@@ -405,6 +473,12 @@ public sealed class SplitConfig
     /// Named "Antigravity" rather than "AntigravityUsage" for the same reason as <see cref="Claude"/>.
     /// </summary>
     public AntigravitySettings Antigravity { get; set; } = new();
+
+    /// <summary>
+    /// The Bambu Lab printer monitor strip. Polled and streamed once for the machine; which bars
+    /// draw it is per-bar.
+    /// </summary>
+    public BambuSettings Bambu { get; set; } = new();
 
     public const string Fallback = "*";
 
@@ -605,6 +679,15 @@ public sealed class SplitConfig
         Antigravity ??= new AntigravitySettings();
         Antigravity.RefreshSeconds = Math.Clamp(Antigravity.RefreshSeconds, 15, 3600);
 
+        Bambu ??= new BambuSettings();
+        Bambu.RefreshSeconds = Math.Clamp(Bambu.RefreshSeconds, 15, 3600);
+        Bambu.Printers ??= new();
+        Bambu.Printers.RemoveAll(p => p is null || string.IsNullOrWhiteSpace(p.Id));
+        if (!string.Equals(Bambu.Region, "China", StringComparison.OrdinalIgnoreCase))
+            Bambu.Region = "Global";
+        else
+            Bambu.Region = "China";
+
         foreach (var layout in Monitors.Values)
         {
             // Fractions outside [0,1] would place a zone off the monitor entirely - a window sent
@@ -715,6 +798,7 @@ public sealed class SplitConfig
         Bars = o.Bars;
         Claude = o.Claude;
         Antigravity = o.Antigravity;
+        Bambu = o.Bambu;
     }
 
     /// <summary>
