@@ -70,7 +70,7 @@ public sealed class ZoneOverlay : IDisposable
             var rects = zones.ZonesFor(geo);
             if (rects.Count == 0) continue;
 
-            var form = new OverlayForm(geo, zones.EffectiveWork(geo), rects,
+            var form = new OverlayForm(geo, zones.Basis(geo), rects,
                                        zones.Config.ZonesFor(geo.Device),
                                        zones.Config.LayoutFor(geo.Device).Margins.Copy(),
                                        zones.Config.Padding, mode);
@@ -128,6 +128,7 @@ public sealed class ZoneOverlay : IDisposable
         private readonly record struct EditButton(Rectangle Bounds, string Label, EditActionKind Kind, int ZoneIndex = -1, bool Primary = false);
 
         private readonly MonitorGeometry geo;
+        private readonly RECT basis;
         private readonly List<Zone> pixels;
         private readonly List<FracRect> fractions;
         private readonly Margins margins;
@@ -158,16 +159,16 @@ public sealed class ZoneOverlay : IDisposable
         private long lastPreview;
         public event Action? Dismissed;
 
-        public OverlayForm(MonitorGeometry geo, RECT inner, List<Zone> pixels,
+        public OverlayForm(MonitorGeometry geo, RECT basis, List<Zone> pixels,
                            List<FracRect> fractions, Margins margins, int padding, OverlayMode mode)
         {
             this.geo = geo;
+            this.basis = basis;
             this.pixels = pixels;
             this.fractions = ZoneEdges.Clone(fractions);
             // Fit once, here, against the same rule ZoneManager uses. Holding raw values would let
             // the editor show and commit margins the zone math then silently trims.
-            this.margins = margins.Fitted(geo.Work.Width, geo.Work.Height);
-            _ = inner;
+            this.margins = margins.Fitted(basis.Width, basis.Height);
             this.padding = padding;
             this.mode = mode;
 
@@ -228,7 +229,7 @@ public sealed class ZoneOverlay : IDisposable
         /// <summary>The work area in form-local coordinates. The form now spans the whole monitor,
         /// so this is offset by however much the taskbar takes.</summary>
         private Rectangle WorkLocal => new(
-            geo.Work.Left - geo.Bounds.Left, geo.Work.Top - geo.Bounds.Top, geo.Work.Width, geo.Work.Height);
+            basis.Left - geo.Bounds.Left, basis.Top - geo.Bounds.Top, basis.Width, basis.Height);
 
         /// <summary>The laid-out area in form-local coordinates, live as the margins are dragged.</summary>
         private Rectangle Inner()

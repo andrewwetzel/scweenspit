@@ -470,12 +470,13 @@ public sealed class WinEventHookService : IDisposable
             if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
             if (!GetWindowRect(hWnd, out var rect)) continue;
 
+            var painted = ZoneManager.TryGetPaintedRect(hWnd, out var p) ? p : rect;
             int index = ZoneManager.PickZoneIndex(rects, ReferenceRect(hWnd, rect));
 
             // Only the windows already filling a zone. One left at some size of its own is not
             // "in" a zone in any sense the user would recognise, and dragging a divider is no
             // reason to seize it.
-            if (!Fills(rect, rects[index].Rect)) continue;
+            if (!Fills(painted, rects[index].Rect) && !Fills(rect, rects[index].Rect)) continue;
 
             following[hWnd] = index;
         }
@@ -501,6 +502,37 @@ public sealed class WinEventHookService : IDisposable
     public void EndZonePreview() => following.Clear();
 
     /// <summary>
+    /// Re-fits windows that are currently filling a zone ScweenSpit placed them in. Called when
+    /// zone geometry or taskbar-covering settings change so existing zoned windows adjust at once
+    /// without seizing unrelated floating windows.
+    /// </summary>
+    public int ReflowManagedWindows()
+    {
+        int moved = 0;
+
+        foreach (var window in WindowList.Enumerate())
+        {
+            var hWnd = window.Handle;
+            if (!lastNormal.TryGetValue(hWnd, out var prev)) continue;
+            if (!IsClampTarget(hWnd)) continue;
+            if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
+            if (!GetWindowRect(hWnd, out var rect)) continue;
+
+            var painted = ZoneManager.TryGetPaintedRect(hWnd, out var p) ? p : rect;
+            if (!Fills(painted, prev) && !Fills(rect, prev)) continue;
+            if (!ZoneManager.TryGetMonitor(hWnd, out var geo) || zones.IsOptedOut(geo)) continue;
+
+            var rects = zones.ZonesFor(geo);
+            if (rects.Count == 0) continue;
+
+            Apply(hWnd, rects[ZoneManager.PickZoneIndex(rects, prev)]);
+            moved++;
+        }
+
+        return moved;
+    }
+
+    /// <summary>
     /// Whether a window is sitting in a zone rather than merely overlapping it. Loose, because a
     /// clamped window's frame carries an invisible resize border that puts its reported rectangle a
     /// few pixels outside the zone it was placed in.
@@ -521,7 +553,8 @@ public sealed class WinEventHookService : IDisposable
             if (!IsClampTarget(hWnd)) continue;
             if (zones.Config.IsExcluded(OwnerProcess(hWnd), ClassNameOf(hWnd))) continue;
             if (!GetWindowRect(hWnd, out var rect)) continue;
-            if (within is { } area && ZoneManager.OverlapArea(rect, area) <= 0) continue;
+            var painted = ZoneManager.TryGetPaintedRect(hWnd, out var p) ? p : rect;
+            if (within is { } area && ZoneManager.OverlapArea(painted, area) <= 0) continue;
             if (!ZoneManager.TryGetMonitor(hWnd, out var geo) || zones.IsOptedOut(geo)) continue;
 
             var rects = zones.ZonesFor(geo);
@@ -726,10 +759,15 @@ public sealed class WinEventHookService : IDisposable
         // Z-order is decided even when the rectangle is already right: a window can be in the
         // correct place and still be sitting underneath the taskbar.
         if (zone.CoverTaskbar) coversTaskbar[hWnd] = 0; else coversTaskbar.TryRemove(hWnd, out _);
-        RefreshTopmost();
 
-        if (!ZoneManager.ClampToZone(hWnd, zone.Rect)) { Log.Write("  -> ClampToZone declined (already in place?)"); return; }
+        if (!ZoneManager.ClampToZone(hWnd, zone.Rect))
+        {
+            RefreshTopmost(reassert: true);
+            Log.Write("  -> ClampToZone declined (already in place?)");
+            return;
+        }
         clamps++;
+        RefreshTopmost(reassert: true);
 
         // The window now lives here and is no longer fullscreen, so this IS its last normal
         // position. Without this the next maximize resolves against the pre-move rectangle and
@@ -784,6 +822,7 @@ public sealed class WinEventHookService : IDisposable
                 clamps++;
                 lastNormal[hWnd] = state.Zone.Rect;
             }
+            RefreshTopmost(reassert: true);
             Touch(hWnd);
 
             pendingVerify[hWnd] = (state.Zone, state.Attempts + 1, now + zones.Config.DebounceMs + 60);
@@ -830,14 +869,21 @@ public sealed class WinEventHookService : IDisposable
                   $"hooks={(Healthy ? "up" : Running ? "PARTIAL" : "DOWN")}");
     }
 
+    private bool HasTaskbarToCover(IntPtr hWnd)
+    {
+        if (!zones.Config.HideWindowsTaskbar) return true;
+        if (!zones.Config.ShowBars) return false;
+        return ZoneManager.TryGetMonitor(hWnd, out var geo) && zones.Config.Bars.ContainsKey(geo.Device);
+    }
+
     /// <summary>
     /// Raises a window over the taskbar, or puts it back. Only ever undone for windows this app
     /// raised: an app that was already always-on-top for its own reasons keeps that.
     /// </summary>
-    private void ApplyTopmost(IntPtr hWnd, bool wanted)
+    private void ApplyTopmost(IntPtr hWnd, bool wanted, bool reassert = false)
     {
         bool have = madeTopmost.ContainsKey(hWnd);
-        if (wanted == have) return;
+        if (wanted == have && !(wanted && reassert)) return;
 
         ZoneManager.SetTopmost(hWnd, wanted);
         if (wanted) madeTopmost[hWnd] = 0;
@@ -845,21 +891,17 @@ public sealed class WinEventHookService : IDisposable
     }
 
     /// <summary>
-    /// Keeps a taskbar-covering window above everything only while it is the one being used.
-    ///
-    /// Leaving it there permanently is what the flag used to do, and it makes every other window
-    /// unreachable: nothing ordinary can be raised past an always-on-top window, so clicking a
-    /// taskbar button appeared to do nothing at all. Covering the taskbar is only wanted while the
-    /// window is in front, which is the same moment the taskbar would otherwise be in the way.
-    ///
-    /// With the shell taskbar hidden there is nothing to cover, so nothing is raised at all.
+    /// Keeps a taskbar-covering window above the taskbar unless another active window overlapping
+    /// its zone is in front. Also covers ScweenSpit's own taskbar when the Windows taskbar is hidden.
     /// </summary>
-    public void RefreshTopmost()
+    public void RefreshTopmost(bool reassert = false)
     {
         if (coversTaskbar.IsEmpty && madeTopmost.IsEmpty) return;
 
         var foreground = GetForegroundWindow();
-        bool anythingToCover = !zones.Config.HideWindowsTaskbar;
+        RECT fgRect = default;
+        bool hasFgRect = foreground != IntPtr.Zero && IsClampTarget(foreground)
+                      && ZoneManager.TryGetPaintedRect(foreground, out fgRect);
 
         foreach (var hWnd in coversTaskbar.Keys)
         {
@@ -870,7 +912,12 @@ public sealed class WinEventHookService : IDisposable
                 continue;
             }
 
-            ApplyTopmost(hWnd, anythingToCover && hWnd == foreground);
+            bool anythingToCover = HasTaskbarToCover(hWnd);
+            bool blockedByForeground = foreground != hWnd && hasFgRect
+                && ZoneManager.TryGetPaintedRect(hWnd, out var winRect)
+                && ZoneManager.OverlapArea(winRect, fgRect) > 0;
+
+            ApplyTopmost(hWnd, anythingToCover && (hWnd == foreground || !blockedByForeground), reassert);
         }
 
         // Anything we raised that is no longer in such a zone goes back regardless.

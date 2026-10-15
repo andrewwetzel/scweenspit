@@ -102,8 +102,9 @@ public sealed class ZoneManager(SplitConfig config)
     {
         var zones = RawZonesFor(geo);
 
-        if (Config.Bars.TryGetValue(geo.Device, out var bar) && bar.Zone is int index
-            && index >= 0 && index < zones.Count && Strip(zones[index].Rect, bar) is { } strip)
+        if (Config.ShowBars && Config.Bars.TryGetValue(geo.Device, out var bar) && bar.Zone is int index
+            && index >= 0 && index < zones.Count && !zones[index].CoverTaskbar
+            && Strip(zones[index].Rect, bar) is { } strip)
         {
             zones[index] = zones[index] with { Rect = Shorten(zones[index].Rect, strip, SplitConfig.ParseEdge(bar.Edge)) };
         }
@@ -117,10 +118,31 @@ public sealed class ZoneManager(SplitConfig config)
     /// </summary>
     public RECT? BarStrip(MonitorGeometry geo, BarSettings bar)
     {
-        if (bar.Zone is not int index) return null;
+        if (!Config.ShowBars || bar.Zone is not int index) return null;
 
         var zones = RawZonesFor(geo);
         return index >= 0 && index < zones.Count ? Strip(zones[index].Rect, bar) : null;
+    }
+
+    /// <summary>
+    /// Where a whole-display ScweenSpit bar sits on this monitor, or null when this monitor has no
+    /// active whole-display bar.
+    /// </summary>
+    public RECT? WholeBarStrip(MonitorGeometry geo)
+    {
+        if (!Config.ShowBars || !Config.Bars.TryGetValue(geo.Device, out var bar)) return null;
+        if (bar.Zone is int index && index >= 0 && index < Config.ZonesFor(geo.Device).Count) return null;
+        return Strip(geo.Bounds, bar);
+    }
+
+    /// <summary>
+    /// Any strip reserved by a ScweenSpit bar on this monitor — either scoped to one zone or
+    /// spanning the whole display.
+    /// </summary>
+    public RECT? ActiveBarStrip(MonitorGeometry geo)
+    {
+        if (!Config.ShowBars || !Config.Bars.TryGetValue(geo.Device, out var bar)) return null;
+        return BarStrip(geo, bar) ?? WholeBarStrip(geo);
     }
 
     private static RECT? Strip(RECT zone, BarSettings bar)
@@ -146,6 +168,14 @@ public sealed class ZoneManager(SplitConfig config)
         BarEdge.Right => zone with { Right = strip.Left },
         BarEdge.Top   => zone with { Top = strip.Bottom },
         _             => zone with { Bottom = strip.Top },
+    };
+
+    private static RECT ExcludeStrip(RECT area, RECT strip, BarEdge edge) => edge switch
+    {
+        BarEdge.Left  => area with { Left   = Math.Max(area.Left,   strip.Right) },
+        BarEdge.Right => area with { Right  = Math.Min(area.Right,  strip.Left) },
+        BarEdge.Top   => area with { Top    = Math.Max(area.Top,    strip.Bottom) },
+        _             => area with { Bottom = Math.Min(area.Bottom, strip.Top) },
     };
 
     public List<Zone> RawZonesFor(MonitorGeometry geo)
@@ -193,12 +223,17 @@ public sealed class ZoneManager(SplitConfig config)
     /// <summary>
     /// The area zones are measured against, before margins.
     ///
-    /// Normally the work area, so the taskbar is avoided. But with the shell taskbar hidden its
-    /// reservation is dead space: the appbar registration survives the window being hidden, so
-    /// Windows keeps reporting a reduced work area for a strip nothing is drawn in. Reclaiming it
-    /// is the entire point of having hidden the thing.
+    /// Normally the work area, so the taskbar is avoided. With the shell taskbar hidden its
+    /// reservation is reclaimed from the full monitor bounds, and any whole-display ScweenSpit bar
+    /// on this monitor is always kept clear so windows never disappear behind our own bar.
     /// </summary>
-    public RECT Basis(MonitorGeometry geo) => Config.HideWindowsTaskbar ? geo.Bounds : geo.Work;
+    public RECT Basis(MonitorGeometry geo)
+    {
+        var basis = Config.HideWindowsTaskbar ? geo.Bounds : geo.Work;
+        if (WholeBarStrip(geo) is { } strip && Config.Bars.TryGetValue(geo.Device, out var bar))
+            basis = ExcludeStrip(basis, strip, SplitConfig.ParseEdge(bar.Edge));
+        return basis;
+    }
 
     private RECT Pad(RECT r)
     {
@@ -213,17 +248,18 @@ public sealed class ZoneManager(SplitConfig config)
     public bool IsOptedOut(MonitorGeometry geo)
     {
         var frac = Config.ZonesFor(geo.Device);
-        bool wholeArea = frac.Count == 1 && frac[0].L <= 0.001 && frac[0].T <= 0.001
+        bool wholeArea = frac.Count == 1 && !frac[0].CoverTaskbar
+                                         && frac[0].L <= 0.001 && frac[0].T <= 0.001
                                          && frac[0].R >= 0.999 && frac[0].B >= 0.999;
 
         // "One full-size zone" only means "leave it alone" if that zone really is the whole area we
-        // lay out in. With margins reserved there is still work to do, and claiming otherwise would
-        // let a maximize be restored and re-placed at the identical rect - silently losing the
-        // maximized state for no visible change.
+        // lay out in, and no ScweenSpit bar on this display needs space kept clear for it.
         var eff = EffectiveWork(geo);
-        var basis = Basis(geo);
-        bool untouched = eff.Left == basis.Left && eff.Top == basis.Top
-                      && eff.Right == basis.Right && eff.Bottom == basis.Bottom;
+        var naturalWork = Config.HideWindowsTaskbar ? geo.Bounds : geo.Work;
+        bool hasZoneBar = Config.ShowBars && Config.Bars.TryGetValue(geo.Device, out var b) && b.Zone is not null;
+        bool untouched = !hasZoneBar
+                      && eff.Left == naturalWork.Left && eff.Top == naturalWork.Top
+                      && eff.Right == naturalWork.Right && eff.Bottom == naturalWork.Bottom;
 
         return wholeArea && untouched;
     }
@@ -422,6 +458,20 @@ public sealed class ZoneManager(SplitConfig config)
 
     /// <summary>Largest invisible border we will believe in, per side.</summary>
     private const int MaxBorder = 24;
+
+    /// <summary>
+    /// The window's visible bounds on screen (excluding DWM's invisible resize border), falling
+    /// back to <see cref="GetWindowRect"/> when DWM bounds are unavailable.
+    /// </summary>
+    public static bool TryGetPaintedRect(IntPtr hWnd, out RECT rect)
+    {
+        if (DwmGetWindowRect(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out rect,
+                             System.Runtime.InteropServices.Marshal.SizeOf<RECT>()) == 0
+            && rect.Width > 0 && rect.Height > 0)
+            return true;
+
+        return GetWindowRect(hWnd, out rect);
+    }
 
     /// <summary>
     /// Grows a target rectangle by a window's invisible resize border.

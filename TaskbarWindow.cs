@@ -190,6 +190,7 @@ public sealed class TaskbarWindow : Form
 
         // Reserve the bar plus the two gaps along the docking axis; the window is then inset back
         // to the thickness asked for. The gap at the ends runs the other way and costs nothing.
+        appBar.Register();
         appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + open + edgeGap, open, ends, edgeGap);
     }
 

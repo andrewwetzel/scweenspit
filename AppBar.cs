@@ -47,28 +47,37 @@ public sealed class AppBar : IDisposable
     /// </summary>
     public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0)
     {
-        if (!registered) return;
-
         Monitor = monitor;
         Edge = edge;
         Thickness = Math.Max(16, thickness);
 
-        var data = New(owner.Handle);
-        data.uEdge = (uint)edge;
-        data.rc = Proposed();
+        var rc = Proposed();
+        if (registered)
+        {
+            var data = New(owner.Handle);
+            data.uEdge = (uint)edge;
+            data.rc = rc;
 
-        SHAppBarMessage(ABM_QUERYPOS, ref data);
-        data.rc = Squeeze(data.rc, edge);   // QUERYPOS only adjusts the docking axis
-        SHAppBarMessage(ABM_SETPOS, ref data);
+            SHAppBarMessage(ABM_QUERYPOS, ref data);
+            data.rc = Squeeze(data.rc, edge);   // QUERYPOS only adjusts the docking axis
+            SHAppBarMessage(ABM_SETPOS, ref data);
+            rc = data.rc;
+        }
 
         // Windows keeps the whole strip reserved; only the visible bar moves inside it, which is
         // what makes a floating bar float without applications creeping under it.
-        var r = BarGeometry.Deflate(data.rc, edge, open, ends, edgeGap);
+        var r = BarGeometry.Deflate(rc, edge, open, ends, edgeGap);
         SetWindowPos(owner.Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        SHAppBarMessage(ABM_WINDOWPOSCHANGED, ref data);
-        Log.Write($"appbar reserved {edge} {data.rc} on {monitor}, bar at {r}");
+        if (registered)
+        {
+            var data = New(owner.Handle);
+            data.uEdge = (uint)edge;
+            data.rc = rc;
+            SHAppBarMessage(ABM_WINDOWPOSCHANGED, ref data);
+        }
+        Log.Write($"appbar reserved {edge} {rc} on {monitor}, bar at {r}");
     }
 
     /// <summary>The strip we would like, spanning the chosen edge of this display.</summary>

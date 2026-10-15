@@ -157,6 +157,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplyAnimationPreference();
         ApplyUsageTracking();
         bars.Apply(config, zones);
+        reflow.Start();
         // Follows the menu however it was opened — the keyboard's Windows key as much as our own
         // button, since Windows puts it in the same wrong place either way.
         StartMenu.Watch(bars.StartAnchor);
@@ -736,14 +737,15 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Moves windows out from under any bar that has taken space they were occupying.</summary>
     private void ReflowAroundBars()
     {
+        hook.ReflowManagedWindows();
+
         foreach (var geo in ZoneManager.AllMonitors())
         {
-            if (!config.Bars.TryGetValue(geo.Device, out var bar)) continue;
-
-            // Only zone-scoped bars need this. A full-display bar is an appbar, so Windows shrinks
-            // the work area and applications move themselves.
-            if (zones.BarStrip(geo, bar) is { } strip) hook.ArrangeOverlapping(strip);
+            if (zones.ActiveBarStrip(geo) is { } strip)
+                hook.ArrangeOverlapping(strip);
         }
+
+        hook.RefreshTopmost(reassert: true);
     }
 
     /// <summary>Same bookkeeping as the snap and taskbar settings: remember, change, put back.</summary>
@@ -800,7 +802,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             var rects = zones.ZonesFor(geo);
             total += rects.Count;
-            Log.Write($"monitor {geo.Device} bounds={geo.Bounds} work={geo.Work} optedOut={zones.IsOptedOut(geo)}");
+            Log.Write($"monitor {geo.Device} bounds={geo.Bounds} work={geo.Work} basis={zones.Basis(geo)} optedOut={zones.IsOptedOut(geo)}");
             for (int i = 0; i < rects.Count; i++)
                 Log.Write($"    zone {i}: {rects[i]}  ({rects[i].Rect.Width}x{rects[i].Rect.Height})");
         }

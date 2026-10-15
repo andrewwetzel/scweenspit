@@ -489,8 +489,10 @@ public sealed class SettingsForm : Form
 
             // Nothing to cover means nothing to see, and that is worth saying out loud rather than
             // leaving someone to conclude the setting is broken.
-            if (geo.Work.Left == geo.Bounds.Left && geo.Work.Top == geo.Bounds.Top
-                && geo.Work.Right == geo.Bounds.Right && geo.Work.Bottom == geo.Bounds.Bottom)
+            var basis = zones.Basis(geo);
+            if (basis.Left == geo.Bounds.Left && basis.Top == geo.Bounds.Top
+                && basis.Right == geo.Bounds.Right && basis.Bottom == geo.Bounds.Bottom
+                && zones.ActiveBarStrip(geo) is null)
             {
                 page.Controls.Add(new Label
                 {
