@@ -124,6 +124,8 @@ public sealed class ZoneOverlay : IDisposable
         private static readonly Color HotFill = Color.FromArgb(90, 170, 255);
 
         private enum Grip { None, Divider, MarginLeft, MarginRight, MarginTop, MarginBottom }
+        private enum EditActionKind { AddColumn, AddRow, Equalise, Done, SplitVertical, SplitHorizontal, RemoveZone }
+        private readonly record struct EditButton(Rectangle Bounds, string Label, EditActionKind Kind, int ZoneIndex = -1, bool Primary = false);
 
         private readonly MonitorGeometry geo;
         private readonly List<Zone> pixels;
@@ -133,12 +135,11 @@ public sealed class ZoneOverlay : IDisposable
         private readonly OverlayMode mode;
 
         private RECT? highlight;
-        private double? draggingEdge;
-        private bool draggingVertical;
+        private Divider? draggingDivider;
         private Grip draggingGrip = Grip.None;
-        private double hoverEdge = double.NaN;
-        private bool hoverVertical;
+        private Divider? hoverDivider;
         private Grip hoverGrip = Grip.None;
+        private EditButton? hoverButton;
         private bool zonesDirty, marginsDirty;
 
         public string Device => geo.Device;
@@ -266,6 +267,91 @@ public sealed class ZoneOverlay : IDisposable
             return new Rectangle(l, t, Math.Max(1, r - l), Math.Max(1, b - t));
         }
 
+        private List<Rectangle> CurrentBoxes() =>
+            mode == OverlayMode.Edit
+                ? fractions.Select(LocalRect).Select(PadPreview).ToList()
+                : pixels.Select(z => new Rectangle(z.Rect.Left - geo.Bounds.Left, z.Rect.Top - geo.Bounds.Top,
+                                                  z.Rect.Width, z.Rect.Height)).ToList();
+
+        private List<EditButton> BuildEditButtons(List<Rectangle> boxes)
+        {
+            var buttons = new List<EditButton>();
+            if (mode != OverlayMode.Edit) return buttons;
+
+            // Top quick-action bar below the header plate.
+            var topSpecs = new (string Label, EditActionKind Kind, int Width, bool Primary)[]
+            {
+                ("+ Vertical panel", EditActionKind.AddColumn, 134, true),
+                ("+ Horizontal row", EditActionKind.AddRow,    134, false),
+                ("Equalise",         EditActionKind.Equalise,   92, false),
+                ("Done (Esc)",       EditActionKind.Done,       96, false),
+            };
+            int gap = 8;
+            int totalTopW = topSpecs.Sum(s => s.Width) + gap * (topSpecs.Length - 1);
+            int curX = (Width - totalTopW) / 2;
+            int topY = 52;
+            foreach (var spec in topSpecs)
+            {
+                buttons.Add(new EditButton(new Rectangle(curX, topY, spec.Width, 28), spec.Label, spec.Kind, -1, spec.Primary));
+                curX += spec.Width + gap;
+            }
+
+            // Per-zone split / remove pills inside each zone.
+            for (int i = 0; i < boxes.Count && i < fractions.Count; i++)
+            {
+                var r = Rectangle.Inflate(boxes[i], -4, -4);
+                if (r.Width < 90 || r.Height < 95) continue;
+
+                bool canV = ZoneEdges.CanSplitZone(fractions, i, vertical: true);
+                bool canH = ZoneEdges.CanSplitZone(fractions, i, vertical: false);
+                bool canRem = ZoneEdges.CanRemoveZone(fractions, i);
+
+                bool compact = r.Width < 220;
+                var zoneSpecs = new List<(string Label, EditActionKind Kind, int Width)>();
+                if (canV) zoneSpecs.Add((compact ? "Split |" : "Split L/R", EditActionKind.SplitVertical, compact ? 54 : 74));
+                if (canH) zoneSpecs.Add((compact ? "Split —" : "Split T/B", EditActionKind.SplitHorizontal, compact ? 54 : 74));
+                if (canRem) zoneSpecs.Add((compact ? "×" : "× Remove", EditActionKind.RemoveZone, compact ? 28 : 74));
+
+                if (zoneSpecs.Count == 0) continue;
+
+                int zGap = 6;
+                int rowW = zoneSpecs.Sum(s => s.Width) + zGap * (zoneSpecs.Count - 1);
+                if (rowW > r.Width - 8) continue;
+
+                int zx = r.X + (r.Width - rowW) / 2;
+                int zy = r.Y + r.Height / 2 + 28;
+                if (zy + 26 > r.Bottom - 6) zy = r.Bottom - 32;
+
+                foreach (var zs in zoneSpecs)
+                {
+                    buttons.Add(new EditButton(new Rectangle(zx, zy, zs.Width, 26), zs.Label, zs.Kind, i));
+                    zx += zs.Width + zGap;
+                }
+            }
+
+            return buttons;
+        }
+
+        private EditButton? ButtonUnder(int x, int y)
+        {
+            foreach (var b in BuildEditButtons(CurrentBoxes()))
+                if (b.Bounds.Contains(x, y)) return b;
+            return null;
+        }
+
+        private void ApplyZonesEdit(List<FracRect> updated)
+        {
+            ZoneEdges.Canonicalise(updated);
+            var sorted = updated.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
+            fractions.Clear();
+            fractions.AddRange(sorted);
+
+            PreviewBegan?.Invoke(geo.Device);
+            Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions));
+            PreviewEnded?.Invoke(geo.Device);
+            Invalidate();
+        }
+
         // ---- edit interaction ----------------------------------------------
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -273,16 +359,16 @@ public sealed class ZoneOverlay : IDisposable
             base.OnMouseMove(e);
             if (mode != OverlayMode.Edit) return;
 
-            if (draggingGrip == Grip.Divider && draggingEdge is { } edge)
+            if (draggingGrip == Grip.Divider && draggingDivider is { } div)
             {
-                double want = draggingVertical ? FracX(e.X) : FracY(e.Y);
-                var (min, max) = ZoneEdges.Limits(fractions, edge, draggingVertical);
+                double want = div.Vertical ? FracX(e.X) : FracY(e.Y);
+                var (min, max) = ZoneEdges.Limits(fractions, div);
                 double clamped = Math.Clamp(want, min, max);
 
-                if (!ZoneEdges.Near(clamped, edge))
+                if (!ZoneEdges.Near(clamped, div.Position))
                 {
-                    ZoneEdges.Move(fractions, edge, clamped, draggingVertical);
-                    draggingEdge = clamped;
+                    ZoneEdges.Move(fractions, div, clamped);
+                    draggingDivider = div with { Position = clamped };
                     zonesDirty = true;
                     Invalidate();
 
@@ -304,24 +390,38 @@ public sealed class ZoneOverlay : IDisposable
                 return;
             }
 
-            var (grip, near, vertical) = GripUnder(e.X, e.Y);
-
-            // NaN never compares equal to itself, so "no edge under the cursor" has to be tested
-            // explicitly - otherwise every mouse move repaints the whole overlay.
-            bool sameEdge = double.IsNaN(near)
-                ? double.IsNaN(hoverEdge)
-                : vertical == hoverVertical && ZoneEdges.Near(near, hoverEdge);
-            if (grip != hoverGrip || !sameEdge)
+            var btn = ButtonUnder(e.X, e.Y);
+            if (btn is not null)
             {
+                if (!Nullable.Equals(hoverButton, btn) || hoverGrip != Grip.None)
+                {
+                    hoverButton = btn;
+                    hoverGrip = Grip.None;
+                    hoverDivider = null;
+                    Cursor = Cursors.Hand;
+                    Invalidate();
+                }
+                return;
+            }
+
+            bool shift = (ModifierKeys & Keys.Shift) != 0;
+            var (grip, nearDiv) = GripUnder(e.X, e.Y, shift);
+
+            bool sameDiv = nearDiv is null
+                ? hoverDivider is null
+                : hoverDivider is { } h && nearDiv.Value.SameAs(h);
+
+            if (hoverButton is not null || grip != hoverGrip || !sameDiv)
+            {
+                hoverButton = null;
                 hoverGrip = grip;
-                hoverEdge = near;
-                hoverVertical = vertical;
+                hoverDivider = nearDiv;
                 Cursor = grip switch
                 {
                     Grip.None => Cursors.Default,
                     Grip.MarginLeft or Grip.MarginRight => Cursors.SizeWE,
                     Grip.MarginTop or Grip.MarginBottom => Cursors.SizeNS,
-                    _ => vertical ? Cursors.SizeWE : Cursors.SizeNS,
+                    _ => nearDiv is { Vertical: true } ? Cursors.SizeWE : Cursors.SizeNS,
                 };
                 Invalidate();
             }
@@ -348,12 +448,54 @@ public sealed class ZoneOverlay : IDisposable
             base.OnMouseDown(e);
             if (mode != OverlayMode.Edit) return;
 
-            var (grip, near, vertical) = GripUnder(e.X, e.Y);
+            if (e.Button == MouseButtons.Left && ButtonUnder(e.X, e.Y) is { } btn)
+            {
+                switch (btn.Kind)
+                {
+                    case EditActionKind.AddColumn:
+                        ApplyZonesEdit(ZoneEdges.AddColumn(fractions));
+                        break;
+                    case EditActionKind.AddRow:
+                        ApplyZonesEdit(ZoneEdges.AddRow(fractions));
+                        break;
+                    case EditActionKind.Equalise:
+                        ApplyZonesEdit(ZoneEdges.Equalise(fractions));
+                        break;
+                    case EditActionKind.Done:
+                        Dismissed?.Invoke();
+                        break;
+                    case EditActionKind.SplitVertical:
+                        ApplyZonesEdit(ZoneEdges.SplitZone(fractions, btn.ZoneIndex, vertical: true));
+                        break;
+                    case EditActionKind.SplitHorizontal:
+                        ApplyZonesEdit(ZoneEdges.SplitZone(fractions, btn.ZoneIndex, vertical: false));
+                        break;
+                    case EditActionKind.RemoveZone:
+                        ApplyZonesEdit(ZoneEdges.RemoveZone(fractions, btn.ZoneIndex));
+                        break;
+                }
+                return;
+            }
+
+            bool shift = (ModifierKeys & Keys.Shift) != 0;
+            var (grip, nearDiv) = GripUnder(e.X, e.Y, shift);
+
+            // Right-clicking a divider collapses it by merging the zones across it.
+            if (e.Button == MouseButtons.Right)
+            {
+                if (grip == Grip.Divider && nearDiv is { } toRemove)
+                {
+                    var copy = ZoneEdges.Clone(fractions);
+                    if (ZoneEdges.RemoveDivider(copy, toRemove))
+                        ApplyZonesEdit(copy);
+                }
+                return;
+            }
+
             if (grip == Grip.None) { Dismissed?.Invoke(); return; }   // click away to finish
 
             draggingGrip = grip;
-            draggingEdge = double.IsNaN(near) ? null : near;
-            draggingVertical = vertical;
+            draggingDivider = nearDiv;
 
             // Which windows are filling which zone has to be settled before the first pixel of the
             // drag, while the answer is still the one the user can see.
@@ -366,9 +508,17 @@ public sealed class ZoneOverlay : IDisposable
             if (mode != OverlayMode.Edit || draggingGrip == Grip.None) return;
 
             draggingGrip = Grip.None;
-            draggingEdge = null;
+            draggingDivider = null;
 
-            if (zonesDirty) { zonesDirty = false; Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions)); }
+            if (zonesDirty)
+            {
+                zonesDirty = false;
+                ZoneEdges.Canonicalise(fractions);
+                var sorted = fractions.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
+                fractions.Clear();
+                fractions.AddRange(sorted);
+                Committed?.Invoke(geo.Device, ZoneEdges.Clone(fractions));
+            }
             if (marginsDirty) { marginsDirty = false; MarginsCommitted?.Invoke(geo.Device, margins.Copy()); }
 
             // After the commit, so the windows that were following end up against the layout that
@@ -383,21 +533,31 @@ public sealed class ZoneOverlay : IDisposable
         }
 
         /// <summary>Nearest draggable handle to a point. Outer margins win over inner dividers.</summary>
-        private (Grip Grip, double Edge, bool Vertical) GripUnder(int x, int y)
+        private (Grip Grip, Divider? Divider) GripUnder(int x, int y, bool shiftHeld = false)
         {
             var i = Inner();
-            if (Math.Abs(x - i.Left) <= GrabPixels) return (Grip.MarginLeft, double.NaN, true);
-            if (Math.Abs(x - i.Right) <= GrabPixels) return (Grip.MarginRight, double.NaN, true);
-            if (Math.Abs(y - i.Top) <= GrabPixels) return (Grip.MarginTop, double.NaN, false);
-            if (Math.Abs(y - i.Bottom) <= GrabPixels) return (Grip.MarginBottom, double.NaN, false);
+            if (Math.Abs(x - i.Left) <= GrabPixels) return (Grip.MarginLeft, null);
+            if (Math.Abs(x - i.Right) <= GrabPixels) return (Grip.MarginRight, null);
+            if (Math.Abs(y - i.Top) <= GrabPixels) return (Grip.MarginTop, null);
+            if (Math.Abs(y - i.Bottom) <= GrabPixels) return (Grip.MarginBottom, null);
 
-            foreach (var v in ZoneEdges.Vertical(fractions))
-                if (Math.Abs(XOf(v) - x) <= GrabPixels) return (Grip.Divider, v, true);
+            foreach (var d in ZoneEdges.Dividers(fractions, mergeTouching: !shiftHeld))
+            {
+                if (d.Vertical)
+                {
+                    int px = XOf(d.Position), y0 = YOf(d.Start), y1 = YOf(d.End);
+                    if (Math.Abs(px - x) <= GrabPixels && y >= y0 - GrabPixels && y <= y1 + GrabPixels)
+                        return (Grip.Divider, d);
+                }
+                else
+                {
+                    int py = YOf(d.Position), x0 = XOf(d.Start), x1 = XOf(d.End);
+                    if (Math.Abs(py - y) <= GrabPixels && x >= x0 - GrabPixels && x <= x1 + GrabPixels)
+                        return (Grip.Divider, d);
+                }
+            }
 
-            foreach (var h in ZoneEdges.Horizontal(fractions))
-                if (Math.Abs(YOf(h) - y) <= GrabPixels) return (Grip.Divider, h, false);
-
-            return (Grip.None, double.NaN, false);
+            return (Grip.None, null);
         }
 
         // ---- painting -------------------------------------------------------
@@ -419,10 +579,7 @@ public sealed class ZoneOverlay : IDisposable
             PaintReserved(g, caption, centred);
 
             // In edit mode we draw the live fractions; otherwise the already-computed pixel zones.
-            var boxes = mode == OverlayMode.Edit
-                ? fractions.Select(LocalRect).Select(PadPreview).ToList()
-                : pixels.Select(z => new Rectangle(z.Rect.Left - geo.Bounds.Left, z.Rect.Top - geo.Bounds.Top,
-                                                  z.Rect.Width, z.Rect.Height)).ToList();
+            var boxes = CurrentBoxes();
 
             for (int i = 0; i < boxes.Count; i++)
             {
@@ -431,13 +588,16 @@ public sealed class ZoneOverlay : IDisposable
 
                 g.FillRectangle(fill, r);
                 g.DrawRectangle(edge, r);
-                g.DrawString($"{i + 1}", index, Brushes.White, r, centred);
 
                 bool covers = mode == OverlayMode.Edit
                     ? i < fractions.Count && fractions[i].CoverTaskbar
                     : i < pixels.Count && pixels[i].CoverTaskbar;
 
-                var sub = new Rectangle(r.X, r.Y + 32, r.Width, r.Height);
+                int shiftY = mode == OverlayMode.Edit && r.Height >= 110 ? -16 : 0;
+                var idxRect = new Rectangle(r.X, r.Y + shiftY, r.Width, r.Height);
+                g.DrawString($"{i + 1}", index, Brushes.White, idxRect, centred);
+
+                var sub = new Rectangle(r.X, r.Y + shiftY + 32, r.Width, r.Height);
                 g.DrawString($"{boxes[i].Width} × {boxes[i].Height}{(covers ? "   ·  over taskbar" : "")}",
                              caption, Brushes.White, sub, centred);
 
@@ -456,8 +616,34 @@ public sealed class ZoneOverlay : IDisposable
                 g.DrawRectangle(thick, Rectangle.Inflate(r, -4, -4));
             }
 
-            if (mode == OverlayMode.Edit) PaintHandles(g);
+            if (mode == OverlayMode.Edit)
+            {
+                PaintHandles(g);
+                PaintEditButtons(g, BuildEditButtons(boxes), centred);
+            }
             PaintHeader(g, centred);
+        }
+
+        private void PaintEditButtons(Graphics g, List<EditButton> buttons, StringFormat centred)
+        {
+            using var btnFont = new Font(FontFamily.GenericSansSerif, 13f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var normalBg = new SolidBrush(Color.FromArgb(230, 26, 30, 38));
+            using var primaryBg = new SolidBrush(Color.FromArgb(235, 58, 130, 220));
+            using var hoverBg = new SolidBrush(Color.FromArgb(245, 74, 158, 255));
+            using var removeHoverBg = new SolidBrush(Color.FromArgb(240, 200, 75, 75));
+            using var borderPen = new Pen(Color.FromArgb(180, 150, 190, 255), 1.5f);
+
+            foreach (var b in buttons)
+            {
+                bool hovered = Nullable.Equals(hoverButton, b);
+                var brush = hovered
+                    ? (b.Kind == EditActionKind.RemoveZone ? removeHoverBg : hoverBg)
+                    : (b.Primary ? primaryBg : normalBg);
+
+                g.FillRectangle(brush, b.Bounds);
+                g.DrawRectangle(borderPen, b.Bounds);
+                g.DrawString(b.Label, btnFont, Brushes.White, b.Bounds, centred);
+            }
         }
 
         /// <summary>Applies the configured gap, so the editor previews what you will actually get.</summary>
@@ -496,15 +682,21 @@ public sealed class ZoneOverlay : IDisposable
             using var outer = new Pen(Color.FromArgb(255, 190, 110), 3f) { DashStyle = DashStyle.Dash };
             using var outerLive = new Pen(Color.FromArgb(255, 210, 140), 5f);
 
-            foreach (var v in ZoneEdges.Vertical(fractions))
+            var activeDiv = draggingDivider ?? hoverDivider;
+            foreach (var d in ZoneEdges.Dividers(fractions, mergeTouching: true))
             {
-                bool active = hoverGrip == Grip.Divider && hoverVertical && ZoneEdges.Near(v, hoverEdge);
-                g.DrawLine(active ? live : grip, XOf(v), Inner().Y, XOf(v), Inner().Bottom);
+                if (d.Vertical)
+                    g.DrawLine(grip, XOf(d.Position), YOf(d.Start), XOf(d.Position), YOf(d.End));
+                else
+                    g.DrawLine(grip, XOf(d.Start), YOf(d.Position), XOf(d.End), YOf(d.Position));
             }
-            foreach (var h in ZoneEdges.Horizontal(fractions))
+
+            if ((draggingGrip == Grip.Divider || hoverGrip == Grip.Divider) && activeDiv is { } ad)
             {
-                bool active = hoverGrip == Grip.Divider && !hoverVertical && ZoneEdges.Near(h, hoverEdge);
-                g.DrawLine(active ? live : grip, Inner().X, YOf(h), Inner().Right, YOf(h));
+                if (ad.Vertical)
+                    g.DrawLine(live, XOf(ad.Position), YOf(ad.Start), XOf(ad.Position), YOf(ad.End));
+                else
+                    g.DrawLine(live, XOf(ad.Start), YOf(ad.Position), XOf(ad.End), YOf(ad.Position));
             }
 
             var i = Inner();
@@ -518,7 +710,7 @@ public sealed class ZoneOverlay : IDisposable
         {
             string text = mode switch
             {
-                OverlayMode.Edit => $"{Device.TrimStart('\\', '.')}  —  drag a divider to resize, an orange edge to reserve space · Esc when done",
+                OverlayMode.Edit => $"{Device.TrimStart('\\', '.')}  —  drag dividers to resize (Shift-drag to detach, right-click to merge) · split or remove zones · Esc when done",
                 OverlayMode.Drag => $"{Device.TrimStart('\\', '.')}  —  drop to snap",
                 _ => $"{Device.TrimStart('\\', '.')}  —  {pixels.Count} zones",
             };

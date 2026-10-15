@@ -321,48 +321,153 @@ public sealed class SettingsForm : Form
 
     private void ShowLayouts()
     {
-        var page = Page("Layouts", "Each display keeps its own layout. Pick a preset, or drag the dividers on screen.");
+        var page = Page("Layouts",
+            "Each display keeps its own layout. Pick a preset, build a custom grid, split or merge individual zones, or drag dividers on screen.");
 
         foreach (var geo in ZoneManager.AllMonitors())
         {
+            var zoneDevice = geo.Device;
             var rects = zones.ZonesFor(geo);
+            var current = config.ZonesFor(zoneDevice);
+
+            void ApplyLayout(List<FracRect> updated)
+            {
+                config.SetZones(zoneDevice, updated);
+                applyChanges();
+                overlay.Flash(zones);
+                BeginInvoke(ShowLayouts);
+            }
+
             page.Controls.Add(new Label
             {
-                Text = $"{geo.Device.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}   ·   " +
+                Text = $"{zoneDevice.TrimStart('\\', '.')}   ·   {geo.Bounds.Width}×{geo.Bounds.Height}   ·   " +
                        $"{geo.Describe()}   ·   {rects.Count} zones",
                 AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(11f, FontStyle.Bold),
                 Margin = new Padding(0, 14, 0, 6),
             });
 
-            var presets = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560, Margin = new Padding(0, 0, 0, 4) };
-            var current = config.ZonesFor(geo.Device);
+            page.Controls.Add(CreateLayoutPreview(current, ApplyLayout));
+            page.Controls.Add(Theme.Caption(
+                "Tip: click a zone in the preview above to split it vertically, right-click to split it horizontally, or middle-click to remove it."));
 
+            var presets = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560, Margin = new Padding(0, 0, 0, 6) };
             foreach (var (name, make) in SplitConfig.Presets)
             {
                 bool active = ZoneEdges.Same(current, make());
                 var b = Theme.Action(name, active);
                 b.AutoSize = true;
-                b.MinimumSize = new Size(130, 32);
-                b.Click += (_, _) =>
-                {
-                    config.SetZones(geo.Device, make());
-                    applyChanges();
-                    overlay.Flash(zones);
-                    BeginInvoke(ShowLayouts);
-                };
+                b.MinimumSize = new Size(105, 30);
+                b.Padding = new Padding(6, 0, 6, 0);
+                b.Click += (_, _) => ApplyLayout(make());
                 presets.Controls.Add(b);
             }
             page.Controls.Add(presets);
 
+            // Quick layout actions: add vertical column, add horizontal row, equalise, or build an N x M grid.
+            var quickRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560, Margin = new Padding(0, 4, 0, 4) };
 
-            var frac = config.ZonesFor(geo.Device);
+            var addCol = Theme.Action("+ Add vertical panel", primary: true);
+            addCol.AutoSize = true;
+            addCol.Click += (_, _) => ApplyLayout(ZoneEdges.AddColumn(config.ZonesFor(zoneDevice)));
+            quickRow.Controls.Add(addCol);
+
+            var addRow = Theme.Action("+ Add horizontal row");
+            addRow.AutoSize = true;
+            addRow.Click += (_, _) => ApplyLayout(ZoneEdges.AddRow(config.ZonesFor(zoneDevice)));
+            quickRow.Controls.Add(addRow);
+
+            var equalise = Theme.Action("Equalise sizes");
+            equalise.AutoSize = true;
+            equalise.Enabled = current.Count > 1;
+            equalise.Click += (_, _) => ApplyLayout(ZoneEdges.Equalise(config.ZonesFor(zoneDevice)));
+            quickRow.Controls.Add(equalise);
+
+            page.Controls.Add(quickRow);
+
+            var gridRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 8) };
+            int curCols = ZoneEdges.Vertical(current).Count + 1;
+            int curRows = ZoneEdges.Horizontal(current).Count + 1;
+
+            gridRow.Controls.Add(new Label
+            {
+                Text = "Custom grid:   Columns", AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(),
+                Margin = new Padding(0, 7, 6, 0),
+            });
+            var colBox = Theme.Number(curCols, 1, 16, 1);
+            colBox.Width = 60;
+            colBox.Margin = new Padding(0, 2, 10, 2);
+            gridRow.Controls.Add(colBox);
+
+            gridRow.Controls.Add(new Label
+            {
+                Text = "×   Rows", AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(),
+                Margin = new Padding(0, 7, 6, 0),
+            });
+            var rowBox = Theme.Number(curRows, 1, 12, 1);
+            rowBox.Width = 60;
+            rowBox.Margin = new Padding(0, 2, 12, 2);
+            gridRow.Controls.Add(rowBox);
+
+            var buildGrid = Theme.Action("Build grid");
+            buildGrid.Size = new Size(105, 28);
+            buildGrid.Margin = new Padding(0, 1, 0, 2);
+            buildGrid.Click += (_, _) => ApplyLayout(ZoneEdges.Grid((int)colBox.Value, (int)rowBox.Value));
+            gridRow.Controls.Add(buildGrid);
+
+            page.Controls.Add(gridRow);
+
+            page.Controls.Add(new Label
+            {
+                Text = "Zones (split or remove individual panels to build asymmetric layouts)",
+                AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+                Margin = new Padding(0, 6, 0, 4),
+            });
+
+            var frac = config.ZonesFor(zoneDevice);
             for (int i = 0; i < frac.Count; i++)
             {
                 int index = i;
-                var zoneDevice = geo.Device;
-                var cover = Theme.Toggle($"Zone {i + 1}: fill the whole display height, over the taskbar",
-                                         frac[i].CoverTaskbar);
-                cover.Margin = new Padding(0, 2, 0, 0);
+                var z = frac[i];
+                int wPct = (int)Math.Round((z.R - z.L) * 100);
+                int hPct = (int)Math.Round((z.B - z.T) * 100);
+
+                var zRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 1, 0, 2) };
+
+                zRow.Controls.Add(new Label
+                {
+                    Text = $"Zone {i + 1}  ({wPct}% × {hPct}%)",
+                    Width = 148, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft,
+                    ForeColor = Theme.Text, Font = Theme.Face(9f, FontStyle.Bold),
+                    Margin = new Padding(0, 4, 4, 0),
+                });
+
+                var splitV = Theme.Action("Split L/R");
+                splitV.Size = new Size(78, 26);
+                splitV.Font = Theme.Face(8.5f);
+                splitV.Margin = new Padding(0, 1, 4, 1);
+                splitV.Enabled = ZoneEdges.CanSplitZone(frac, index, vertical: true);
+                splitV.Click += (_, _) => ApplyLayout(ZoneEdges.SplitZone(config.ZonesFor(zoneDevice), index, vertical: true));
+                zRow.Controls.Add(splitV);
+
+                var splitH = Theme.Action("Split T/B");
+                splitH.Size = new Size(78, 26);
+                splitH.Font = Theme.Face(8.5f);
+                splitH.Margin = new Padding(0, 1, 4, 1);
+                splitH.Enabled = ZoneEdges.CanSplitZone(frac, index, vertical: false);
+                splitH.Click += (_, _) => ApplyLayout(ZoneEdges.SplitZone(config.ZonesFor(zoneDevice), index, vertical: false));
+                zRow.Controls.Add(splitH);
+
+                var removeBtn = Theme.Action("Remove");
+                removeBtn.Size = new Size(72, 26);
+                removeBtn.Font = Theme.Face(8.5f);
+                removeBtn.Margin = new Padding(0, 1, 10, 1);
+                removeBtn.Enabled = ZoneEdges.CanRemoveZone(frac, index);
+                removeBtn.Click += (_, _) => ApplyLayout(ZoneEdges.RemoveZone(config.ZonesFor(zoneDevice), index));
+                zRow.Controls.Add(removeBtn);
+
+                var cover = Theme.Toggle("Over taskbar", z.CoverTaskbar);
+                cover.Font = Theme.Face(9f);
+                cover.Margin = new Padding(0, 4, 0, 0);
                 cover.CheckedChanged += (_, _) =>
                 {
                     var edited = ZoneEdges.Clone(config.ZonesFor(zoneDevice));
@@ -371,13 +476,16 @@ public sealed class SettingsForm : Form
                     config.SetZones(zoneDevice, edited);
                     applyChanges();
                     overlay.Flash(zones);
+                    BeginInvoke(ShowLayouts);
                 };
-                page.Controls.Add(cover);
+                zRow.Controls.Add(cover);
+
+                page.Controls.Add(zRow);
             }
             page.Controls.Add(Theme.Caption(
-                "A zone set this way is measured against the whole display rather than the work area, " +
-                "and windows placed in it are kept above the taskbar — so it is genuinely fullscreen " +
-                "over its part of the screen while the taskbar stays visible and usable everywhere else."));
+                "\"Over taskbar\" measures a zone against the whole display rather than the work area, " +
+                "and keeps windows placed in it above the taskbar — genuinely fullscreen over its part of " +
+                "the screen while the taskbar stays visible and usable everywhere else."));
 
             // Nothing to cover means nothing to see, and that is worth saying out loud rather than
             // leaving someone to conclude the setting is broken.
@@ -437,7 +545,7 @@ public sealed class SettingsForm : Form
 
         var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Width = 560, Margin = new Padding(0, 18, 0, 0) };
 
-        var edit = Theme.Action("Drag dividers on screen…", primary: true);
+        var edit = Theme.Action("Edit & drag zones on screen…", primary: true);
         edit.AutoSize = true;
         edit.Click += (_, _) => OpenZoneEditor();
         buttons.Controls.Add(edit);
@@ -462,6 +570,123 @@ public sealed class SettingsForm : Form
         buttons.Controls.Add(arrange);
 
         page.Controls.Add(buttons);
+    }
+
+    private static Panel CreateLayoutPreview(List<FracRect> zonesList, Action<List<FracRect>> onEdited)
+    {
+        var snapshot = ZoneEdges.Clone(zonesList);
+        int hoveredIndex = -1;
+
+        var panel = new Panel
+        {
+            Size = new Size(560, 116),
+            BackColor = Theme.Panel,
+            Margin = new Padding(0, 2, 0, 4),
+            Cursor = Cursors.Hand,
+        };
+
+        Rectangle BoxFor(FracRect f)
+        {
+            int pad = 6;
+            int w = panel.Width - pad * 2;
+            int h = panel.Height - pad * 2;
+            int l = pad + (int)Math.Round(f.L * w);
+            int t = pad + (int)Math.Round(f.T * h);
+            int r = pad + (int)Math.Round(f.R * w);
+            int b = pad + (int)Math.Round(f.B * h);
+            return new Rectangle(l, t, Math.Max(2, r - l), Math.Max(2, b - t));
+        }
+
+        int HitZone(Point pt)
+        {
+            for (int i = 0; i < snapshot.Count; i++)
+                if (BoxFor(snapshot[i]).Contains(pt)) return i;
+            return -1;
+        }
+
+        panel.Paint += (_, e) =>
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            using var fill = new SolidBrush(Color.FromArgb(52, 92, 160));
+            using var hoverFill = new SolidBrush(Color.FromArgb(74, 132, 220));
+            using var border = new Pen(Color.FromArgb(150, 190, 255), 1.5f);
+            using var coverPen = new Pen(Color.FromArgb(255, 190, 110), 1.5f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
+            using var numFont = Theme.Face(11f, FontStyle.Bold);
+            using var subFont = Theme.Face(8f);
+            using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
+            for (int i = 0; i < snapshot.Count; i++)
+            {
+                var r = Rectangle.Inflate(BoxFor(snapshot[i]), -2, -2);
+                if (r.Width <= 0 || r.Height <= 0) continue;
+
+                g.FillRectangle(i == hoveredIndex ? hoverFill : fill, r);
+                g.DrawRectangle(border, r);
+                if (snapshot[i].CoverTaskbar && r.Width > 6 && r.Height > 6)
+                    g.DrawRectangle(coverPen, Rectangle.Inflate(r, -2, -2));
+
+                int wPct = (int)Math.Round((snapshot[i].R - snapshot[i].L) * 100);
+                int hPct = (int)Math.Round((snapshot[i].B - snapshot[i].T) * 100);
+
+                if (r.Height >= 38 && r.Width >= 46)
+                {
+                    var topRect = new Rectangle(r.X, r.Y + r.Height / 2 - 16, r.Width, 18);
+                    var botRect = new Rectangle(r.X, r.Y + r.Height / 2 + 1, r.Width, 16);
+                    g.DrawString($"{i + 1}", numFont, Brushes.White, topRect, centred);
+                    g.DrawString($"{wPct}%×{hPct}%", subFont, Brushes.White, botRect, centred);
+                }
+                else
+                {
+                    g.DrawString($"{i + 1}", subFont, Brushes.White, r, centred);
+                }
+            }
+        };
+
+        panel.MouseMove += (_, e) =>
+        {
+            int hit = HitZone(e.Location);
+            if (hit != hoveredIndex)
+            {
+                hoveredIndex = hit;
+                panel.Invalidate();
+            }
+        };
+
+        panel.MouseLeave += (_, _) =>
+        {
+            if (hoveredIndex != -1)
+            {
+                hoveredIndex = -1;
+                panel.Invalidate();
+            }
+        };
+
+        panel.MouseDown += (_, e) =>
+        {
+            int hit = HitZone(e.Location);
+            if (hit < 0) return;
+
+            if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && (ModifierKeys & Keys.Shift) != 0))
+            {
+                if (ZoneEdges.CanRemoveZone(snapshot, hit))
+                    onEdited(ZoneEdges.RemoveZone(snapshot, hit));
+            }
+            else if (e.Button == MouseButtons.Left)
+            {
+                if (ZoneEdges.CanSplitZone(snapshot, hit, vertical: true))
+                    onEdited(ZoneEdges.SplitZone(snapshot, hit, vertical: true));
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                if (ZoneEdges.CanSplitZone(snapshot, hit, vertical: false))
+                    onEdited(ZoneEdges.SplitZone(snapshot, hit, vertical: false));
+            }
+        };
+
+        return panel;
     }
 
     private void ShowTaskbar()
@@ -1481,7 +1706,13 @@ public sealed class SettingsForm : Form
                 {
                     Text = $"{printer.Name}{modelPart}{statusSummary}",
                     AutoSize = true, ForeColor = Theme.Text, Font = Theme.Face(9f),
+                    Cursor = Cursors.Hand,
                     Margin = new Padding(0, 6, 0, 0),
+                };
+                infoLabel.Click += (_, _) =>
+                {
+                    if (!BambuUsage.OpenSlicer())
+                        Say("Could not find Bambu Studio (or OrcaSlicer) on this machine.", problem: true);
                 };
                 row.Controls.Add(infoLabel);
 
@@ -1503,6 +1734,15 @@ public sealed class SettingsForm : Form
             Say("Syncing printers with Bambu Cloud…");
         };
         actions.Controls.Add(check);
+
+        var openSlicer = Theme.Action("Open Bambu Studio");
+        openSlicer.AutoSize = true;
+        openSlicer.Click += (_, _) =>
+        {
+            if (!BambuUsage.OpenSlicer())
+                Say("Could not find Bambu Studio (or OrcaSlicer) on this machine.", problem: true);
+        };
+        actions.Controls.Add(openSlicer);
 
         var diagnosis = new TextBox
         {

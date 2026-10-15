@@ -317,6 +317,34 @@ public sealed class TrayApplicationContext : ApplicationContext
             });
         }
 
+        var targetDevice = geo.Device;
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(new ToolStripMenuItem("+ Add vertical panel", null, (_, _) =>
+        {
+            config.SetZones(targetDevice, ZoneEdges.AddColumn(config.ZonesFor(targetDevice)));
+            ApplyChanges();
+            overlay.Flash(zones);
+        }));
+        menu.DropDownItems.Add(new ToolStripMenuItem("+ Add horizontal row", null, (_, _) =>
+        {
+            config.SetZones(targetDevice, ZoneEdges.AddRow(config.ZonesFor(targetDevice)));
+            ApplyChanges();
+            overlay.Flash(zones);
+        }));
+        if (current.Count > 1)
+        {
+            menu.DropDownItems.Add(new ToolStripMenuItem("Equalise sizes", null, (_, _) =>
+            {
+                config.SetZones(targetDevice, ZoneEdges.Equalise(config.ZonesFor(targetDevice)));
+                ApplyChanges();
+                overlay.Flash(zones);
+            }));
+        }
+        menu.DropDownItems.Add(new ToolStripMenuItem("Edit & drag zones on screen…", null, (_, _) =>
+            overlay.Show(zones, OverlayMode.Edit)));
+        menu.DropDownItems.Add(new ToolStripMenuItem("Custom grids & per-zone splits…", null, (_, _) =>
+            OpenSettings("Layouts")));
+
         return menu;
     }
 

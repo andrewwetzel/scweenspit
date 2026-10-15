@@ -516,18 +516,27 @@ public sealed class SplitConfig
         return false;
     }
 
-    // ---- presets used by the tray menu -------------------------------------
+    // ---- presets used by the tray menu and settings ------------------------
     public static readonly (string Name, Func<List<FracRect>> Make)[] Presets =
     {
-        ("Full — leave this display alone", () => new() { new(0, 0, 1, 1) }),
-        ("70 / 30",         () => new() { new(0, 0, .70, 1), new(.70, 0, 1, 1) }),
-        ("30 / 70",         () => new() { new(0, 0, .30, 1), new(.30, 0, 1, 1) }),
-        ("60 / 40",         () => new() { new(0, 0, .60, 1), new(.60, 0, 1, 1) }),
-        ("50 / 50",         () => new() { new(0, 0, .50, 1), new(.50, 0, 1, 1) }),
-        ("Thirds",          () => new() { new(0, 0, 1/3d, 1), new(1/3d, 0, 2/3d, 1), new(2/3d, 0, 1, 1) }),
-        ("Top / Bottom",    () => new() { new(0, 0, 1, .5), new(0, .5, 1, 1) }),
-        ("Quadrants",       () => new() { new(0, 0, .5, .5), new(.5, 0, 1, .5),
-                                          new(0, .5, .5, 1), new(.5, .5, 1, 1) }),
+        ("Full — leave this display alone", () => ZoneEdges.Grid(1, 1)),
+        ("70 / 30",                () => new() { new(0, 0, .70, 1), new(.70, 0, 1, 1) }),
+        ("30 / 70",                () => new() { new(0, 0, .30, 1), new(.30, 0, 1, 1) }),
+        ("60 / 40",                () => new() { new(0, 0, .60, 1), new(.60, 0, 1, 1) }),
+        ("50 / 50",                () => ZoneEdges.Grid(2, 1)),
+        ("Thirds",                 () => ZoneEdges.Grid(3, 1)),
+        ("25 / 50 / 25",           () => ZoneEdges.Columns(25, 50, 25)),
+        ("Fourths",                () => ZoneEdges.Grid(4, 1)),
+        ("Fifths",                 () => ZoneEdges.Grid(5, 1)),
+        ("Sixths",                 () => ZoneEdges.Grid(6, 1)),
+        ("Top / Bottom",           () => ZoneEdges.Grid(1, 2)),
+        ("Three rows",             () => ZoneEdges.Grid(1, 3)),
+        ("Quadrants",              () => ZoneEdges.Grid(2, 2)),
+        ("3 × 2 grid",             () => ZoneEdges.Grid(3, 2)),
+        ("4 × 2 grid",             () => ZoneEdges.Grid(4, 2)),
+        ("Main + 2 stacked",       () => new() { new(0, 0, .60, 1), new(.60, 0, 1, .5), new(.60, .5, 1, 1) }),
+        ("Main + 3 stacked",       () => new() { new(0, 0, .60, 1), new(.60, 0, 1, 1/3d), new(.60, 1/3d, 1, 2/3d), new(.60, 2/3d, 1, 1) }),
+        ("Centre + Sides stacked", () => new() { new(0, 0, .25, .5), new(.25, 0, .75, 1), new(.75, 0, 1, .5), new(0, .5, .25, 1), new(.75, .5, 1, 1) }),
     };
 
     // ---- persistence -------------------------------------------------------

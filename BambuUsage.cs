@@ -225,6 +225,135 @@ public static class BambuUsage
         }
     }
 
+    /// <summary>
+    /// Raises an already-open Bambu Studio (or OrcaSlicer) window to the foreground, or launches
+    /// the slicer application if it is not yet running. Returns true when a slicer was raised or started.
+    /// </summary>
+    public static bool OpenSlicer()
+    {
+        try
+        {
+            var openWindows = WindowList.Enumerate(null);
+            var runningBambu = openWindows.FirstOrDefault(w =>
+                w.Process.Equals("bambu-studio", StringComparison.OrdinalIgnoreCase) ||
+                w.Process.Equals("bambustudio", StringComparison.OrdinalIgnoreCase));
+            if (runningBambu is not null)
+            {
+                WindowList.Raise(runningBambu.Handle);
+                return true;
+            }
+
+            if (FindSlicerPath(bambuOnly: true) is { } bambuExe)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(bambuExe) { UseShellExecute = true });
+                return true;
+            }
+
+            var runningOrca = openWindows.FirstOrDefault(w =>
+                w.Process.Equals("orca-slicer", StringComparison.OrdinalIgnoreCase) ||
+                w.Process.Equals("orcaslicer", StringComparison.OrdinalIgnoreCase));
+            if (runningOrca is not null)
+            {
+                WindowList.Raise(runningOrca.Handle);
+                return true;
+            }
+
+            if (FindSlicerPath(bambuOnly: false) is { } fallbackExe)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(fallbackExe) { UseShellExecute = true });
+                return true;
+            }
+
+            // Protocol handler registered by Bambu Studio on install.
+            using var proto = Microsoft.Win32.Registry.ClassesRoot.OpenSubKey("bambustudio");
+            if (proto is not null)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("bambustudio://") { UseShellExecute = true });
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"could not open Bambu slicer: {ex.Message}");
+        }
+        return false;
+    }
+
+    private static string? FindSlicerPath(bool bambuOnly)
+    {
+        var candidates = new List<string>();
+
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string commonStart = Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms);
+        string userStart = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+        string commonDesk = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+        string userDesk = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
+        if (bambuOnly)
+        {
+            candidates.Add(Path.Combine(pf, "Bambu Studio", "bambu-studio.exe"));
+            candidates.Add(Path.Combine(pf86, "Bambu Studio", "bambu-studio.exe"));
+            candidates.Add(Path.Combine(local, "Programs", "Bambu Studio", "bambu-studio.exe"));
+            candidates.Add(Path.Combine(local, "Bambu Studio", "bambu-studio.exe"));
+
+            if (ReadRegistryExe(@"bambustudio\shell\open\command") is { } regProto) candidates.Add(regProto);
+            if (ReadRegistryValue(Microsoft.Win32.Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\bambu-studio.exe") is { } appPathLm) candidates.Add(appPathLm);
+            if (ReadRegistryValue(Microsoft.Win32.Registry.CurrentUser, @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\bambu-studio.exe") is { } appPathCu) candidates.Add(appPathCu);
+
+            candidates.Add(Path.Combine(commonStart, "Bambu Studio", "Bambu Studio.lnk"));
+            candidates.Add(Path.Combine(userStart, "Bambu Studio", "Bambu Studio.lnk"));
+            candidates.Add(Path.Combine(commonDesk, "Bambu Studio.lnk"));
+            candidates.Add(Path.Combine(userDesk, "Bambu Studio.lnk"));
+        }
+        else
+        {
+            candidates.Add(Path.Combine(pf, "OrcaSlicer", "orca-slicer.exe"));
+            candidates.Add(Path.Combine(pf86, "OrcaSlicer", "orca-slicer.exe"));
+            candidates.Add(Path.Combine(local, "Programs", "OrcaSlicer", "orca-slicer.exe"));
+            candidates.Add(Path.Combine(local, "OrcaSlicer", "orca-slicer.exe"));
+
+            if (ReadRegistryExe(@"orcaslicer\shell\open\command") is { } orcaProto) candidates.Add(orcaProto);
+            candidates.Add(Path.Combine(commonStart, "OrcaSlicer", "OrcaSlicer.lnk"));
+            candidates.Add(Path.Combine(userStart, "OrcaSlicer", "OrcaSlicer.lnk"));
+        }
+
+        foreach (var path in candidates)
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                return path;
+
+        return null;
+    }
+
+    private static string? ReadRegistryValue(Microsoft.Win32.RegistryKey root, string subKey)
+    {
+        try
+        {
+            using var k = root.OpenSubKey(subKey);
+            return (k?.GetValue(null) as string)?.Trim('"', ' ');
+        }
+        catch { return null; }
+    }
+
+    private static string? ReadRegistryExe(string classesSubKey)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.ClassesRoot.OpenSubKey(classesSubKey);
+            if (k?.GetValue(null) is not string raw || string.IsNullOrWhiteSpace(raw)) return null;
+            raw = raw.Trim();
+            if (raw.StartsWith('"'))
+            {
+                int end = raw.IndexOf('"', 1);
+                if (end > 1) return raw[1..end];
+            }
+            int exeIdx = raw.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+            return exeIdx > 0 ? raw[..(exeIdx + 4)].Trim('"', ' ') : null;
+        }
+        catch { return null; }
+    }
+
     /// <summary>Stops background tasks on exit.</summary>
     public static void Stop()
     {

@@ -795,6 +795,12 @@ public sealed class TaskbarWindow : Form
 
         if (BambuVisible && BambuArea.Contains(e.Location))
         {
+            if (e.Button != MouseButtons.Right && BambuUsage.Enabled && BambuUsage.Current is not { NeedsAuth: true }
+                && BambuUsage.OpenSlicer())
+            {
+                return;
+            }
+
             if (SettingsRequested is not null)
                 SettingsRequested.Invoke("Bambu printers");
             else
