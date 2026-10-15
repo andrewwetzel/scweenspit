@@ -40,11 +40,36 @@ internal static class UsageStrip
         return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
-    /// <summary>Room the remote server chats strip needs along the bar.</summary>
+    /// <summary>Room the remote server chats strip needs along the bar, sized tightly to the live chat count.</summary>
     public static int RemoteChatsExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
     {
-        int count = RemoteChatUsage.Current?.Rows.Count is > 0 and var c ? c : RemoteChatUsage.ConfiguredRowCount;
-        return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+        var rows = RemoteChatUsage.Current?.Rows ?? [];
+        if (vertical)
+        {
+            int count = rows.Count > 0 ? rows.Count : RemoteChatUsage.ConfiguredRowCount;
+            return Math.Clamp(Math.Max(2, count) * 24 + 8, 72, 160);
+        }
+
+        double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
+        if (rows.Count == 0)
+        {
+            double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
+            return (int)Math.Round(108 * hScale * uScale);
+        }
+
+        int virtualH = Math.Max(24, barBreadth);
+        RenderOrHitTestRemoteChats(
+            g: null,
+            new Rectangle(0, 0, 2000, virtualH),
+            rows,
+            maxRowsPerColumn,
+            hoveredChatId: null,
+            stripHovered: false,
+            hitPoint: null,
+            out _,
+            out int intrinsicWidth);
+
+        return (int)Math.Ceiling(intrinsicWidth * uScale);
     }
 
     public static void Paint(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn = 3)
@@ -252,12 +277,15 @@ internal static class UsageStrip
     private static readonly Color SectionDividerColour = Color.FromArgb(124, 138, 164);
 
     public static void PaintRemoteChats(Graphics g, Rectangle area, RemoteChatsReading? reading,
-                                        int maxRowsPerColumn = 3, string? hoveredChatId = null)
+                                        int maxRowsPerColumn = 3, string? hoveredChatId = null,
+                                        bool stripHovered = false)
     {
         var rows = reading?.Rows ?? [];
         if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading); return; }
 
-        RenderOrHitTestRemoteChats(g, area, rows, maxRowsPerColumn, hoveredChatId, hitPoint: null, out _);
+        RenderOrHitTestRemoteChats(g, area, rows, maxRowsPerColumn, hoveredChatId,
+                                   stripHovered || hoveredChatId is not null,
+                                   hitPoint: null, out _, out _);
     }
 
     /// <summary>Returns the individual chat circle under <paramref name="pt"/>, or null if none.</summary>
@@ -267,7 +295,8 @@ internal static class UsageStrip
         var rows = reading?.Rows ?? [];
         if (rows.Count == 0 || !area.Contains(pt)) return null;
 
-        RenderOrHitTestRemoteChats(g: null, area, rows, maxRowsPerColumn, hoveredChatId: null, hitPoint: pt, out var hit);
+        RenderOrHitTestRemoteChats(g: null, area, rows, maxRowsPerColumn, hoveredChatId: null,
+                                   stripHovered: false, hitPoint: pt, out var hit, out _);
         return hit;
     }
 
@@ -277,8 +306,10 @@ internal static class UsageStrip
         IReadOnlyList<RemoteServerRow> rows,
         int maxRowsPerColumn,
         string? hoveredChatId,
+        bool stripHovered,
         Point? hitPoint,
-        out RemoteChatItem? hitChat)
+        out RemoteChatItem? hitChat,
+        out int intrinsicWidth)
     {
         hitChat = null;
 
@@ -307,7 +338,14 @@ internal static class UsageStrip
         float subPt = compact ? 6.2f : Math.Clamp(6.8f * scale, 6.2f, 13f);
 
         int outerPad = vertical ? 4 : Math.Clamp((int)Math.Round(5 * scale), 4, 10);
-        int colGap = cols > 1 ? Math.Clamp((int)Math.Round(12 * scale), 10, 20) : 0;
+        int colGap = cols > 1 ? Math.Clamp((int)Math.Round(10 * scale), 8, 16) : 0;
+        int trackGap = Math.Clamp((int)Math.Round(4 * scale), 3, 6);
+
+        int capsuleH = vertical
+            ? Math.Clamp(rowHeight / 2, 8, 14)
+            : Math.Clamp((int)Math.Round(rowHeight * 0.78), 8, 16);
+        int idealDia = Math.Clamp(capsuleH - 4, 6, 12);
+        int padX = Math.Clamp(capsuleH / 4, 3, 5);
 
         int totalWaiting = 0, totalRunning = 0, totalChats = 0;
         foreach (var r in rows)
@@ -325,6 +363,71 @@ internal static class UsageStrip
         using var mutedBrush = new SolidBrush(Theme.Muted);
         using var innerSepPen = new Pen(Color.FromArgb(42, 46, 56), 1f);
 
+        // Pre-measure each column's tight width based on its labels, per-row circle capsules, and count badges.
+        var colNameW = new int[cols];
+        var colWidths = new int[cols];
+        var rowCapWidths = new int[rows.Count];
+        var rowSubWidths = new int[rows.Count];
+
+        for (int c = 0; c < cols; c++)
+        {
+            int startIdx = c * rowsPerCol;
+            int countInCol = Math.Min(rowsPerCol, rows.Count - startIdx);
+            if (countInCol <= 0) continue;
+
+            float maxLblW = 0f;
+            for (int j = 0; j < countInCol; j++)
+            {
+                var r = rows[startIdx + j];
+                bool bold = r.WaitingCount > 0 || r.RunningCount > 0;
+                float lw = measureG.MeasureString(r.Label, bold ? boldNameFont : nameFont).Width;
+                if (lw > maxLblW) maxLblW = lw;
+            }
+
+            int nameW = Math.Max((int)Math.Round(28 * scale), (int)Math.Ceiling(maxLblW) + 2);
+            colNameW[c] = nameW;
+
+            int maxRowW = nameW + 36;
+            for (int j = 0; j < countInCol; j++)
+            {
+                int idx = startIdx + j;
+                var r = rows[idx];
+                int capW = MeasureRowCapsuleWidth(r, idealDia, padX, maxCircles: 10);
+                string st = FormatRowBadgeText(r);
+                int subW = (int)Math.Ceiling(measureG.MeasureString(st, subFont).Width) + 2;
+
+                rowCapWidths[idx] = capW;
+                rowSubWidths[idx] = subW;
+
+                int rw = nameW + trackGap + capW + trackGap + subW;
+                if (rw > maxRowW) maxRowW = rw;
+            }
+
+            colWidths[c] = maxRowW;
+        }
+
+        int totalColsW = colWidths.Sum() + Math.Max(0, cols - 1) * colGap;
+        int minHeaderW = showHeader ? (int)Math.Ceiling(166 * scale) : 60;
+        int contentW = Math.Max(totalColsW, minHeaderW);
+        intrinsicWidth = contentW + outerPad * 2;
+
+        // If the header is slightly wider than a single short column, distribute the extra pixels across columns.
+        if (!vertical && totalColsW < contentW && cols > 0)
+        {
+            int extraPerCol = (contentW - totalColsW) / cols;
+            for (int c = 0; c < cols; c++)
+                colWidths[c] += extraPerCol;
+        }
+
+        // If the taskbar is narrower than intrinsicWidth on a cramped display, scale column widths down proportionally.
+        int availInnerW = Math.Max(24, area.Width - outerPad * 2);
+        if (!vertical && totalColsW > availInnerW && totalColsW > 0)
+        {
+            double shrink = Math.Max(0.5, (availInnerW - Math.Max(0, cols - 1) * colGap) / (double)colWidths.Sum());
+            for (int c = 0; c < cols; c++)
+                colWidths[c] = Math.Max(48, (int)Math.Floor(colWidths[c] * shrink));
+        }
+
         int meterStartRow = 0;
         if (showHeader)
         {
@@ -336,14 +439,18 @@ internal static class UsageStrip
                         ? $"{totalRunning} run · {totalChats}"
                         : $"{totalChats} live";
                 Color hdrCol = totalWaiting > 0 ? Color.FromArgb(255, 210, 115) : RemoteChatsTitleColour;
-                var hdrRow = new Rectangle(area.X + outerPad, top, Math.Max(16, area.Width - outerPad * 2), rowHeight);
-                PaintRemoteHeaderRow(g, hdrRow, "Remote Chats", headerTag, hdrCol, boldNameFont, nameFont, mutedBrush, scale);
+                var hdrRow = new Rectangle(area.X + outerPad, top, Math.Min(availInnerW, contentW), rowHeight);
+                if (stripHovered)
+                {
+                    PaintRemoteKeyHeaderRow(g, hdrRow, subFont, scale);
+                }
+                else
+                {
+                    PaintRemoteHeaderRow(g, hdrRow, "Remote Chats", headerTag, hdrCol, boldNameFont, nameFont, mutedBrush, scale);
+                }
             }
             meterStartRow = 1;
         }
-
-        int totalInnerW = Math.Max(16, area.Width - outerPad * 2);
-        int colWidth = cols == 1 ? totalInnerW : Math.Max(40, (totalInnerW - colGap * (cols - 1)) / cols);
 
         using var leftFmt = new StringFormat
         {
@@ -352,20 +459,17 @@ internal static class UsageStrip
             Trimming = StringTrimming.EllipsisCharacter,
             FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
         };
-        using var rightFmt = new StringFormat
-        {
-            Alignment = vertical ? StringAlignment.Center : StringAlignment.Far,
-            LineAlignment = StringAlignment.Center,
-            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
-        };
 
+        int curColX = area.X + outerPad;
         for (int c = 0; c < cols; c++)
         {
             int startIdx = c * rowsPerCol;
             int countInCol = Math.Min(rowsPerCol, rows.Count - startIdx);
             if (countInCol <= 0) break;
 
-            int colX = area.X + outerPad + c * (colWidth + colGap);
+            int colX = curColX;
+            int colW = vertical ? availInnerW : colWidths[c];
+            curColX += colW + colGap;
 
             if (g is not null && c > 0 && !vertical)
             {
@@ -376,37 +480,14 @@ internal static class UsageStrip
                     g.DrawLine(innerSepPen, sepX, sepTop, sepX, sepBot);
             }
 
-            float maxLblW = 0f, maxSubW = 0f;
-            for (int j = 0; j < countInCol; j++)
-            {
-                var r = rows[startIdx + j];
-                bool bold = r.WaitingCount > 0 || r.RunningCount > 0;
-                float lw = measureG.MeasureString(r.Label, bold ? boldNameFont : nameFont).Width;
-                if (lw > maxLblW) maxLblW = lw;
-
-                string st = FormatRowBadgeText(r);
-                float sw = measureG.MeasureString(st, subFont).Width;
-                if (sw > maxSubW) maxSubW = sw;
-            }
-
-            int minNameW = (int)Math.Round(36 * scale);
-            int nameW = Math.Clamp(Math.Max(minNameW, (int)Math.Ceiling(maxLblW) + 4),
-                                   28, Math.Max(34, colWidth * 36 / 100));
-
-            int minSubW = (int)Math.Round(34 * scale);
-            int subW = Math.Clamp(Math.Max(minSubW, (int)Math.Ceiling(maxSubW) + 4),
-                                  30, Math.Max(34, colWidth * 30 / 100));
-
-            int trackGap = Math.Clamp((int)Math.Round(4 * scale), 3, 7);
-            int capsuleH = vertical
-                ? Math.Clamp(rowHeight / 2, 8, 14)
-                : Math.Clamp((int)Math.Round(rowHeight * 0.78), 8, 16);
+            int nameW = vertical ? colW : Math.Min(colNameW[c], colW * 45 / 100);
 
             for (int j = 0; j < countInCol; j++)
             {
-                var rowData = rows[startIdx + j];
+                int idx = startIdx + j;
+                var rowData = rows[idx];
                 int rIdx = meterStartRow + j;
-                var rowRect = new Rectangle(colX, top + rIdx * rowHeight, colWidth, rowHeight);
+                var rowRect = new Rectangle(colX, top + rIdx * rowHeight, colW, rowHeight);
 
                 Rectangle nameRect, trackRect, subRect;
                 if (vertical)
@@ -419,10 +500,12 @@ internal static class UsageStrip
                 else
                 {
                     nameRect = new Rectangle(rowRect.X, rowRect.Y, nameW, rowHeight);
-                    subRect = new Rectangle(rowRect.Right - subW, rowRect.Y, subW, rowHeight);
-                    int trackX = rowRect.X + nameW + trackGap / 2;
-                    int trackW = Math.Max(14, subRect.X - (rowRect.X + nameW) - trackGap);
-                    trackRect = new Rectangle(trackX, rowRect.Y + (rowHeight - capsuleH) / 2, trackW, capsuleH);
+                    int subW = rowSubWidths[idx];
+                    int trackX = rowRect.X + nameW + trackGap;
+                    int maxTrackW = Math.Max(12, rowRect.Right - trackX - trackGap - subW);
+                    int tightTrackW = Math.Min(rowCapWidths[idx], maxTrackW);
+                    trackRect = new Rectangle(trackX, rowRect.Y + (rowHeight - capsuleH) / 2, tightTrackW, capsuleH);
+                    subRect = new Rectangle(trackRect.Right + trackGap, rowRect.Y, subW + 4, rowHeight);
                 }
 
                 if (PaintOrHitTestRowCircles(g, trackRect, rowData, hoveredChatId, hitPoint, overflowFont, out var rowHit))
@@ -446,10 +529,22 @@ internal static class UsageStrip
 
                     string summaryText = FormatRowBadgeText(rowData);
                     using var subBrush = new SolidBrush(subCol);
-                    g.DrawString(summaryText, subFont, subBrush, subRect, rightFmt);
+                    g.DrawString(summaryText, subFont, subBrush, subRect, leftFmt);
                 }
             }
         }
+    }
+
+    private static int MeasureRowCapsuleWidth(RemoteServerRow row, int dia, int padX, int maxCircles = 10)
+    {
+        int count = row.Chats.Count;
+        if (count == 0)
+            return padX * 2 + Math.Max(6, dia - 1);
+
+        if (count <= maxCircles)
+            return padX * 2 + MeasureCirclesWidth(row.Chats, count, dia);
+
+        return padX * 2 + MeasureCirclesWidth(row.Chats, maxCircles, dia) + 18;
     }
 
     private static string FormatRowBadgeText(RemoteServerRow r)
@@ -460,7 +555,7 @@ internal static class UsageStrip
         var parts = new List<string>(3);
         if (r.WaitingCount > 0) parts.Add($"{r.WaitingCount}!");
         if (r.RunningCount > 0) parts.Add(r.WaitingCount == 0 && r.DoneCount == 0 ? $"{r.RunningCount} run" : $"{r.RunningCount}r");
-        if (r.DoneCount > 0) parts.Add(r.WaitingCount == 0 && r.RunningCount == 0 ? $"{r.DoneCount}✓" : $"{r.DoneCount}✓");
+        if (r.DoneCount > 0) parts.Add($"{r.DoneCount}✓");
         return string.Join(" ", parts);
     }
 
@@ -703,6 +798,69 @@ internal static class UsageStrip
         g.DrawPath(border, path);
     }
 
+    /// <summary>
+    /// Draws a visual colour-coded Key in the header row when the user hovers over a chat circle or the strip:
+    ///   [🟠] !=help  │  [🔵] r=run  │  [🟢] ✓=done
+    /// </summary>
+    private static void PaintRemoteKeyHeaderRow(Graphics g, Rectangle row, Font keyFont, float scale)
+    {
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        float dia = Math.Clamp(row.Height * 0.48f, 6f, 10f);
+        float cy = row.Y + row.Height / 2f;
+        float x = row.X + 1f;
+
+        using var waitFill = new SolidBrush(WaitingDotFill);
+        using var waitRim = new Pen(WaitingDotRim, 1.1f);
+        using var waitText = new SolidBrush(Color.FromArgb(255, 215, 130));
+        using var runFill = new SolidBrush(RunningDotFill);
+        using var runRim = new Pen(RunningDotRim, 1f);
+        using var runText = new SolidBrush(Color.FromArgb(145, 205, 255));
+        using var doneFill = new SolidBrush(DoneDotFill);
+        using var doneRim = new Pen(DoneDotRim, 1f);
+        using var doneText = new SolidBrush(Color.FromArgb(135, 225, 185));
+        using var sepPen = new Pen(SectionDividerColour, 1.1f);
+        using var fmt = new StringFormat
+        {
+            Alignment = StringAlignment.Near,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+        };
+
+        void DrawItem(Brush dotFill, Pen dotRim, string label, Brush textBrush, bool withPip, bool withSepAfter)
+        {
+            var dotRect = new RectangleF(x, cy - dia / 2f, dia, dia);
+            g.FillEllipse(dotFill, dotRect);
+            g.DrawEllipse(dotRim, dotRect);
+            if (withPip && dia >= 6.5f)
+            {
+                float pip = Math.Max(1.8f, dia * 0.26f);
+                using var pipBrush = new SolidBrush(Color.FromArgb(255, 248, 225));
+                g.FillEllipse(pipBrush, dotRect.X + (dotRect.Width - pip) / 2f,
+                              dotRect.Y + (dotRect.Height - pip) / 2f, pip, pip);
+            }
+            x += dia + 3f * scale;
+
+            float tw = g.MeasureString(label, keyFont).Width;
+            g.DrawString(label, keyFont, textBrush, new RectangleF(x, row.Y, tw + 4f, row.Height), fmt);
+            x += tw + 3f * scale;
+
+            if (withSepAfter)
+            {
+                float sepX = x + 1f;
+                g.DrawLine(sepPen, sepX, row.Y + 3f, sepX, row.Bottom - 3f);
+                x += 5f * scale;
+            }
+        }
+
+        DrawItem(waitFill, waitRim, "! help", waitText, withPip: true, withSepAfter: true);
+        DrawItem(runFill, runRim, "r run", runText, withPip: false, withSepAfter: true);
+        DrawItem(doneFill, doneRim, "✓ done", doneText, withPip: false, withSepAfter: false);
+
+        g.SmoothingMode = previous;
+    }
+
     private static void PaintRemoteHeaderRow(Graphics g, Rectangle row, string title, string? tag,
                                              Color titleColour, Font titleFont, Font tagFont,
                                              Brush tagBrush, float scale)
@@ -747,15 +905,17 @@ internal static class UsageStrip
         }
     }
 
+    private const string RemoteChatLegendLine = "Key: 🟠 (!) Needs help  │  🔵 (r) Running  │  🟢 (✓) Done";
+
     /// <summary>Tooltip for an individual chat circle when hovering over it on the taskbar.</summary>
     public static string RemoteChatItemTip(RemoteChatItem chat)
     {
         string svcName = chat.Service == RemoteChatService.Antigravity ? "Antigravity" : "Claude";
         string stateText = chat.State switch
         {
-            RemoteChatState.Waiting => "⚠ Needs input / help",
-            RemoteChatState.Running => "● Running",
-            _ => "✓ Done",
+            RemoteChatState.Waiting => "🟠 Needs input / help (!)",
+            RemoteChatState.Running => "🔵 Running (r)",
+            _ => "🟢 Done (✓)",
         };
 
         var sb = new StringBuilder($"{chat.Server} · {svcName} — {stateText}");
@@ -771,6 +931,7 @@ internal static class UsageStrip
         }
 
         sb.AppendLine();
+        sb.AppendLine(RemoteChatLegendLine);
         sb.Append("Left-click circle to open chat · Right-click for all chats");
         return sb.ToString();
     }
@@ -997,6 +1158,8 @@ internal static class UsageStrip
         if (summary.Count == 0) summary.Add("all idle");
 
         var text = new StringBuilder($"Remote Chats — {string.Join(", ", summary)} (click for menu)");
+        text.AppendLine();
+        text.Append(RemoteChatLegendLine);
         foreach (var row in reading.Rows)
         {
             text.AppendLine();

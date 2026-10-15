@@ -18,7 +18,7 @@ public sealed class TaskbarWindow : Form
 
     private readonly AppBar appBar;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
-    private readonly ToolTip tips = new() { InitialDelay = 400, ReshowDelay = 120 };
+    private readonly ToolTip tips = new() { InitialDelay = 180, ReshowDelay = 80 };
 
     private readonly TaskbarPreview preview = new();
 
@@ -389,12 +389,15 @@ public sealed class TaskbarWindow : Form
 
             if (settings.ExpandTrackers && available > baseTotal)
             {
-                double factor = Math.Min(1.65, available / (double)baseTotal);
-                u = (int)Math.Round(u * factor);
-                a = (int)Math.Round(a * factor);
-                r = (int)Math.Round(r * factor);
-                b = (int)Math.Round(b * factor);
-                m = (int)Math.Round(m * factor);
+                int barBase = u + a + b + m;
+                if (barBase > 0)
+                {
+                    double factor = Math.Min(1.65, Math.Max(1.0, (available - r) / (double)barBase));
+                    u = (int)Math.Round(u * factor);
+                    a = (int)Math.Round(a * factor);
+                    b = (int)Math.Round(b * factor);
+                    m = (int)Math.Round(m * factor);
+                }
             }
             else if (available > 0 && available < baseTotal)
             {
@@ -428,28 +431,31 @@ public sealed class TaskbarWindow : Form
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
-    /// <summary>The strips lead the cluster, so the icons and clock keep the positions they had.</summary>
+    /// <summary>
+    /// Remote Chats leads the cluster on the left so its dynamic chat-circle width can grow/shrink
+    /// into the taskbar space without shifting the usage, printer, or machine charts beside it.
+    /// </summary>
+    private Rectangle RemoteChatsArea => Vertical
+        ? new Rectangle(0, StatusStart, Width, RemoteChatsExtent)
+        : new Rectangle(StatusStart, 0, RemoteChatsExtent, Height);
+
     private Rectangle UsageArea => Vertical
-        ? new Rectangle(0, StatusStart, Width, UsageExtent)
-        : new Rectangle(StatusStart, 0, UsageExtent, Height);
+        ? new Rectangle(0, StatusStart + RemoteChatsExtent, Width, UsageExtent)
+        : new Rectangle(StatusStart + RemoteChatsExtent, 0, UsageExtent, Height);
 
     private Rectangle AntigravityArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent, Width, AntigravityExtent)
-        : new Rectangle(StatusStart + UsageExtent, 0, AntigravityExtent, Height);
-
-    private Rectangle RemoteChatsArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, RemoteChatsExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, RemoteChatsExtent, Height);
+        ? new Rectangle(0, StatusStart + RemoteChatsExtent + UsageExtent, Width, AntigravityExtent)
+        : new Rectangle(StatusStart + RemoteChatsExtent + UsageExtent, 0, AntigravityExtent, Height);
 
     private Rectangle BambuArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent, Width, BambuExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent, 0, BambuExtent, Height);
+        ? new Rectangle(0, StatusStart + RemoteChatsExtent + UsageExtent + AntigravityExtent, Width, BambuExtent)
+        : new Rectangle(StatusStart + RemoteChatsExtent + UsageExtent + AntigravityExtent, 0, BambuExtent, Height);
 
     private Rectangle MachineArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent, Width, MachineExtent)
-        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent, 0, MachineExtent, Height);
+        ? new Rectangle(0, StatusStart + RemoteChatsExtent + UsageExtent + AntigravityExtent + BambuExtent, Width, MachineExtent)
+        : new Rectangle(StatusStart + RemoteChatsExtent + UsageExtent + AntigravityExtent + BambuExtent, 0, MachineExtent, Height);
 
-    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + RemoteChatsExtent + BambuExtent + MachineExtent;
+    private int TrayStart => StatusStart + RemoteChatsExtent + UsageExtent + AntigravityExtent + BambuExtent + MachineExtent;
 
     private Rectangle TrayAt(int index) => Vertical
         ? new Rectangle(0, TrayStart + index * StatusIconSize, Width, StatusIconSize)
@@ -1288,10 +1294,18 @@ public sealed class TaskbarWindow : Form
 
         int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
 
+        if (RemoteChatsVisible)
+        {
+            var strip = RemoteChatsArea;
+            if (hoveredRemoteChats) g.FillRectangle(hot, strip);
+            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, hoveredRemoteChatId, hoveredRemoteChats);
+        }
+
         if (UsageVisible)
         {
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
+            if (RemoteChatsVisible) DrawStripSeparator(strip);
             UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows);
         }
 
@@ -1299,23 +1313,15 @@ public sealed class TaskbarWindow : Form
         {
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
-            if (UsageVisible) DrawStripSeparator(strip);
+            if (RemoteChatsVisible || UsageVisible) DrawStripSeparator(strip);
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows);
-        }
-
-        if (RemoteChatsVisible)
-        {
-            var strip = RemoteChatsArea;
-            if (hoveredRemoteChats) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
-            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, hoveredRemoteChatId);
         }
 
         if (BambuVisible)
         {
             var strip = BambuArea;
             if (hoveredBambu) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible || RemoteChatsVisible) DrawStripSeparator(strip);
+            if (RemoteChatsVisible || UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
             UsageStrip.PaintBambu(g, strip, BambuUsage.Current, maxRows);
         }
 
@@ -1323,7 +1329,7 @@ public sealed class TaskbarWindow : Form
         {
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
-            if (UsageVisible || AntigravityVisible || RemoteChatsVisible || BambuVisible) DrawStripSeparator(strip);
+            if (RemoteChatsVisible || UsageVisible || AntigravityVisible || BambuVisible) DrawStripSeparator(strip);
             MeterStrip.Paint(g, strip, machine, maxRowsPerColumn: maxRows);
         }
 
