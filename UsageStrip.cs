@@ -5,7 +5,7 @@ using System.Text;
 namespace ScweenSpit;
 
 /// <summary>
-/// Draws the claude.ai usage limits as a stack of thin bars inside the status cluster.
+/// Draws the Claude and Antigravity usage limits as stacks of thin bars inside the status cluster.
 ///
 /// The palette and the thresholds it steps at are taken from claude-usage-widget by Niccolò Sabato
 /// (MIT — see THIRD-PARTY-NOTICES.md), so a glance carries the same meaning here as it does there:
@@ -25,7 +25,7 @@ internal static class UsageStrip
     public static void Paint(Graphics g, Rectangle area, UsageReading? reading)
     {
         var limits = reading?.Limits ?? [];
-        if (limits.Count == 0) { PaintState(g, area, reading); return; }
+        if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: false); return; }
 
         // The names carry the reading as much as the bars do: three tracks and three percentages
         // cannot say which limit is which, and the one that matters is usually not the fullest.
@@ -36,8 +36,20 @@ internal static class UsageStrip
                                                                       : $"{l.Label}: {l.Percent}%")).ToList());
     }
 
+    public static void PaintAntigravity(Graphics g, Rectangle area, UsageReading? reading)
+    {
+        var limits = reading?.Limits ?? [];
+        if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: true); return; }
+
+        MeterStrip.Paint(g, area, limits.Select(l => new Meter(
+            l.Label,
+            l.Percent,
+            ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left ? $"{l.Label}: {l.Percent}%  ({left})"
+                                                                      : $"{l.Label}: {l.Percent}%")).ToList());
+    }
+
     /// <summary>Nothing to plot yet: say which of the reasons it is, in the space a limit would use.</summary>
-    private static void PaintState(Graphics g, Rectangle area, UsageReading? reading)
+    private static void PaintState(Graphics g, Rectangle area, UsageReading? reading, bool isAntigravity)
     {
         using var font = Theme.Face(8f, FontStyle.Bold);
         using var centred = new StringFormat
@@ -47,10 +59,14 @@ internal static class UsageStrip
             FormatFlags = StringFormatFlags.NoWrap,
         };
 
-        var (text, colour) = reading is { NeedsKey: true }
-            ? (ClaudeUsage.HasKey ? "expired" : "set up", Theme.Accent)
-            : reading is { Error: not null, Settled: true } ? ("error", MeterStrip.High)
-            : ("···", Theme.Muted);
+        (string text, Color colour) = isAntigravity
+            ? (!AntigravityUsage.Enabled ? ("set up", Theme.Accent)
+               : reading is { Standby: true } ? ("standby", Theme.Muted)
+               : reading is { Error: not null, Settled: true } ? ("error", MeterStrip.High)
+               : ("···", Theme.Muted))
+            : (reading is { NeedsKey: true } ? (ClaudeUsage.HasKey ? "expired" : "set up", Theme.Accent)
+               : reading is { Error: not null, Settled: true } ? ("error", MeterStrip.High)
+               : ("···", Theme.Muted));
 
         int width = Math.Max(16, area.Width - 12);
         var label = new Rectangle(area.X, area.Y, area.Width, area.Height - MeterStrip.BarThickness - 4);
@@ -63,7 +79,7 @@ internal static class UsageStrip
                                                 MeterStrip.BarThickness));
     }
 
-    /// <summary>The whole reading in words, for the tooltip — where the numbers actually live.</summary>
+    /// <summary>The whole Claude reading in words, for the tooltip — where the numbers actually live.</summary>
     public static string Tip(UsageReading? reading)
     {
         if (reading is null) return "Claude usage — starting up";
@@ -83,6 +99,48 @@ internal static class UsageStrip
 
             var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
             if (countdown.Length > 0) text.Append($"  ({countdown})");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>The whole Antigravity reading in words, including per-model quota breakdown.</summary>
+    public static string AntigravityTip(UsageReading? reading)
+    {
+        if (!AntigravityUsage.Enabled)
+            return "Antigravity usage — switched off (Settings ▸ Antigravity usage)";
+        if (reading is null)
+            return "Antigravity usage — starting up";
+        if (reading is { Standby: true, Limits.Count: 0 })
+            return "Antigravity usage — waiting for Antigravity to start";
+        if (reading.Error is not null)
+            return $"Antigravity usage — {reading.Error}";
+        if (reading.Limits.Count == 0)
+            return "Antigravity usage — no model quotas reported";
+
+        var text = new StringBuilder();
+        if (reading.Standby)
+            text.AppendLine("Antigravity (closed — last reading)");
+
+        foreach (var limit in reading.Limits)
+        {
+            if (text.Length > 0 && !text.ToString().EndsWith('\n')) text.AppendLine();
+            text.Append($"{limit.Label}: {limit.Percent}%");
+
+            var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
+            if (countdown.Length > 0) text.Append($"  ({countdown})");
+        }
+
+        if (reading.Details is { Count: > 0 } details)
+        {
+            text.AppendLine();
+            foreach (var model in details)
+            {
+                text.AppendLine();
+                text.Append($"  {model.Label}: {model.Percent}%");
+                var countdown = ClaudeUsage.Countdown(model.ResetsAt);
+                if (countdown.Length > 0) text.Append($"  ({countdown})");
+            }
         }
 
         return text.ToString();

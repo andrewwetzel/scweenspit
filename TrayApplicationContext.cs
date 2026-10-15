@@ -118,6 +118,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             BuildMenu();
             tray.ContextMenuStrip!.Show(at);
         };
+        bars.SettingsRequested += OpenSettings;
 
         foregroundWatch.Tick += (_, _) =>
         {
@@ -391,7 +392,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         Log.Write("took its settings back up");
     }
 
-    private void OpenSettings()
+    private void OpenSettings(string? page = null)
     {
         // An external WM_CLOSE (Task Manager "End task", taskbar Close) reports a CloseReason that
         // OnFormClosing does not cancel, so the instance can genuinely be disposed underneath us.
@@ -400,6 +401,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                                         () => hook.Running, hook.ArrangeAll,
                                         () => { tray.Visible = false; ExitThread(); });
         settings.Reveal();
+        if (page is not null) settings.GoTo(page);
     }
 
     // ---- state changes -----------------------------------------------------
@@ -482,15 +484,12 @@ public sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Reconciles Windows' snap settings with the preference. Restoring from a persisted backup
-    /// covers a previous run that was killed rather than closed.
-    /// </summary>
-    /// <summary>
-    /// Points the usage poller at the current configuration. The save callback runs on the poll
+    /// Points the usage pollers at the current configuration. The save callback runs on the poll
     /// thread — claude.ai rotates the session key mid-session and it has to be written back — so it
     /// is marshalled onto this one, where every other write to the config file happens.
     /// </summary>
-    private void ApplyUsageTracking() =>
+    private void ApplyUsageTracking()
+    {
         ClaudeUsage.Configure(config.Claude, () =>
         {
             if (tray.ContextMenuStrip is { IsHandleCreated: true } menu && menu.InvokeRequired)
@@ -498,6 +497,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             else
                 config.Save();
         });
+        AntigravityUsage.Configure(config.Antigravity);
+    }
 
     private void ApplySnapSuppression()
     {
@@ -895,7 +896,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             UnregisterHotKey(hotkeys.Handle, HotkeyHandBack);
 
             foregroundWatch.Dispose();
-            ClaudeUsage.Stop();      // stops the poll loop before the process winds down
+            ClaudeUsage.Stop();      // stops the poll loops before the process winds down
+            AntigravityUsage.Stop();
             StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();

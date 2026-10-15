@@ -19,7 +19,7 @@ public sealed class SettingsForm : Form
     private readonly Action quit;
 
     private readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Window, Padding = new Padding(28, 24, 28, 24), AutoScroll = true };
-    private readonly FlowLayoutPanel nav = new() { Dock = DockStyle.Left, Width = 172, BackColor = Theme.Panel, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 20, 12, 12), WrapContents = false };
+    private readonly FlowLayoutPanel nav = new() { Dock = DockStyle.Left, Width = 180, BackColor = Theme.Panel, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 20, 12, 12), WrapContents = false };
 
     // Results belong in the window, not in a dialog. An unowned message box lands behind whatever
     // has focus, which reads as the app having frozen rather than as a message waiting.
@@ -73,6 +73,7 @@ public sealed class SettingsForm : Form
         AddNav("Layouts", ShowLayouts);
         AddNav("Taskbar", ShowTaskbar);
         AddNav("Claude usage", ShowClaude);
+        AddNav("Antigravity usage", ShowAntigravity);
         AddNav("Exclusions", ShowExclusions);
         AddNav("Displays", ShowDisplays);
         AddNav("Updates", ShowUpdates);
@@ -138,7 +139,7 @@ public sealed class SettingsForm : Form
     {
         var b = new Button
         {
-            Text = "   " + title, Width = 148, Height = 36, FlatStyle = FlatStyle.Flat,
+            Text = "   " + title, Width = 156, Height = 36, FlatStyle = FlatStyle.Flat,
             TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Muted, BackColor = Theme.Panel,
             Font = Theme.Face(10f), Cursor = Cursors.Hand, Margin = new Padding(0, 0, 0, 4),
         };
@@ -716,8 +717,8 @@ public sealed class SettingsForm : Form
             {
                 page.Controls.Add(new Label
                 {
-                    Text = "⚠  The strip is on the bar, but has nothing to show until usage tracking "
-                         + "is switched on and a session key is saved.",
+                    Text = "⚠  The strip is on the bar, but has nothing to show until Claude usage "
+                         + "tracking is switched on and either Claude Code is signed in or a session key is saved.",
                     AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
                     Font = Theme.Face(9f), Margin = new Padding(0, 2, 0, 4),
                 });
@@ -728,13 +729,37 @@ public sealed class SettingsForm : Form
                 page.Controls.Add(setUp);
             }
 
-            if (!config.Claude.Enabled || string.IsNullOrWhiteSpace(config.Claude.SessionKey))
+            if (!ClaudeUsage.Enabled)
                 page.Controls.Add(Theme.Caption(
-                    "Nothing is drawn until an account is set up under Claude usage."));
+                    "Nothing is drawn for Claude until tracking is switched on under Claude usage."));
+
+            var antigravity = Theme.Toggle("Show Antigravity usage bars", settings.ShowAntigravity);
+            antigravity.CheckedChanged += (_, _) => { settings.ShowAntigravity = antigravity.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            page.Controls.Add(antigravity);
+
+            if (settings.ShowAntigravity && !AntigravityUsage.Enabled)
+            {
+                page.Controls.Add(new Label
+                {
+                    Text = "⚠  The Antigravity strip is on the bar, but tracking is still switched "
+                         + "off under Antigravity usage.",
+                    AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Color.FromArgb(235, 185, 110),
+                    Font = Theme.Face(9f), Margin = new Padding(0, 2, 0, 4),
+                });
+
+                var setUpAg = Theme.Action("Set up Antigravity usage", primary: true);
+                setUpAg.AutoSize = true;
+                setUpAg.Click += (_, _) => BeginInvoke(() => GoTo("Antigravity usage"));
+                page.Controls.Add(setUpAg);
+            }
+
+            if (!AntigravityUsage.Enabled)
+                page.Controls.Add(Theme.Caption(
+                    "Drawn next to the Claude bars; reads from the local Antigravity language server once enabled."));
         }
     }
 
-    // ---- claude usage ------------------------------------------------------
+    // ---- claude & antigravity usage ----------------------------------------
 
     /// <summary>
     /// Copies the Windows taskbar's pinned applications onto this bar, keeping anything already
@@ -782,22 +807,51 @@ public sealed class SettingsForm : Form
         var on = Theme.Toggle("Track claude.ai usage", claude.Enabled);
         // Rebuilt after the event unwinds: Page() disposes this checkbox, and doing that
         // inside its own handler leaves WinForms raising events on a dead control.
-        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); BeginInvoke(ShowClaude); };
+        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); ClaudeUsage.Refresh(); BeginInvoke(ShowClaude); };
         page.Controls.Add(on);
 
         if (!claude.Enabled)
         {
             page.Controls.Add(Theme.Caption(
-                "While this is off, no session key is read and no request is ever made to claude.ai."));
+                "While this is off, no credential is read and no request is ever made to Anthropic."));
             return;
         }
 
-        // ---- the key
+        // ---- persistent login via Claude Code
+        bool haveClaudeCode = ClaudeUsage.HasClaudeCodeCredentials();
+        var useClaudeCode = Theme.Toggle("Use Claude Code login when available (recommended — does not expire like a browser cookie)",
+                                         claude.UseClaudeCode);
+        useClaudeCode.CheckedChanged += (_, _) =>
+        {
+            claude.UseClaudeCode = useClaudeCode.Checked;
+            Save();
+            ClaudeUsage.Refresh();
+            BeginInvoke(ShowClaude);
+        };
+        page.Controls.Add(useClaudeCode);
+
+        page.Controls.Add(new Label
+        {
+            Text = haveClaudeCode
+                ? $"● Claude Code login detected at {ClaudeUsage.CredentialsPath}"
+                : $"○ No Claude Code login found at {ClaudeUsage.CredentialsPath}",
+            AutoSize = true, MaximumSize = new Size(470, 0),
+            ForeColor = haveClaudeCode && claude.UseClaudeCode ? Color.FromArgb(110, 210, 140) : Theme.Muted,
+            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 2, 0, 2),
+        });
+        page.Controls.Add(Theme.Caption(
+            "When you are signed in to Claude Code (CLI or IDE extension), it keeps an OAuth token in " +
+            "~/.claude/.credentials.json and renews it automatically as you use it — so the tracker " +
+            "never expires on its own. If you also save a browser session key below, ScweenSpit keeps " +
+            "both and falls back automatically if either is rate-limited or unavailable."));
+
+        // ---- the browser session key (primary if Claude Code is not installed, or fallback)
         bool haveKey = !string.IsNullOrWhiteSpace(claude.SessionKey);
         page.Controls.Add(Theme.Caption(
-            "Sign in to claude.ai in your browser, then press F12 and open Application ▸ Cookies ▸ " +
+            "Or sign in to claude.ai in your browser, press F12 and open Application ▸ Cookies ▸ " +
             "https://claude.ai. Copy the value of the sessionKey row and paste it below. It starts " +
-            "with sk-ant- and it expires every few weeks, so this needs redoing occasionally."));
+            "with sk-ant-. ScweenSpit adopts rotated cookies automatically, though claude.ai still " +
+            "ends browser sessions after a few weeks."));
 
         page.Controls.Add(Theme.Caption(
             "That cookie is your whole claude.ai account, not just its usage figures. ScweenSpit " +
@@ -886,7 +940,7 @@ public sealed class SettingsForm : Form
         };
         page.Controls.Add(test);
         page.Controls.Add(Theme.Caption(
-            "Walks the same path a refresh takes and says where it stops. The key itself is never "
+            "Walks the same path a refresh takes and says where it stops. Credentials are never "
           + "included, so the result is safe to paste into a bug report."));
         page.Controls.Add(diagnosis);
 
@@ -914,6 +968,113 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Turn the bars on per display under Taskbar. Clicking the strip opens the same page."));
+    }
+
+    private void ShowAntigravity()
+    {
+        var antigravity = config.Antigravity;
+        var page = Page("Antigravity usage",
+            "Model quota limits from Antigravity, drawn right next to the Claude usage bars in the " +
+            "status cluster of any bar that asks for them.");
+
+        page.Controls.Add(Theme.Caption(
+            "Protocol adapted from AntigravityQuota by Henrik-3 and antigravity-usage by skainguyen1412 " +
+            "(MIT). Reads directly from the local Antigravity language server on 127.0.0.1 while the " +
+            "IDE is open — no key to paste, nothing expires, and nothing leaves this machine."));
+
+        var on = Theme.Toggle("Track Antigravity usage", antigravity.Enabled);
+        on.CheckedChanged += (_, _) =>
+        {
+            antigravity.Enabled = on.Checked;
+            Save();
+            if (antigravity.Enabled) AntigravityUsage.Refresh();
+            BeginInvoke(ShowAntigravity);
+        };
+        page.Controls.Add(on);
+
+        if (!antigravity.Enabled)
+        {
+            page.Controls.Add(Theme.Caption(
+                "While this is off, ScweenSpit never looks for the Antigravity language server or " +
+                "asks it anything."));
+            return;
+        }
+
+        var pro = Theme.Toggle("Show Gemini Pro quota pool (Pro)", antigravity.ShowPro);
+        pro.CheckedChanged += (_, _) => { antigravity.ShowPro = pro.Checked; Save(); AntigravityUsage.Refresh(); };
+        page.Controls.Add(pro);
+
+        var flash = Theme.Toggle("Show Gemini Flash quota pool (Flash)", antigravity.ShowFlash);
+        flash.CheckedChanged += (_, _) => { antigravity.ShowFlash = flash.Checked; Save(); AntigravityUsage.Refresh(); };
+        page.Controls.Add(flash);
+
+        var claude = Theme.Toggle("Show Claude / partner quota pool (Claude)", antigravity.ShowClaude);
+        claude.CheckedChanged += (_, _) => { antigravity.ShowClaude = claude.Checked; Save(); AntigravityUsage.Refresh(); };
+        page.Controls.Add(claude);
+
+        page.Controls.Add(Theme.Caption(
+            "The bar strip plots the three shared quota pools (Pro, Flash, Claude), while hovering " +
+            "over the strip lists every individual model and when its quota window resets. When " +
+            "Antigravity is closed, the strip holds the last reading or sits quietly on standby."));
+
+        var interval = Theme.Number(antigravity.RefreshSeconds, 15, 3600, 15);
+        interval.ValueChanged += (_, _) => { antigravity.RefreshSeconds = (int)interval.Value; Save(); };
+        Row(page, "Seconds between checks", interval);
+
+        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 10, 0, 4) };
+
+        var check = Theme.Action("Check now", primary: true);
+        check.AutoSize = true;
+        check.Click += (_, _) => AntigravityUsage.Refresh();
+        actions.Controls.Add(check);
+
+        var diagnosis = new TextBox
+        {
+            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Visible = false,
+            Width = 460, Height = 130, BackColor = Theme.Raised, ForeColor = Theme.Muted,
+            Font = new Font(FontFamily.GenericMonospace, 8.5f), BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, 8, 0, 8),
+        };
+
+        var test = Theme.Action("Test connection");
+        test.AutoSize = true;
+        test.Click += async (_, _) =>
+        {
+            test.Enabled = false;
+            diagnosis.Visible = true;
+            diagnosis.Text = "Checking local language server…";
+            try
+            {
+                diagnosis.Text = await Task.Run(AntigravityUsage.SelfTest);
+            }
+            catch (Exception ex) { diagnosis.Text = ex.Message; }
+            finally { test.Enabled = true; }
+        };
+        actions.Controls.Add(test);
+        page.Controls.Add(actions);
+
+        page.Controls.Add(Theme.Caption(
+            "Finds the local language_server process, queries GetUserStatus on 127.0.0.1, and " +
+            "reports what it found without including the CSRF token."));
+        page.Controls.Add(diagnosis);
+
+        var state = new Label
+        {
+            AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+            MaximumSize = new Size(460, 0), Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(state);
+
+        void Report() => state.Text = UsageStrip.AntigravityTip(AntigravityUsage.Current);
+        Report();
+
+        var watch = new System.Windows.Forms.Timer { Interval = 1500 };
+        watch.Tick += (_, _) => Report();
+        watch.Start();
+        page.Disposed += (_, _) => { watch.Stop(); watch.Dispose(); };
+
+        page.Controls.Add(Theme.Caption(
+            "Turn the bars on per display under Taskbar ▸ Show Antigravity usage bars."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)

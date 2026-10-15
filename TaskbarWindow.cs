@@ -87,6 +87,7 @@ public sealed class TaskbarWindow : Form
     private int hovered = -1, hoveredStatus = -1;
     private bool hoveredStart;
     private bool hoveredUsage;
+    private bool hoveredAntigravity;
     private bool hoveredMachine;
     private long lastStatusPoll, lastMachinePoll;
 
@@ -119,6 +120,9 @@ public sealed class TaskbarWindow : Form
     /// unreachable.
     /// </summary>
     public event Action<Point>? MenuRequested;
+
+    /// <summary>Raised when a strip on the bar wants the settings window opened to a specific page.</summary>
+    public event Action<string>? SettingsRequested;
 
     /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
     public event Action? PinsChanged;
@@ -356,26 +360,32 @@ public sealed class TaskbarWindow : Form
     /// with no hint that anything further is needed. The strip renders its own unconfigured state.
     /// </summary>
     private bool UsageVisible => settings.ShowUsage;
+    private bool AntigravityVisible => settings.ShowAntigravity;
     private bool MachineVisible => settings.ShowMachine;
 
     private int UsageExtent => UsageVisible ? UsageStrip.Extent(Vertical) : 0;
+    private int AntigravityExtent => AntigravityVisible ? UsageStrip.Extent(Vertical) : 0;
     private int MachineExtent => MachineVisible ? MeterStrip.Extent(Vertical) : 0;
 
     /// <summary>Room the cluster needs, so window buttons know where to stop.</summary>
-    private int StatusExtent => UsageExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
+    private int StatusExtent => UsageExtent + AntigravityExtent + MachineExtent + TrayItems().Count * StatusIcon + ClockExtent;
 
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
-    /// <summary>The strip leads the cluster, so the icons and clock keep the positions they had.</summary>
+    /// <summary>The strips lead the cluster, so the icons and clock keep the positions they had.</summary>
     private Rectangle UsageArea => Vertical
         ? new Rectangle(0, StatusStart, Width, UsageExtent)
         : new Rectangle(StatusStart, 0, UsageExtent, Height);
 
-    private Rectangle MachineArea => Vertical
-        ? new Rectangle(0, StatusStart + UsageExtent, Width, MachineExtent)
-        : new Rectangle(StatusStart + UsageExtent, 0, MachineExtent, Height);
+    private Rectangle AntigravityArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent, Width, AntigravityExtent)
+        : new Rectangle(StatusStart + UsageExtent, 0, AntigravityExtent, Height);
 
-    private int TrayStart => StatusStart + UsageExtent + MachineExtent;
+    private Rectangle MachineArea => Vertical
+        ? new Rectangle(0, StatusStart + UsageExtent + AntigravityExtent, Width, MachineExtent)
+        : new Rectangle(StatusStart + UsageExtent + AntigravityExtent, 0, MachineExtent, Height);
+
+    private int TrayStart => StatusStart + UsageExtent + AntigravityExtent + MachineExtent;
 
     private Rectangle TrayAt(int index) => Vertical
         ? new Rectangle(0, TrayStart + index * StatusIcon, Width, StatusIcon)
@@ -632,17 +642,19 @@ public sealed class TaskbarWindow : Form
 
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
+        bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
         if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
-            && load == hoveredMachine && start == hoveredStart) return;
+            && antigravity == hoveredAntigravity && load == hoveredMachine && start == hoveredStart) return;
 
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
+        hoveredAntigravity = antigravity;
         hoveredMachine = load;
         hoveredStart = start;
-        Cursor = under >= 0 || tray >= 0 || usage || load || start ? Cursors.Hand : Cursors.Default;
+        Cursor = under >= 0 || tray >= 0 || usage || antigravity || load || start ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
         // like: five pixels of colour cannot say which limit it is, or when it resets. A button
@@ -650,6 +662,7 @@ public sealed class TaskbarWindow : Form
         bool previewing = Previewable(under);
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
+                            : antigravity ? UsageStrip.AntigravityTip(AntigravityUsage.Current)
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
                             : tray >= 0 ? TrayTip(TrayItems()[tray])
                             : under >= 0 && under < buttons.Count && !previewing ? Describe(buttons[under])
@@ -731,6 +744,7 @@ public sealed class TaskbarWindow : Form
         hovered = hoveredStatus = -1;
         hoveredStart = false;
         hoveredUsage = false;
+        hoveredAntigravity = false;
         hoveredMachine = false;
 
         // The preview closes itself once the pointer is over neither it nor the button: leaving the
@@ -747,10 +761,23 @@ public sealed class TaskbarWindow : Form
 
         if (UsageVisible && UsageArea.Contains(e.Location))
         {
-            // Not set up yet: the useful destination is our own settings, not the website that
-            // cannot tell you anything until a key is in place.
-            if (ClaudeUsage.Enabled) SystemStatus.Open(ClaudeUsage.UsagePage);
-            else MenuRequested?.Invoke(Cursor.Position);
+            // Not set up yet (or expired): the useful destination is our own settings page, not the
+            // website that cannot tell ScweenSpit anything until a credential is in place.
+            if (ClaudeUsage.Enabled && ClaudeUsage.Current is not { NeedsKey: true })
+                SystemStatus.Open(ClaudeUsage.UsagePage);
+            else if (SettingsRequested is not null)
+                SettingsRequested.Invoke("Claude usage");
+            else
+                MenuRequested?.Invoke(Cursor.Position);
+            return;
+        }
+
+        if (AntigravityVisible && AntigravityArea.Contains(e.Location))
+        {
+            if (SettingsRequested is not null)
+                SettingsRequested.Invoke("Antigravity usage");
+            else
+                MenuRequested?.Invoke(Cursor.Position);
             return;
         }
 
@@ -1040,6 +1067,13 @@ public sealed class TaskbarWindow : Form
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
             UsageStrip.Paint(g, strip, ClaudeUsage.Current);
+        }
+
+        if (AntigravityVisible)
+        {
+            var strip = AntigravityArea;
+            if (hoveredAntigravity) g.FillRectangle(hot, strip);
+            UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current);
         }
 
         if (MachineVisible)

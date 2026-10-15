@@ -147,9 +147,15 @@ public sealed class BarSettings
     /// <summary>
     /// Show the claude.ai usage bars in the status cluster. Per-bar rather than global: on a
     /// multi-display setup the same strip repeated on every bar is noise, not information.
-    /// Has no effect until a session key is configured — see <see cref="ClaudeSettings"/>.
+    /// Has no effect until an account is configured — see <see cref="ClaudeSettings"/>.
     /// </summary>
     public bool ShowUsage { get; set; }
+
+    /// <summary>
+    /// Show the Antigravity model quota bars next to the Claude ones in the status cluster.
+    /// Per-bar for the same reason <see cref="ShowUsage"/> is.
+    /// </summary>
+    public bool ShowAntigravity { get; set; }
 
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
@@ -175,6 +181,14 @@ public sealed class ClaudeSettings
     public bool Enabled { get; set; }
 
     /// <summary>
+    /// Use the OAuth credentials Claude Code keeps in ~/.claude/.credentials.json when signed in on
+    /// this machine. Claude Code renews that token itself as you use it, so unlike a browser cookie
+    /// it does not quietly expire every few weeks. When both this and <see cref="SessionKey"/> are
+    /// available, this is tried first and the session key is kept as a fallback.
+    /// </summary>
+    public bool UseClaudeCode { get; set; } = true;
+
+    /// <summary>
     /// The claude.ai session cookie, encrypted to this Windows account by DPAPI — never the raw
     /// key. It is a whole-account credential and this file is hand-edited and pasted into bug
     /// reports, so it must not be legible here. See <see cref="Secret"/>.
@@ -198,6 +212,31 @@ public sealed class ClaudeSettings
 
     /// <summary>Show the weekly per-model limit, when the account has one.</summary>
     public bool ShowModel { get; set; } = true;
+}
+
+/// <summary>
+/// Everything the Antigravity usage strip needs. Quota figures are read from the local Antigravity
+/// language server process while the IDE is running — nothing leaves the machine.
+/// </summary>
+public sealed class AntigravitySettings
+{
+    /// <summary>Master switch. Off means we never look for the language server or ask it anything.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Seconds between polls. One minute by default: the request goes to localhost rather than a
+    /// remote server, so checking more often than claude.ai costs nothing outside this machine.
+    /// </summary>
+    public int RefreshSeconds { get; set; } = 60;
+
+    /// <summary>Show the Gemini Pro quota pool.</summary>
+    public bool ShowPro { get; set; } = true;
+
+    /// <summary>Show the Gemini Flash quota pool.</summary>
+    public bool ShowFlash { get; set; } = true;
+
+    /// <summary>Show the Claude / third-party quota pool.</summary>
+    public bool ShowClaude { get; set; } = true;
 }
 
 public sealed class MonitorLayout
@@ -349,6 +388,12 @@ public sealed class SplitConfig
     /// Named "Claude" rather than "ClaudeUsage" so it does not shadow the class of that name.
     /// </summary>
     public ClaudeSettings Claude { get; set; } = new();
+
+    /// <summary>
+    /// The Antigravity quota strip. Polled once for the machine; which bars draw it is per-bar.
+    /// Named "Antigravity" rather than "AntigravityUsage" for the same reason as <see cref="Claude"/>.
+    /// </summary>
+    public AntigravitySettings Antigravity { get; set; } = new();
 
     public const string Fallback = "*";
 
@@ -543,7 +588,11 @@ public sealed class SplitConfig
         Version = CurrentVersion;
 
         // Below half a minute this stops being a status readout and starts being a scraper.
+        Claude ??= new ClaudeSettings();
         Claude.RefreshSeconds = Math.Clamp(Claude.RefreshSeconds, 30, 3600);
+
+        Antigravity ??= new AntigravitySettings();
+        Antigravity.RefreshSeconds = Math.Clamp(Antigravity.RefreshSeconds, 15, 3600);
 
         foreach (var layout in Monitors.Values)
         {
@@ -654,6 +703,7 @@ public sealed class SplitConfig
         Monitors = o.Monitors;
         Bars = o.Bars;
         Claude = o.Claude;
+        Antigravity = o.Antigravity;
     }
 
     /// <summary>

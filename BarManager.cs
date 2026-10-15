@@ -11,8 +11,9 @@ public sealed class BarManager : IDisposable
 {
     private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
                                            bool IconsOnly, bool ShowStatus, bool ShowUsage,
-                                           int? Zone, bool Floating, int FloatMargin, int SideGap,
-                                           int EdgeGap, bool ShowStartButton, bool ShowPreviews, bool ShowMachine, bool ShowBadges);
+                                           bool ShowAntigravity, int? Zone, bool Floating,
+                                           int FloatMargin, int SideGap, int EdgeGap,
+                                           bool ShowStartButton, bool ShowPreviews, bool ShowMachine, bool ShowBadges);
 
     private readonly Dictionary<string, TaskbarWindow> bars = [];
     private readonly Dictionary<string, Applied> applied = [];
@@ -48,6 +49,9 @@ public sealed class BarManager : IDisposable
     /// <summary>Raised when a bar's ScweenSpit button is clicked, with the screen position to open at.</summary>
     public event Action<System.Drawing.Point>? MenuRequested;
 
+    /// <summary>Raised when a strip on the bar wants the settings window opened to a specific page.</summary>
+    public event Action<string>? SettingsRequested;
+
     /// <summary>Raised when a bar's pinned list changes and needs saving.</summary>
     public event Action? PinsChanged;
 
@@ -76,9 +80,10 @@ public sealed class BarManager : IDisposable
 
             var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
                                      settings.IconsOnly, settings.ShowStatus, settings.ShowUsage,
-                                     settings.Zone, settings.Floating, settings.FloatMargin,
-                                     settings.SideGap, settings.EdgeGap, settings.ShowStartButton,
-                                     settings.ShowPreviews, settings.ShowMachine, settings.ShowBadges);
+                                     settings.ShowAntigravity, settings.Zone, settings.Floating,
+                                     settings.FloatMargin, settings.SideGap, settings.EdgeGap,
+                                     settings.ShowStartButton, settings.ShowPreviews,
+                                     settings.ShowMachine, settings.ShowBadges);
             if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
                 continue;
 
@@ -88,6 +93,7 @@ public sealed class BarManager : IDisposable
             {
                 var bar = new TaskbarWindow(monitor, settings, zoneManager);
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
+                bar.SettingsRequested += page => SettingsRequested?.Invoke(page);
                 bar.PinsChanged += () => PinsChanged?.Invoke();
 
                 // Give it its rectangle before the handle exists, so it is created on the display it

@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace ScweenSpit;
 
-/// <summary>One limit window claude.ai reports, as a percentage and the moment it resets.</summary>
+/// <summary>One limit window claude.ai or Antigravity reports, as a percentage and the moment it resets.</summary>
 public sealed record UsageLimit(string Label, int Percent, DateTimeOffset? ResetsAt);
 
 /// <summary>
@@ -14,7 +14,8 @@ public sealed record UsageLimit(string Label, int Percent, DateTimeOffset? Reset
 /// have not managed a first read yet, which the strip draws as a placeholder rather than as zero.
 /// </summary>
 public sealed record UsageReading(IReadOnlyList<UsageLimit> Limits, string? Error, bool NeedsKey,
-                                 bool Transient = false)
+                                  bool Transient = false, bool Standby = false,
+                                  IReadOnlyList<UsageLimit>? Details = null)
 {
     /// <summary>
     /// Something being waited on rather than something wrong. A red "error" on the bar for a
@@ -30,13 +31,16 @@ public sealed record UsageReading(IReadOnlyList<UsageLimit> Limits, string? Erro
 /// THIRD-PARTY-NOTICES.md). What is taken from it is the protocol knowledge, which is the part that
 /// cannot be worked out from the outside: which endpoints carry the figures, the browser-shaped
 /// headers the edge expects, how an organisation is chosen when an account has several, that the
-/// weekly per-model limit moved out of `seven_day_sonnet` into the `limits` list, and that the
-/// session cookie rotates mid-session and has to be written back or the key quietly expires.
+/// weekly per-model limit moved out of `seven_day_sonnet` into the `limits` list, that the session
+/// cookie rotates mid-session and has to be written back, and that Claude Code's own OAuth token in
+/// ~/.claude/.credentials.json can answer the same question through api.anthropic.com without
+/// relying on a browser cookie that expires every few weeks.
 ///
 /// The code is ours: the original is Python/tkinter and draws its own window, whereas this feeds a
-/// segment of a bar that is already painting. Two deliberate departures from upstream: the key is
-/// kept under DPAPI rather than in plain config (see <see cref="Secret"/>), and it is passed to the
-/// curl fallback on stdin rather than in argv, where any process on the machine can read it.
+/// segment of a bar that is already painting. Two deliberate departures from upstream: the session
+/// key is kept under DPAPI rather than in plain config (see <see cref="Secret"/>), and credentials
+/// are passed to the curl fallback on stdin rather than in argv, where any process on the machine
+/// can read them.
 /// </summary>
 public static class ClaudeUsage
 {
@@ -56,7 +60,13 @@ public static class ClaudeUsage
         "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 
     private const string Origin = "https://claude.ai";
+    private const string OAuthUsageUrl = "https://api.anthropic.com/api/oauth/usage";
+    private const string OAuthBetaHeader = "oauth-2025-04-20";
     public const string UsagePage = "https://claude.ai/settings/usage";
+
+    /// <summary>Where Claude Code (CLI and VS Code extension) stores its OAuth login on disk.</summary>
+    public static string CredentialsPath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
 
     // UseCookies is off so the Cookie header is ours to set and Set-Cookie is ours to read: the
     // handler's own jar would swallow the rotated key before we ever saw it.
@@ -85,24 +95,34 @@ public static class ClaudeUsage
     /// </summary>
     private static volatile bool enabled;
 
-    /// <summary>Mirrors whether a key is stored, for the same reason.</summary>
+    /// <summary>Mirrors whether a session key or Claude Code login is present, for the same reason.</summary>
     private static volatile bool hasKey;
+
+    /// <summary>
+    /// When the OAuth usage endpoint returns 429, pause OAuth requests for 15 minutes rather than
+    /// treating a rate limit as an expired login. Matches upstream v2.9.1.
+    /// </summary>
+    private static DateTimeOffset oauthRateLimitedUntil = DateTimeOffset.MinValue;
 
     /// <summary>The latest reading, or null when usage tracking is off or has never run.</summary>
     public static UsageReading? Current => current;
 
-    /// <summary>True when the feature is switched on and has a key worth sending.</summary>
+    /// <summary>True when the feature is switched on and has a credential worth sending.</summary>
     public static bool Enabled => enabled;
 
     /// <summary>
-    /// True when a key is stored. Distinguishes "nothing has been entered" from "what was entered is
-    /// no longer accepted" — the same symptom otherwise, and very different answers.
+    /// True when a session key or Claude Code login is present. Distinguishes "nothing has been
+    /// entered" from "what was entered is no longer accepted" — the same symptom otherwise, and
+    /// very different answers.
     /// </summary>
     public static bool HasKey => hasKey;
 
     /// <summary>True if a value looks like a session key rather than a cleared or bogus cookie.</summary>
     public static bool Plausible(string? key) =>
         key is not null && key.StartsWith(KeyPrefix, StringComparison.Ordinal) && key.Length >= KeyMinLength;
+
+    /// <summary>True when ~/.claude/.credentials.json exists and holds an OAuth access token.</summary>
+    public static bool HasClaudeCodeCredentials() => ReadClaudeCodeToken(out _) is not null;
 
     /// <summary>
     /// Starts, stops or re-points the poller to match the configuration. Safe to call on every
@@ -114,7 +134,8 @@ public static class ClaudeUsage
         {
             settings = config;
             persist = save;
-            hasKey = !string.IsNullOrWhiteSpace(config.SessionKey);
+            hasKey = !string.IsNullOrWhiteSpace(config.SessionKey)
+                  || (config.UseClaudeCode && HasClaudeCodeCredentials());
             enabled = config.Enabled && hasKey;
 
             if (!config.Enabled)
@@ -140,19 +161,21 @@ public static class ClaudeUsage
 
     /// <summary>
     /// Walks the same path a poll takes and reports where it stops, so a failure can be read rather
-    /// than guessed at. Never includes the key itself — this text is meant to be pasted into a bug
-    /// report.
+    /// than guessed at. Never includes any key or token — this text is meant to be pasted into a
+    /// bug report.
     /// </summary>
     public static string SelfTest()
     {
         var report = new StringBuilder();
         string? stored, key, org;
+        bool useClaudeCode;
 
         lock (gate)
         {
             stored = settings?.SessionKey;
             key = Secret.Unprotect(stored);
             org = settings?.OrgId;
+            useClaudeCode = settings?.UseClaudeCode ?? true;
         }
 
         report.AppendLine(
@@ -160,32 +183,62 @@ public static class ClaudeUsage
             : !settings.Enabled ? "tracking is switched off"
             : "tracking is on");
 
+        var oauthToken = ReadClaudeCodeToken(out var plan);
+        report.AppendLine(!useClaudeCode
+            ? "claude code login: switched off in settings"
+            : oauthToken is null
+                ? $"claude code login: not found at {CredentialsPath}"
+                : $"claude code login: token present ({oauthToken.Length} chars{(plan is not null ? $", {plan}" : "")})");
+
+        if (useClaudeCode && oauthToken is not null)
+        {
+            var oauth = GetOAuthUsage(oauthToken);
+            report.AppendLine(oauth is null
+                ? "oauth usage: no reply — api.anthropic.com unreachable"
+                : $"oauth usage: HTTP {oauth.Status}" +
+                  (oauth.Status is 401 or 403 ? "  (token was refused)"
+                 : oauth.Status == 429 ? "  (rate-limited)" : ""));
+
+            if (oauth is { Status: < 400 })
+            {
+                var parsed = Parse(oauth.Body, true, true);
+                report.AppendLine(parsed.Error is not null
+                    ? $"oauth reading: {parsed.Error}"
+                    : $"oauth reading: {parsed.Limits.Count} limit(s) — " +
+                      string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
+            }
+        }
+
         report.AppendLine(
-            string.IsNullOrWhiteSpace(stored) ? "key: none stored"
-            : key is null ? "key: stored, but this Windows account cannot decrypt it"
-            : !Plausible(key) ? $"key: decrypts to {key.Length} characters that do not look like a key"
-            : $"key: stored and readable ({key.Length} characters)");
+            string.IsNullOrWhiteSpace(stored) ? "session key: none stored"
+            : key is null ? "session key: stored, but this Windows account cannot decrypt it"
+            : !Plausible(key) ? $"session key: decrypts to {key.Length} characters that do not look like a key"
+            : $"session key: stored and readable ({key.Length} characters)");
 
         if (key is null || !Plausible(key)) return report.ToString().TrimEnd();
 
         var orgs = Get($"{Origin}/api/organizations", key);
         report.AppendLine(orgs is null
             ? "organisations: no reply — claude.ai unreachable"
-            : $"organisations: HTTP {orgs.Status}{(orgs.Status is 401 or 403 ? "  (the key was refused)" : "")}");
+            : $"organisations: HTTP {orgs.Status}{(IsAuthRejection(orgs) ? "  (the key was refused)" : orgs.Status == 403 ? "  (challenged by Cloudflare)" : "")}");
 
         if (orgs is null || orgs.Status >= 400) return report.ToString().TrimEnd();
 
-        if (string.IsNullOrWhiteSpace(org)) org = ResolveOrg(key);
+        var workingKey = key;
+        AdoptRotatedKey(orgs, ref workingKey);
+
+        if (string.IsNullOrWhiteSpace(org)) org = ResolveOrg(ref workingKey);
         report.AppendLine(org is null ? "organisation: could not be determined" : $"organisation: {org}");
         if (org is null) return report.ToString().TrimEnd();
 
-        var usage = Get($"{Origin}/api/organizations/{org}/usage", key, org);
+        var usage = Get($"{Origin}/api/organizations/{org}/usage", workingKey, org);
         report.AppendLine(usage is null
             ? "usage: no reply"
-            : $"usage: HTTP {usage.Status}{(usage.Status is 401 or 403 ? "  (the key was refused)" : "")}");
+            : $"usage: HTTP {usage.Status}{(IsAuthRejection(usage) ? "  (the key was refused)" : usage.Status == 403 ? "  (challenged by Cloudflare)" : "")}");
 
         if (usage is { Status: < 400 })
         {
+            AdoptRotatedKey(usage, ref workingKey);
             var parsed = Parse(usage.Body, true, true);
             report.AppendLine(parsed.Error is not null
                 ? $"reading: {parsed.Error}"
@@ -205,6 +258,7 @@ public static class ClaudeUsage
         // "Check now", waking up — should need its own two rejections before anything is called
         // expired, or one stale failure decides the answer to a question just asked.
         failures = 0;
+        oauthRateLimitedUntil = DateTimeOffset.MinValue;
 
         wakeWanted = true;
         nudge?.TrySetResult();
@@ -226,10 +280,11 @@ public static class ClaudeUsage
             {
                 settings.SessionKey = null;
                 settings.OrgId = null;
-                hasKey = false;
-                enabled = false;
-                current = null;
+                hasKey = settings.UseClaudeCode && HasClaudeCodeCredentials();
+                enabled = settings.Enabled && hasKey;
+                if (!hasKey) current = null;
                 persist?.Invoke();
+                if (enabled) Refresh();
                 return true;
             }
 
@@ -342,34 +397,108 @@ public static class ClaudeUsage
 
     private static void Poll()
     {
+        string? stored;
         string? key;
         string? org;
-        bool weekly, model;
+        bool weekly, model, useClaudeCode;
 
         lock (gate)
         {
             if (settings is not { Enabled: true }) return;
-            key = Secret.Unprotect(settings.SessionKey);
+            stored = settings.SessionKey;
+            key = Secret.Unprotect(stored);
             org = settings.OrgId;
             weekly = settings.ShowWeekly;
             model = settings.ShowModel;
+            useClaudeCode = settings.UseClaudeCode;
         }
 
-        if (!Plausible(key))
-        {
-            // Nothing worth sending. Say so rather than spending a request every interval on a 401
-            // whose answer is already known.
-            Log.WriteOnce("usage-nokey", hasKey
-                ? "usage: a key is stored but could not be decrypted or no longer looks like a key"
-                : "usage: no session key stored");
+        bool haveSessionKey = Plausible(key);
+        var oauthToken = useClaudeCode ? ReadClaudeCodeToken(out _) : null;
+        bool haveOAuth = oauthToken is not null;
 
-            current = new UsageReading([], hasKey ? "Stored key is unreadable" : "Session key needed", true);
+        hasKey = !string.IsNullOrWhiteSpace(stored) || haveOAuth;
+        enabled = hasKey;
+
+        // 1. Try Claude Code's self-renewing OAuth token first when available and not rate-limited.
+        //    Unlike a browser cookie, Claude Code refreshes this token itself, so it stays alive
+        //    without manual intervention. If it fails or is rate-limited and a session key is also
+        //    stored, we fall through to the session key seamlessly.
+        if (haveOAuth && DateTimeOffset.UtcNow >= oauthRateLimitedUntil)
+        {
+            var oauthReply = GetOAuthUsage(oauthToken!);
+            if (oauthReply is { Status: < 400 })
+            {
+                var parsed = Parse(oauthReply.Body, weekly, model);
+                if (parsed.Error is null)
+                {
+                    failures = 0;
+                    current = parsed;
+                    return;
+                }
+            }
+            else if (oauthReply is { Status: 429 })
+            {
+                // A 429 on the OAuth usage endpoint is a rate limit, not an expired login. Pause
+                // OAuth polling for 15 minutes and either fall back to the session key or keep the
+                // last reading on screen.
+                oauthRateLimitedUntil = DateTimeOffset.UtcNow.AddMinutes(15);
+                Log.Write("usage: Claude Code OAuth endpoint returned 429; pausing OAuth checks for 15m");
+
+                if (!haveSessionKey)
+                {
+                    failures = 0;
+                    if (current is not { Limits.Count: > 0 })
+                        current = new UsageReading([], "Rate-limited — waiting to retry", false, Transient: true);
+                    return;
+                }
+            }
+            else if (!haveSessionKey)
+            {
+                if (oauthReply is null)
+                {
+                    Failed(new UsageReading([], "api.anthropic.com unreachable", false));
+                    return;
+                }
+                if (oauthReply.Status is 401 or 403)
+                {
+                    Log.WriteOnce($"usage-oauth-{oauthReply.Status}",
+                        $"usage: Claude Code OAuth token was refused ({oauthReply.Status})");
+                    Rejected("Claude Code login expired");
+                    return;
+                }
+
+                Failed(new UsageReading([], $"api.anthropic.com returned {oauthReply.Status}", false));
+                return;
+            }
+        }
+        else if (haveOAuth && !haveSessionKey)
+        {
+            // Rate-limited on OAuth and no session key to fall back to: hold the last reading steady.
+            if (current is not { Limits.Count: > 0 })
+                current = new UsageReading([], "Rate-limited — waiting to retry", false, Transient: true);
             return;
         }
 
+        // 2. Browser session key path (either primary or fallback from OAuth).
+        if (!haveSessionKey)
+        {
+            // Nothing worth sending. Say so rather than spending a request every interval on a 401
+            // whose answer is already known.
+            bool unreadableKey = !string.IsNullOrWhiteSpace(stored);
+            Log.WriteOnce("usage-nokey", unreadableKey
+                ? "usage: a key is stored but could not be decrypted or no longer looks like a key"
+                : "usage: no Claude Code login or session key found");
+
+            current = new UsageReading([], unreadableKey ? "Stored key is unreadable" : "Session key needed", true);
+            return;
+        }
+
+        var activeKey = key!;
+
         if (string.IsNullOrWhiteSpace(org))
         {
-            org = ResolveOrg(key!);
+            org = ResolveOrg(ref activeKey);
             if (org is null) return;               // ResolveOrg has already published the reason
 
             lock (gate)
@@ -378,18 +507,18 @@ public static class ClaudeUsage
             }
         }
 
-        var reply = Get($"{Origin}/api/organizations/{org}/usage", key!, org);
+        var reply = Get($"{Origin}/api/organizations/{org}/usage", activeKey, org);
         if (reply is null) { Failed(new UsageReading([], "claude.ai unreachable", false)); return; }
 
         // Only from a reply that worked: an authentication failure can carry a session cookie of
         // its own, and adopting that would overwrite the user's good key with a rejected one -
         // making a freshly pasted key fail permanently from the very first poll.
-        if (reply.Status < 400) AdoptRotatedKey(reply, key!);
+        if (reply.Status < 400) AdoptRotatedKey(reply, ref activeKey);
 
-        if (reply.Status is 401 or 403)
+        if (IsAuthRejection(reply))
         {
             Log.WriteOnce($"usage-{reply.Status}", $"usage: claude.ai rejected the key ({reply.Status})");
-            Rejected();
+            Rejected("Session key expired");
             return;
         }
 
@@ -397,7 +526,14 @@ public static class ClaudeUsage
         {
             // A 404 here usually means the stored org is stale — drop it so the next poll re-resolves.
             if (reply.Status == 404) lock (gate) { if (settings is not null) settings.OrgId = null; }
-            Failed(new UsageReading([], $"claude.ai returned {reply.Status}", false));
+
+            // A 403 whose body is not an Anthropic JSON error is a Cloudflare edge challenge rather
+            // than an expired key — treat it as a transient hiccup so we never tell the user their
+            // key expired when it did not.
+            var reason = reply.Status == 403
+                ? "claude.ai challenged the request"
+                : $"claude.ai returned {reply.Status}";
+            Failed(new UsageReading([], reason, false, Transient: reply.Status is 403 or 429 or >= 500));
             return;
         }
 
@@ -405,26 +541,82 @@ public static class ClaudeUsage
         current = Parse(reply.Body, weekly, model);
     }
 
-    /// <summary>Records a failed poll and shows what it was, so the retry gets shorter.</summary>
+    /// <summary>
+    /// Records a failed poll and shortens the retry. If we already have a reading on screen, keep
+    /// its bars visible across the first two transient failures so a brief network blip on wake does
+    /// not flash "error" over a working strip.
+    /// </summary>
     private static void Failed(UsageReading reading)
     {
         failures++;
+        if (failures <= 2 && current is { Limits.Count: > 0 }) return;
         current = reading;
     }
 
     /// <summary>
-    /// claude.ai refused the key. Not conclusive on its own: the same 401 comes back from a network
-    /// that has not finished connecting, and announcing an expired key over that sends people to
-    /// re-paste one that was never wrong. Said out loud only once it has happened twice, and until
-    /// then the retry is seconds away rather than an interval.
+    /// The server refused the credential. Not conclusive on its own: the same 401 can come back
+    /// from a network that has not finished connecting, and announcing an expired key over that
+    /// sends people to re-paste one that was never wrong. Said out loud only once it has happened
+    /// twice, and until then the retry is seconds away rather than an interval.
     /// </summary>
-    private static void Rejected()
+    private static void Rejected(string message)
     {
         failures++;
 
+        if (failures == 1 && current is { Limits.Count: > 0 }) return;
+
         current = failures >= 2
-            ? new UsageReading([], "Session key expired", true)
-            : new UsageReading([], "claude.ai refused the key once; checking again shortly", false, Transient: true);
+            ? new UsageReading([], message, true)
+            : new UsageReading([], "Credential refused once; checking again shortly", false, Transient: true);
+    }
+
+    /// <summary>
+    /// Distinguishes a genuine authentication refusal from a Cloudflare interstitial challenge.
+    /// A 401 is always an auth refusal; a 403 is only one when the body is Anthropic's JSON error
+    /// object rather than an HTML challenge page.
+    /// </summary>
+    private static bool IsAuthRejection(Response reply)
+    {
+        if (reply.Status == 401) return true;
+        if (reply.Status != 403) return false;
+
+        var trimmed = reply.Body.TrimStart();
+        return trimmed.StartsWith('{') && trimmed.Contains("\"error\"", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Reads the OAuth access token from Claude Code's ~/.claude/.credentials.json, if present.
+    /// Read fresh on each poll because Claude Code rewrites this file whenever it refreshes its
+    /// token in the background.
+    /// </summary>
+    private static string? ReadClaudeCodeToken(out string? plan)
+    {
+        plan = null;
+        try
+        {
+            if (!File.Exists(CredentialsPath)) return null;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
+            if (!doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
+                || oauth.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var token = Text(oauth, "accessToken")?.Trim();
+            if (string.IsNullOrEmpty(token)) return null;
+
+            var sub = Text(oauth, "subscriptionType");
+            var tier = Text(oauth, "rateLimitTier");
+            plan = !string.IsNullOrWhiteSpace(sub) && !string.IsNullOrWhiteSpace(tier) ? $"{sub} / {tier}"
+                 : !string.IsNullOrWhiteSpace(sub) ? sub
+                 : tier;
+
+            return token;
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce("claude-code-creds", $"could not read Claude Code credentials: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -434,18 +626,24 @@ public static class ClaudeUsage
     /// at zero — and when several qualify, the one claude.ai itself last routed to is the one whose
     /// figures match what the website shows.
     /// </summary>
-    private static string? ResolveOrg(string key)
+    private static string? ResolveOrg(ref string key)
     {
         var listing = Get($"{Origin}/api/organizations", key);
         if (listing is null) { Failed(new UsageReading([], "claude.ai unreachable", false)); return null; }
 
-        if (listing.Status is 401 or 403)
+        if (IsAuthRejection(listing))
         {
-            Rejected();
+            Rejected("Session key expired");
             return null;
         }
 
-        if (listing.Status < 400) AdoptRotatedKey(listing, key);
+        if (listing.Status >= 400)
+        {
+            Failed(new UsageReading([], $"claude.ai returned {listing.Status}", false));
+            return null;
+        }
+
+        AdoptRotatedKey(listing, ref key);
 
         try
         {
@@ -457,7 +655,7 @@ public static class ClaudeUsage
             }
 
             // The browser's own last-active org wins outright when we can get it.
-            var active = ActiveOrg(key);
+            var active = ActiveOrg(ref key);
             if (!string.IsNullOrWhiteSpace(active)) return active;
 
             string? first = null;
@@ -483,13 +681,19 @@ public static class ClaudeUsage
         }
     }
 
-    /// <summary>The org claude.ai currently routes the account to, or null if it will not say.</summary>
-    private static string? ActiveOrg(string key)
+    /// <summary>
+    /// The org claude.ai currently routes the account to, or null if it will not say.
+    /// Also adopts any session key rotated on /api/bootstrap — that endpoint is where claude.ai
+    /// most often rotates cookies, and dropping it leaves the stored key stale.
+    /// </summary>
+    private static string? ActiveOrg(ref string key)
     {
         try
         {
             var boot = Get($"{Origin}/api/bootstrap", key);
             if (boot is null || boot.Status >= 400) return null;
+
+            AdoptRotatedKey(boot, ref key);
 
             using var doc = JsonDocument.Parse(boot.Body);
             return doc.RootElement.TryGetProperty("account", out var account)
@@ -603,12 +807,39 @@ public static class ClaudeUsage
     private sealed record Response(int Status, string Headers, string Body);
 
     /// <summary>
-    /// An authenticated GET, or null if the request could not be made at all.
+    /// Queries Anthropic's OAuth usage endpoint using Claude Code's Bearer token. This endpoint sits
+    /// on api.anthropic.com rather than behind claude.ai's browser challenge, and returns the same
+    /// five_hour / seven_day / limits JSON structure.
+    /// </summary>
+    private static Response? GetOAuthUsage(string token)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, OAuthUsageUrl);
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+            request.Headers.TryAddWithoutValidation("anthropic-beta", OAuthBetaHeader);
+            request.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
+            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+            using var reply = http.Send(request, HttpCompletionOption.ResponseContentRead);
+            var body = reply.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            return new Response((int)reply.StatusCode, "", body);
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce("claude-oauth-http", $"OAuth usage request failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// An authenticated GET to claude.ai, or null if the request could not be made at all.
     ///
     /// .NET's TLS goes through SChannel on Windows, the same stack the browsers use, so the
     /// handshake normally passes the edge's fingerprint check. Normally — the cipher ordering is not
-    /// identical, so a 403 with no body is treated as "challenged, not refused" and retried through
-    /// curl.exe, which has shipped with Windows since 1803 and is what upstream uses throughout.
+    /// identical, so curl.exe (which has shipped with Windows since 1803 and is what upstream uses
+    /// throughout) goes first, with a retry disabling Schannel revocation checks if OCSP/CRL is
+    /// unreachable, and .NET's HttpClient as a final fallback.
     /// </summary>
     private static Response? Get(string url, string key, string? org = null)
     {
@@ -619,15 +850,8 @@ public static class ClaudeUsage
             ? $"sessionKey={key}"
             : $"sessionKey={key}; lastActiveOrg={org}";
 
-        // curl first, matching the implementation this is adapted from, which uses it for every
-        // request because Cloudflare fingerprints the TLS handshake and Python's OpenSSL gets
-        // challenged for it.
-        //
-        // Measured, rather than assumed: .NET's own client was answered with a 200 for both calls
-        // when tested, so it is not itself challenged and this is not the difference it was once
-        // thought to be. curl stays first because it is what the working implementation does; the
-        // .NET path is a genuine fallback rather than a broken one.
-        var viaCurl = ViaCurl(url, cookie);
+        var viaCurl = ViaCurl(url, cookie, ignoreRevocation: false)
+                   ?? ViaCurl(url, cookie, ignoreRevocation: true);
         if (viaCurl is not null) return viaCurl;
 
         Log.WriteOnce("claude-transport",
@@ -671,7 +895,7 @@ public static class ClaudeUsage
     /// The options go in on stdin (-K -) rather than as arguments, because the cookie is a
     /// whole-account credential and a command line is readable by every process on the machine.
     /// </summary>
-    private static Response? ViaCurl(string url, string cookie)
+    private static Response? ViaCurl(string url, string cookie, bool ignoreRevocation)
     {
         try
         {
@@ -684,6 +908,7 @@ public static class ClaudeUsage
                 CreateNoWindow = true,
             };
             start.ArgumentList.Add("-sS");
+            if (ignoreRevocation) start.ArgumentList.Add("--ssl-no-revoke");
             start.ArgumentList.Add("-K");
             start.ArgumentList.Add("-");
 
@@ -710,7 +935,8 @@ public static class ClaudeUsage
 
             if (curl.ExitCode != 0)
             {
-                Log.WriteOnce("claude-curl", $"curl to claude.ai failed ({curl.ExitCode}): {error.Trim()}");
+                if (ignoreRevocation)
+                    Log.WriteOnce("claude-curl", $"curl to claude.ai failed ({curl.ExitCode}): {error.Trim()}");
                 return null;
             }
 
@@ -736,14 +962,15 @@ public static class ClaudeUsage
     private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     /// <summary>
-    /// Writes back a session key claude.ai rotated mid-session. Skipping this is invisible for
-    /// weeks and then shows up as a key that expired for no reason.
+    /// Writes back a session key claude.ai rotated mid-session, and updates <paramref name="currentKey"/>
+    /// in place so subsequent requests in the same poll use the new key rather than the old one.
+    /// Skipping this is invisible for weeks and then shows up as a key that expired for no reason.
     ///
     /// Only a real Set-Cookie line counts, and only a value that still looks like a key: the same
     /// cookie is how the server ends a session, and taking `sessionKey=""` literally would destroy
     /// the working credential.
     /// </summary>
-    private static void AdoptRotatedKey(Response reply, string currentKey)
+    private static void AdoptRotatedKey(Response reply, ref string currentKey)
     {
         if (string.IsNullOrEmpty(reply.Headers)) return;
 
@@ -765,6 +992,8 @@ public static class ClaudeUsage
                     $"ignored a session cookie that is not a key ({fresh.Length} chars)");
                 continue;
             }
+
+            currentKey = fresh;
 
             var stored = Secret.Protect(fresh);
             if (stored is null) return;
