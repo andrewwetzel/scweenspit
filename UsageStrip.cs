@@ -112,7 +112,7 @@ internal static class UsageStrip
         if (reading is null)
             return "Antigravity usage — starting up";
         if (reading is { Standby: true, Limits.Count: 0 })
-            return "Antigravity usage — waiting for Antigravity to start";
+            return "Antigravity usage — sign in under Settings ▸ Antigravity usage, or open Antigravity";
         if (reading.Error is not null)
             return $"Antigravity usage — {reading.Error}";
         if (reading.Limits.Count == 0)
@@ -120,7 +120,7 @@ internal static class UsageStrip
 
         var text = new StringBuilder();
         if (reading.Standby)
-            text.AppendLine("Antigravity (closed — last reading)");
+            text.AppendLine("Antigravity (standby — last reading)");
 
         foreach (var limit in reading.Limits)
         {

@@ -215,17 +215,34 @@ public sealed class ClaudeSettings
 }
 
 /// <summary>
-/// Everything the Antigravity usage strip needs. Quota figures are read from the local Antigravity
-/// language server process while the IDE is running — nothing leaves the machine.
+/// Everything the Antigravity usage strip needs. Quota figures can be read either directly from
+/// Google's Cloud Code API after signing in (which works 24/7 even when Antigravity is closed or
+/// running on another machine), or from the local Antigravity language server process while the
+/// IDE is open on this machine.
 /// </summary>
 public sealed class AntigravitySettings
 {
-    /// <summary>Master switch. Off means we never look for the language server or ask it anything.</summary>
+    /// <summary>Master switch. Off means we never query Google or look for the language server.</summary>
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// Seconds between polls. One minute by default: the request goes to localhost rather than a
-    /// remote server, so checking more often than claude.ai costs nothing outside this machine.
+    /// The Google OAuth refresh token for Antigravity's Cloud Code API, encrypted to this Windows
+    /// account by DPAPI — never the raw token. Lets ScweenSpit read model quotas even when
+    /// Antigravity is not running locally. See <see cref="Secret"/>.
+    /// </summary>
+    public string? RefreshToken { get; set; }
+
+    /// <summary>Email address of the signed-in Google account, shown on the settings page.</summary>
+    public string? AccountEmail { get; set; }
+
+    /// <summary>
+    /// Cached Cloud AI Companion project ID resolved from `loadCodeAssist`, so regular polls only
+    /// need a single `fetchAvailableModels` request. Cleared whenever the account changes.
+    /// </summary>
+    public string? ProjectId { get; set; }
+
+    /// <summary>
+    /// Seconds between polls. One minute by default.
     /// </summary>
     public int RefreshSeconds { get; set; } = 60;
 

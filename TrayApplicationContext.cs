@@ -490,14 +490,16 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// </summary>
     private void ApplyUsageTracking()
     {
-        ClaudeUsage.Configure(config.Claude, () =>
+        void SaveFromPoller()
         {
             if (tray.ContextMenuStrip is { IsHandleCreated: true } menu && menu.InvokeRequired)
                 menu.BeginInvoke(config.Save);
             else
                 config.Save();
-        });
-        AntigravityUsage.Configure(config.Antigravity);
+        }
+
+        ClaudeUsage.Configure(config.Claude, SaveFromPoller);
+        AntigravityUsage.Configure(config.Antigravity, SaveFromPoller);
     }
 
     private void ApplySnapSuppression()

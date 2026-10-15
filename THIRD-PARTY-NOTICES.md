@@ -62,13 +62,16 @@ from **AntigravityQuota** by Henrik-3 (<https://github.com/Henrik-3/AntigravityQ
 
 What is derived from them:
 
+- Authenticating with Google OAuth and querying `https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
+  and `https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` to read model quotas
+  without Antigravity running locally.
 - Locating the running Antigravity `language_server` process and reading `--csrf_token` and
-  `--extension_server_port` from its command line.
+  `--extension_server_port` from its command line as a local fallback.
 - Querying the Connect-RPC `GetUserStatus` endpoint on
   `/exa.language_server_pb.LanguageServerService/GetUserStatus` with `Connect-Protocol-Version: 1`
   and `X-Codeium-Csrf-Token`.
 - Reading per-model quota windows (`remainingFraction`, `resetTime`, `isExhausted`) from
-  `userStatus.cascadeModelConfigData.clientModelConfigs`.
+  `models.*.quotaInfo` and `userStatus.cascadeModelConfigData.clientModelConfigs`.
 
 ```
 MIT License

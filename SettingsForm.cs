@@ -755,7 +755,7 @@ public sealed class SettingsForm : Form
 
             if (!AntigravityUsage.Enabled)
                 page.Controls.Add(Theme.Caption(
-                    "Drawn next to the Claude bars; reads from the local Antigravity language server once enabled."));
+                    "Drawn next to the Claude bars; reads from Google's Cloud Code API or the local Antigravity language server once enabled."));
         }
     }
 
@@ -979,8 +979,9 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Protocol adapted from AntigravityQuota by Henrik-3 and antigravity-usage by skainguyen1412 " +
-            "(MIT). Reads directly from the local Antigravity language server on 127.0.0.1 while the " +
-            "IDE is open — no key to paste, nothing expires, and nothing leaves this machine."));
+            "(MIT). Sign in with Google below so ScweenSpit can read your quotas directly from Google's " +
+            "Cloud Code API 24/7 — even when Antigravity is closed on Windows or running in WSL — or " +
+            "leave it unsigned-in to read only from the local language server while the IDE is open."));
 
         var on = Theme.Toggle("Track Antigravity usage", antigravity.Enabled);
         on.CheckedChanged += (_, _) =>
@@ -995,10 +996,66 @@ public sealed class SettingsForm : Form
         if (!antigravity.Enabled)
         {
             page.Controls.Add(Theme.Caption(
-                "While this is off, ScweenSpit never looks for the Antigravity language server or " +
-                "asks it anything."));
+                "While this is off, ScweenSpit never queries Google or looks for the local language server."));
             return;
         }
+
+        // ---- Google Cloud Code sign-in (works without Antigravity running locally)
+        bool signedIn = AntigravityUsage.HasSignedInAccount;
+        bool hasCliFile = AntigravityUsage.HasCliTokenFile();
+        string? email = AntigravityUsage.SignedInEmail;
+
+        page.Controls.Add(new Label
+        {
+            Text = signedIn
+                ? $"● Signed in to Google{(email is not null ? $" as {email}" : "")} — works without Antigravity open locally"
+                : hasCliFile
+                    ? $"● Antigravity CLI login detected at {AntigravityUsage.CliTokenPath}"
+                    : "○ Not signed in to Google — only works while Antigravity IDE is open on Windows",
+            AutoSize = true, MaximumSize = new Size(470, 0),
+            ForeColor = signedIn || hasCliFile ? Color.FromArgb(110, 210, 140) : Theme.Muted,
+            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 6, 0, 4),
+        });
+
+        var authButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 2, 0, 4) };
+
+        var signIn = Theme.Action(signedIn ? "Switch Google account" : "Sign in with Google", primary: !signedIn);
+        signIn.AutoSize = true;
+        signIn.Click += async (_, _) =>
+        {
+            signIn.Enabled = false;
+            Say("Finish signing in to Google in your browser…");
+            try
+            {
+                var (ok, message) = await AntigravityUsage.SignInWithGoogleAsync();
+                Say(message, problem: !ok);
+                if (ok && !IsDisposed) BeginInvoke(ShowAntigravity);
+            }
+            finally
+            {
+                if (!signIn.IsDisposed) signIn.Enabled = true;
+            }
+        };
+        authButtons.Controls.Add(signIn);
+
+        if (signedIn)
+        {
+            var signOut = Theme.Action("Sign out");
+            signOut.AutoSize = true;
+            signOut.Click += (_, _) =>
+            {
+                AntigravityUsage.SignOut();
+                Say("Signed out of Google.");
+                BeginInvoke(ShowAntigravity);
+            };
+            authButtons.Controls.Add(signOut);
+        }
+
+        page.Controls.Add(authButtons);
+        page.Controls.Add(Theme.Caption(
+            "Signing in stores a Google OAuth refresh token encrypted to this Windows account with " +
+            "DPAPI. Because refresh tokens do not expire on their own, the strip stays live without " +
+            "needing Antigravity open on this machine."));
 
         var pro = Theme.Toggle("Show Gemini Pro quota pool (Pro)", antigravity.ShowPro);
         pro.CheckedChanged += (_, _) => { antigravity.ShowPro = pro.Checked; Save(); AntigravityUsage.Refresh(); };
@@ -1014,8 +1071,7 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "The bar strip plots the three shared quota pools (Pro, Flash, Claude), while hovering " +
-            "over the strip lists every individual model and when its quota window resets. When " +
-            "Antigravity is closed, the strip holds the last reading or sits quietly on standby."));
+            "over the strip lists every individual model and when its quota window resets."));
 
         var interval = Theme.Number(antigravity.RefreshSeconds, 15, 3600, 15);
         interval.ValueChanged += (_, _) => { antigravity.RefreshSeconds = (int)interval.Value; Save(); };
@@ -1023,7 +1079,7 @@ public sealed class SettingsForm : Form
 
         var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 10, 0, 4) };
 
-        var check = Theme.Action("Check now", primary: true);
+        var check = Theme.Action("Check now", primary: signedIn);
         check.AutoSize = true;
         check.Click += (_, _) => AntigravityUsage.Refresh();
         actions.Controls.Add(check);
@@ -1042,7 +1098,7 @@ public sealed class SettingsForm : Form
         {
             test.Enabled = false;
             diagnosis.Visible = true;
-            diagnosis.Text = "Checking local language server…";
+            diagnosis.Text = "Checking Antigravity connection…";
             try
             {
                 diagnosis.Text = await Task.Run(AntigravityUsage.SelfTest);
@@ -1054,8 +1110,8 @@ public sealed class SettingsForm : Form
         page.Controls.Add(actions);
 
         page.Controls.Add(Theme.Caption(
-            "Finds the local language_server process, queries GetUserStatus on 127.0.0.1, and " +
-            "reports what it found without including the CSRF token."));
+            "Tests Google Cloud Code API (if signed in) and the local language_server process, and " +
+            "reports what it found without including any OAuth or CSRF token."));
         page.Controls.Add(diagnosis);
 
         var state = new Label
