@@ -594,6 +594,12 @@ internal static class UsageStrip
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(reading.Error))
+        {
+            text.AppendLine();
+            text.Append($"⚠ {reading.Error}");
+        }
+
         return text.ToString();
     }
 }

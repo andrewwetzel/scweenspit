@@ -1,7 +1,10 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace ScweenSpit;
@@ -60,8 +63,22 @@ public static class ClaudeUsage
         "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 
     private const string Origin = "https://claude.ai";
+    private const string AnthropicApiOrigin = "https://api.anthropic.com";
     private const string OAuthUsageUrl = "https://api.anthropic.com/api/oauth/usage";
+    private const string OAuthProfileUrl = "https://api.anthropic.com/api/oauth/profile";
     private const string OAuthBetaHeader = "oauth-2025-04-20";
+    private const string OAuthAuthorizeUrl = "https://claude.ai/oauth/authorize";
+    private const string OAuthTokenUrl = "https://platform.claude.com/v1/oauth/token";
+    private const string OAuthSuccessUrl = "https://platform.claude.com/oauth/code/success?app=claude-code";
+    private static readonly string OAuthClientId = string.Concat(
+        "9d1c250a-", "e61b-44d9-", "88ed-", "5944d1962f5e");
+    private const string OAuthRefreshScopes =
+        "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+    private const string OAuthLoginScopes =
+        "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+    private const string SessionsScope = "user:sessions:claude_code";
+    private const string RemoteBetaHeader = "ccr-byoc-2025-07-29,environments-2025-11-01";
+    private const string AnthropicVersionHeader = "2023-06-01";
     public const string UsagePage = "https://claude.ai/settings/usage";
 
     /// <summary>Where Claude Code (CLI and VS Code extension) stores its OAuth login on disk.</summary>
@@ -78,10 +95,22 @@ public static class ClaudeUsage
     { Timeout = TimeSpan.FromSeconds(20) };
 
     private static readonly object gate = new();
+    private static readonly object oauthRefreshLock = new();
     private static ClaudeSettings? settings;
     private static Action? persist;
     private static CancellationTokenSource? life;
+    private static CancellationTokenSource? activeSignIn;
     private static volatile UsageReading? current;
+
+    // In-memory cache of the most recently refreshed OAuth token so we never lose a refreshed
+    // token if ~/.claude/.credentials.json is locked or not writable on Windows.
+    private static string? cachedOAuthAccessToken;
+    private static string? cachedOAuthRefreshToken;
+    private static long cachedOAuthExpiresAt;
+    private static List<string> cachedOAuthScopes = new();
+    private static string? cachedOAuthPlan;
+    private static string? failedRefreshToken;
+    private static DateTimeOffset oauthRefreshBackoffUntil = DateTimeOffset.MinValue;
 
     /// <summary>Wakes the poll loop early, for "check now" and for a key that just changed.</summary>
     private static volatile TaskCompletionSource? nudge;
@@ -121,8 +150,52 @@ public static class ClaudeUsage
     public static bool Plausible(string? key) =>
         key is not null && key.StartsWith(KeyPrefix, StringComparison.Ordinal) && key.Length >= KeyMinLength;
 
-    /// <summary>True when ~/.claude/.credentials.json exists and holds an OAuth access token.</summary>
-    public static bool HasClaudeCodeCredentials() => ReadClaudeCodeToken(out _) is not null;
+    /// <summary>True when ~/.claude/.credentials.json or a stored OAuth refresh token is available.</summary>
+    public static bool HasClaudeCodeCredentials() =>
+        ReadClaudeCodeToken(out _, forceRefresh: false, requireSessionsScope: false, allowNetworkRefresh: false) is not null
+        || HasSignedInOAuth;
+
+    /// <summary>True when an OAuth refresh token is stored directly in ScweenSpit's settings.</summary>
+    public static bool HasSignedInOAuth
+    {
+        get
+        {
+            lock (gate) return !string.IsNullOrWhiteSpace(settings?.RefreshToken);
+        }
+    }
+
+    /// <summary>Email address of the signed-in Claude OAuth account, if known.</summary>
+    public static string? SignedInEmail
+    {
+        get
+        {
+            lock (gate) return settings?.AccountEmail;
+        }
+    }
+
+    /// <summary>True when a plausible browser session key cookie is stored in settings.</summary>
+    internal static bool HasStoredSessionKey
+    {
+        get
+        {
+            lock (gate) return Plausible(Secret.Unprotect(settings?.SessionKey));
+        }
+    }
+
+    /// <summary>True when Claude Code OAuth login is enabled in settings.</summary>
+    internal static bool UseClaudeCodeEnabled
+    {
+        get
+        {
+            lock (gate) return settings?.UseClaudeCode ?? true;
+        }
+    }
+
+    /// <summary>Returns the currently configured or resolved organisation UUID, if any.</summary>
+    internal static string? GetConfiguredOrgId()
+    {
+        lock (gate) return settings?.OrgId;
+    }
 
     /// <summary>
     /// Starts, stops or re-points the poller to match the configuration. Safe to call on every
@@ -135,6 +208,7 @@ public static class ClaudeUsage
             settings = config;
             persist = save;
             hasKey = !string.IsNullOrWhiteSpace(config.SessionKey)
+                  || !string.IsNullOrWhiteSpace(config.RefreshToken)
                   || (config.UseClaudeCode && HasClaudeCodeCredentials());
             enabled = config.Enabled && hasKey;
 
@@ -183,16 +257,26 @@ public static class ClaudeUsage
             : !settings.Enabled ? "tracking is switched off"
             : "tracking is on");
 
-        var oauthToken = ReadClaudeCodeToken(out var plan);
+        var oauthToken = ReadClaudeCodeToken(out var plan, forceRefresh: false, requireSessionsScope: false);
         report.AppendLine(!useClaudeCode
             ? "claude code login: switched off in settings"
             : oauthToken is null
-                ? $"claude code login: not found at {CredentialsPath}"
+                ? $"claude code login: not found or expired at {CredentialsPath}"
                 : $"claude code login: token present ({oauthToken.Length} chars{(plan is not null ? $", {plan}" : "")})");
 
         if (useClaudeCode && oauthToken is not null)
         {
             var oauth = GetOAuthUsage(oauthToken);
+            if (oauth is { Status: 401 or 403 })
+            {
+                var refreshed = ReadClaudeCodeToken(out plan, forceRefresh: true, requireSessionsScope: false);
+                if (!string.IsNullOrEmpty(refreshed) && refreshed != oauthToken)
+                {
+                    oauthToken = refreshed;
+                    oauth = GetOAuthUsage(oauthToken);
+                }
+            }
+
             report.AppendLine(oauth is null
                 ? "oauth usage: no reply — api.anthropic.com unreachable"
                 : $"oauth usage: HTTP {oauth.Status}" +
@@ -259,9 +343,283 @@ public static class ClaudeUsage
         // expired, or one stale failure decides the answer to a question just asked.
         failures = 0;
         oauthRateLimitedUntil = DateTimeOffset.MinValue;
+        oauthRefreshBackoffUntil = DateTimeOffset.MinValue;
+        failedRefreshToken = null;
 
         wakeWanted = true;
         nudge?.TrySetResult();
+    }
+
+    /// <summary>
+    /// Opens the system browser to Claude's OAuth 2.0 PKCE authorization page, receives the redirect
+    /// on a temporary loopback port, exchanges the code for an OAuth access &amp; refresh token with
+    /// full Claude Code session scopes (`user:sessions:claude_code`), stores the credentials in both
+    /// `~/.claude/.credentials.json` and ScweenSpit's DPAPI-encrypted settings, and refreshes both
+    /// the usage and remote chat trackers.
+    /// </summary>
+    public static async Task<(bool Ok, string Message)> SignInWithClaudeAsync()
+    {
+        CancellationTokenSource cts;
+        lock (gate)
+        {
+            activeSignIn?.Cancel();
+            cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            activeSignIn = cts;
+        }
+
+        using var v4Listener = new TcpListener(IPAddress.Loopback, 0);
+        TcpListener? v6Listener = null;
+        try
+        {
+            v4Listener.Start();
+            int port = ((IPEndPoint)v4Listener.LocalEndpoint).Port;
+            try
+            {
+                v6Listener = new TcpListener(IPAddress.IPv6Loopback, port);
+                v6Listener.Start();
+            }
+            catch
+            {
+                v6Listener = null;
+            }
+
+            string redirectUri = $"http://localhost:{port}/callback";
+            string codeVerifier = Base64Url(RandomNumberGenerator.GetBytes(32));
+            string codeChallenge = Base64Url(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier)));
+            string state = Base64Url(RandomNumberGenerator.GetBytes(32));
+
+            string authUrl =
+                $"{OAuthAuthorizeUrl}?code=true" +
+                $"&client_id={Uri.EscapeDataString(OAuthClientId)}" +
+                $"&response_type=code" +
+                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
+                $"&scope={Uri.EscapeDataString(OAuthLoginScopes)}" +
+                $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
+                $"&code_challenge_method=S256" +
+                $"&state={Uri.EscapeDataString(state)}";
+
+            SystemStatus.Open(authUrl);
+
+            var (code, callbackError) = await WaitForClaudeOAuthCallbackAsync(v4Listener, v6Listener, state, cts.Token);
+            if (code is null)
+                return (false, callbackError ?? "Claude sign-in did not complete.");
+
+            string exchangeJson = JsonSerializer.Serialize(new
+            {
+                grant_type = "authorization_code",
+                code,
+                redirect_uri = redirectUri,
+                client_id = OAuthClientId,
+                code_verifier = codeVerifier,
+                state,
+            });
+
+            using var content = new StringContent(exchangeJson, Encoding.UTF8, "application/json");
+            using var req = new HttpRequestMessage(HttpMethod.Post, OAuthTokenUrl) { Content = content };
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
+            req.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+            using var tokenReply = await http.SendAsync(req, cts.Token);
+            var tokenBody = await tokenReply.Content.ReadAsStringAsync(cts.Token);
+            if (!tokenReply.IsSuccessStatusCode)
+                return (false, $"Token exchange failed (HTTP {(int)tokenReply.StatusCode}).");
+
+            using var doc = JsonDocument.Parse(tokenBody);
+            var root = doc.RootElement;
+            var accessToken = Text(root, "access_token");
+            var refreshToken = Text(root, "refresh_token");
+            int expiresIn = root.TryGetProperty("expires_in", out var expEl) && Number(expEl, out double s)
+                ? (int)s : 28800;
+            var scopeStr = Text(root, "scope") ?? OAuthRefreshScopes;
+            var scopes = scopeStr.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return (false, "Claude did not return an access token — please try signing in again.");
+
+            string? email = null;
+            string? orgUuid = null;
+            if (root.TryGetProperty("account", out var acct) && acct.ValueKind == JsonValueKind.Object)
+                email = Text(acct, "email_address") ?? Text(acct, "email");
+            if (root.TryGetProperty("organization", out var orgEl) && orgEl.ValueKind == JsonValueKind.Object)
+                orgUuid = Text(orgEl, "uuid");
+
+            string? subType = null;
+            string? rateTier = null;
+            FetchOAuthProfileMetadata(accessToken, ref orgUuid, ref email, out subType, out rateTier);
+
+            long expiresAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (expiresIn * 1000L);
+            SaveOAuthCredentialsToDiskAndCache(accessToken, refreshToken, expiresAtMs, scopes, subType, rateTier, orgUuid, email);
+
+            Action? save;
+            lock (gate)
+            {
+                if (settings is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(refreshToken))
+                        settings.RefreshToken = Secret.Protect(refreshToken);
+                    if (!string.IsNullOrWhiteSpace(email))
+                        settings.AccountEmail = email;
+                    if (!string.IsNullOrWhiteSpace(orgUuid))
+                        settings.OrgId = orgUuid;
+                    settings.UseClaudeCode = true;
+                    hasKey = true;
+                    enabled = settings.Enabled;
+                }
+                save = persist;
+            }
+
+            save?.Invoke();
+            Refresh();
+            RemoteChatUsage.Refresh();
+            return (true, email is not null ? $"Signed in to Claude as {email}." : "Signed in to Claude.");
+        }
+        catch (OperationCanceledException)
+        {
+            return (false, "Claude sign-in timed out or was cancelled.");
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"claude oauth sign-in failed: {ex.Message}");
+            return (false, $"Sign-in failed: {ex.Message}");
+        }
+        finally
+        {
+            try { v4Listener.Stop(); } catch { }
+            try { v6Listener?.Stop(); } catch { }
+        }
+    }
+
+    /// <summary>Clears any OAuth refresh token stored directly in ScweenSpit's settings.</summary>
+    public static void SignOutOAuth()
+    {
+        Action? save;
+        lock (gate)
+        {
+            activeSignIn?.Cancel();
+            activeSignIn = null;
+            if (settings is not null)
+            {
+                settings.RefreshToken = null;
+                settings.AccountEmail = null;
+            }
+            cachedOAuthAccessToken = null;
+            cachedOAuthRefreshToken = null;
+            cachedOAuthExpiresAt = 0;
+            cachedOAuthScopes.Clear();
+            failedRefreshToken = null;
+            save = persist;
+        }
+        save?.Invoke();
+        Refresh();
+    }
+
+    private static string Base64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static async Task<(string? Code, string? Error)> WaitForClaudeOAuthCallbackAsync(
+        TcpListener v4, TcpListener? v6, string expectedState, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            TcpClient client;
+            if (v6 is not null)
+            {
+                var t4 = v4.AcceptTcpClientAsync(ct).AsTask();
+                var t6 = v6.AcceptTcpClientAsync(ct).AsTask();
+                var done = await Task.WhenAny(t4, t6);
+                client = await done;
+            }
+            else
+            {
+                client = await v4.AcceptTcpClientAsync(ct);
+            }
+
+            using (client)
+            {
+                client.ReceiveTimeout = 5000;
+                client.SendTimeout = 5000;
+
+                await using var stream = client.GetStream();
+                byte[] buffer = new byte[8192];
+                int read;
+                try
+                {
+                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    readCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), readCts.Token);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (read <= 0) continue;
+
+                var requestText = Encoding.UTF8.GetString(buffer, 0, read);
+                int lineEnd = requestText.IndexOf("\r\n", StringComparison.Ordinal);
+                var firstLine = lineEnd >= 0 ? requestText[..lineEnd] : requestText;
+                var parts = firstLine.Split(' ');
+                if (parts.Length < 2) continue;
+
+                var target = parts[1];
+                if (!target.StartsWith("/callback", StringComparison.OrdinalIgnoreCase))
+                {
+                    var notFound = Encoding.UTF8.GetBytes(
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(notFound, ct);
+                    continue;
+                }
+
+                int q = target.IndexOf('?');
+                var query = q >= 0 ? target[(q + 1)..] : "";
+                var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int eq = pair.IndexOf('=');
+                    if (eq > 0)
+                    {
+                        var k = Uri.UnescapeDataString(pair[..eq]);
+                        var v = Uri.UnescapeDataString(pair[(eq + 1)..].Replace('+', ' '));
+                        parameters[k] = v;
+                    }
+                }
+
+                if (parameters.TryGetValue("error", out var oauthErr))
+                {
+                    await SendRedirectOrHtmlAsync(stream, OAuthSuccessUrl, ct);
+                    return (null, $"Claude returned: {oauthErr}");
+                }
+
+                if (!parameters.TryGetValue("state", out var state) ||
+                    !string.Equals(state, expectedState, StringComparison.Ordinal))
+                {
+                    await SendRedirectOrHtmlAsync(stream, OAuthSuccessUrl, ct);
+                    return (null, "OAuth state mismatch — please try signing in again.");
+                }
+
+                if (!parameters.TryGetValue("code", out var code) || string.IsNullOrWhiteSpace(code))
+                {
+                    await SendRedirectOrHtmlAsync(stream, OAuthSuccessUrl, ct);
+                    return (null, "No authorization code received from Claude.");
+                }
+
+                await SendRedirectOrHtmlAsync(stream, OAuthSuccessUrl, ct);
+                return (code, null);
+            }
+        }
+
+        return (null, "Claude sign-in was cancelled.");
+    }
+
+    private static async Task SendRedirectOrHtmlAsync(NetworkStream stream, string location, CancellationToken ct)
+    {
+        var resp =
+            $"HTTP/1.1 302 Found\r\n" +
+            $"Location: {location}\r\n" +
+            $"Content-Length: 0\r\n" +
+            $"Connection: close\r\n\r\n";
+        var bytes = Encoding.UTF8.GetBytes(resp);
+        try { await stream.WriteAsync(bytes, ct); } catch { }
     }
 
     /// <summary>
@@ -280,7 +638,8 @@ public static class ClaudeUsage
             {
                 settings.SessionKey = null;
                 settings.OrgId = null;
-                hasKey = settings.UseClaudeCode && HasClaudeCodeCredentials();
+                hasKey = (settings.UseClaudeCode && HasClaudeCodeCredentials())
+                      || !string.IsNullOrWhiteSpace(settings.RefreshToken);
                 enabled = settings.Enabled && hasKey;
                 if (!hasKey) current = null;
                 persist?.Invoke();
@@ -302,6 +661,7 @@ public static class ClaudeUsage
         }
 
         Refresh();
+        RemoteChatUsage.Refresh();
         return true;
     }
 
@@ -421,12 +781,22 @@ public static class ClaudeUsage
         enabled = hasKey;
 
         // 1. Try Claude Code's self-renewing OAuth token first when available and not rate-limited.
-        //    Unlike a browser cookie, Claude Code refreshes this token itself, so it stays alive
-        //    without manual intervention. If it fails or is rate-limited and a session key is also
-        //    stored, we fall through to the session key seamlessly.
+        //    If the access token has expired on disk, ReadClaudeCodeToken automatically refreshes it
+        //    using the refresh token in ~/.claude/.credentials.json (or settings). If the endpoint
+        //    still returns 401/403, we force one refresh before falling back to the session key.
         if (haveOAuth && DateTimeOffset.UtcNow >= oauthRateLimitedUntil)
         {
             var oauthReply = GetOAuthUsage(oauthToken!);
+            if (oauthReply is { Status: 401 or 403 })
+            {
+                var refreshed = ReadClaudeCodeToken(out _, forceRefresh: true);
+                if (!string.IsNullOrEmpty(refreshed) && refreshed != oauthToken)
+                {
+                    oauthToken = refreshed;
+                    oauthReply = GetOAuthUsage(oauthToken);
+                }
+            }
+
             if (oauthReply is { Status: < 400 })
             {
                 var parsed = Parse(oauthReply.Body, weekly, model);
@@ -575,55 +945,399 @@ public static class ClaudeUsage
     /// A 401 is always an auth refusal; a 403 is only one when the body is Anthropic's JSON error
     /// object rather than an HTML challenge page.
     /// </summary>
-    private static bool IsAuthRejection(Response reply)
-    {
-        if (reply.Status == 401) return true;
-        if (reply.Status != 403) return false;
+    private static bool IsAuthRejection(Response reply) => IsAuthRejection(reply.Status, reply.Body);
 
-        var trimmed = reply.Body.TrimStart();
+    internal static bool IsAuthRejection(int status, string? body)
+    {
+        if (status == 401) return true;
+        if (status != 403) return false;
+
+        var trimmed = (body ?? "").TrimStart();
         return trimmed.StartsWith('{') && trimmed.Contains("\"error\"", StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Reads the OAuth access token from Claude Code's ~/.claude/.credentials.json, if present.
-    /// Read fresh on each poll because Claude Code rewrites this file whenever it refreshes its
-    /// token in the background.
+    /// Reads the OAuth access token from Claude Code's ~/.claude/.credentials.json (or ScweenSpit's
+    /// stored OAuth refresh token), automatically renewing it via platform.claude.com/v1/oauth/token
+    /// when expired or when <paramref name="requireSessionsScope"/> is requested and the current
+    /// token lacks `user:sessions:claude_code`.
     /// </summary>
-    internal static string? ReadClaudeCodeToken(out string? plan)
+    internal static string? ReadClaudeCodeToken(
+        out string? plan,
+        bool forceRefresh = false,
+        bool requireSessionsScope = false,
+        bool allowNetworkRefresh = true)
     {
         plan = null;
-        try
+        lock (oauthRefreshLock)
         {
-            if (!File.Exists(CredentialsPath)) return null;
+            string? diskAccess = null;
+            string? diskRefresh = null;
+            long diskExpiresAt = 0;
+            var diskScopes = new List<string>();
+            string? sub = null;
+            string? tier = null;
 
-            using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
-            if (!doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
-                || oauth.ValueKind != JsonValueKind.Object)
-                return null;
+            try
+            {
+                if (File.Exists(CredentialsPath))
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
+                    if (doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
+                        && oauth.ValueKind == JsonValueKind.Object)
+                    {
+                        diskAccess = Text(oauth, "accessToken")?.Trim();
+                        diskRefresh = Text(oauth, "refreshToken")?.Trim();
+                        if (oauth.TryGetProperty("expiresAt", out var expEl) && Number(expEl, out double expMs))
+                            diskExpiresAt = (long)expMs;
 
-            var token = Text(oauth, "accessToken")?.Trim();
-            if (string.IsNullOrEmpty(token)) return null;
+                        if (oauth.TryGetProperty("scopes", out var scEl) && scEl.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in scEl.EnumerateArray())
+                            {
+                                if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } s)
+                                    diskScopes.Add(s);
+                            }
+                        }
 
-            var sub = Text(oauth, "subscriptionType");
-            var tier = Text(oauth, "rateLimitTier");
+                        sub = Text(oauth, "subscriptionType");
+                        tier = Text(oauth, "rateLimitTier");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.WriteOnce("claude-code-creds", $"could not read Claude Code credentials: {ex.Message}");
+            }
+
+            string? storedRefresh = null;
+            lock (gate)
+            {
+                storedRefresh = Secret.Unprotect(settings?.RefreshToken)?.Trim();
+            }
+
+            // Pick whichever token state (in-memory refreshed cache vs disk file) is newer.
+            string? accessToken = diskAccess;
+            string? refreshToken = !string.IsNullOrWhiteSpace(diskRefresh) ? diskRefresh : storedRefresh;
+            long expiresAt = diskExpiresAt;
+            List<string> scopes = diskScopes;
+
+            if (!string.IsNullOrWhiteSpace(cachedOAuthAccessToken) &&
+                (string.IsNullOrWhiteSpace(accessToken) || cachedOAuthExpiresAt >= diskExpiresAt))
+            {
+                accessToken = cachedOAuthAccessToken;
+                expiresAt = cachedOAuthExpiresAt;
+                if (cachedOAuthScopes.Count > 0) scopes = cachedOAuthScopes;
+                if (!string.IsNullOrWhiteSpace(cachedOAuthRefreshToken))
+                    refreshToken = cachedOAuthRefreshToken;
+            }
+
             plan = !string.IsNullOrWhiteSpace(sub) && !string.IsNullOrWhiteSpace(tier) ? $"{sub} / {tier}"
                  : !string.IsNullOrWhiteSpace(sub) ? sub
-                 : tier;
+                 : !string.IsNullOrWhiteSpace(tier) ? tier
+                 : cachedOAuthPlan;
 
-            return token;
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            bool strictlyExpired = expiresAt > 0 && nowMs >= expiresAt;
+            bool expiringSoon = expiresAt > 0 && (nowMs + 5 * 60 * 1000L) >= expiresAt;
+            bool missingSessionsScope = requireSessionsScope
+                && scopes.Count > 0
+                && !scopes.Any(s => string.Equals(s, SessionsScope, StringComparison.OrdinalIgnoreCase));
+
+            bool needsRefresh = string.IsNullOrWhiteSpace(accessToken)
+                             || expiringSoon
+                             || forceRefresh
+                             || missingSessionsScope;
+
+            if (needsRefresh && allowNetworkRefresh && !string.IsNullOrWhiteSpace(refreshToken))
+            {
+                bool canAttemptRefresh =
+                    !string.Equals(refreshToken, failedRefreshToken, StringComparison.Ordinal) &&
+                    (forceRefresh || DateTimeOffset.UtcNow >= oauthRefreshBackoffUntil);
+
+                if (canAttemptRefresh &&
+                    TryRefreshOAuthToken(refreshToken!, sub, tier, out var refreshedAccess, out var refreshedPlan))
+                {
+                    plan = refreshedPlan ?? plan;
+                    return refreshedAccess;
+                }
+            }
+
+            // Never hand back a token that is already past its expiry timestamp or that just failed a
+            // forced refresh — returning null lets callers fall back cleanly to the browser session key.
+            if (strictlyExpired || forceRefresh)
+                return null;
+
+            return !string.IsNullOrWhiteSpace(accessToken) ? accessToken : null;
+        }
+    }
+
+    private static bool TryRefreshOAuthToken(
+        string refreshToken,
+        string? existingSub,
+        string? existingTier,
+        out string? newAccessToken,
+        out string? plan)
+    {
+        newAccessToken = null;
+        plan = null;
+
+        try
+        {
+            // Request the full Claude AI OAuth scope set (including user:sessions:claude_code).
+            // Anthropic's token endpoint allows scope expansion on refresh_token grants.
+            var (status, body) = PostOAuthTokenRefresh(refreshToken, OAuthRefreshScopes);
+            if (status == 400 && body.Contains("scope", StringComparison.OrdinalIgnoreCase))
+            {
+                // Fallback without explicit scope expansion if the token was issued with restricted scopes.
+                (status, body) = PostOAuthTokenRefresh(refreshToken, null);
+            }
+
+            if (status is 400 or 401)
+            {
+                failedRefreshToken = refreshToken;
+                Log.WriteOnce("claude-oauth-refresh-rejected",
+                    $"claude oauth refresh token was rejected (HTTP {status})");
+                return false;
+            }
+
+            if (status != 200)
+            {
+                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(2);
+                Log.WriteOnce("claude-oauth-refresh-err",
+                    $"claude oauth refresh returned HTTP {status}");
+                return false;
+            }
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            var access = Text(root, "access_token")?.Trim();
+            if (string.IsNullOrWhiteSpace(access))
+            {
+                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(2);
+                return false;
+            }
+
+            var rotatedRefresh = Text(root, "refresh_token")?.Trim();
+            if (string.IsNullOrWhiteSpace(rotatedRefresh)) rotatedRefresh = refreshToken;
+
+            int expiresIn = root.TryGetProperty("expires_in", out var expEl) && Number(expEl, out double s)
+                ? (int)s : 28800;
+            long expiresAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (expiresIn * 1000L);
+
+            var scopeStr = Text(root, "scope") ?? OAuthRefreshScopes;
+            var scopes = scopeStr.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+            string? orgUuid = null;
+            string? email = null;
+            if (root.TryGetProperty("organization", out var orgEl) && orgEl.ValueKind == JsonValueKind.Object)
+                orgUuid = Text(orgEl, "uuid");
+            if (root.TryGetProperty("account", out var acctEl) && acctEl.ValueKind == JsonValueKind.Object)
+                email = Text(acctEl, "email_address") ?? Text(acctEl, "email");
+
+            string? sub = existingSub;
+            string? tier = existingTier;
+            if (string.IsNullOrWhiteSpace(orgUuid) || string.IsNullOrWhiteSpace(sub))
+            {
+                FetchOAuthProfileMetadata(access, ref orgUuid, ref email, out var profSub, out var profTier);
+                sub ??= profSub;
+                tier ??= profTier;
+            }
+
+            SaveOAuthCredentialsToDiskAndCache(access, rotatedRefresh, expiresAtMs, scopes, sub, tier, orgUuid, email);
+
+            Action? save = null;
+            lock (gate)
+            {
+                if (settings is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(rotatedRefresh))
+                        settings.RefreshToken = Secret.Protect(rotatedRefresh);
+                    if (!string.IsNullOrWhiteSpace(email))
+                        settings.AccountEmail = email;
+                    if (!string.IsNullOrWhiteSpace(orgUuid) && string.IsNullOrWhiteSpace(settings.OrgId))
+                        settings.OrgId = orgUuid;
+                    save = persist;
+                }
+            }
+            save?.Invoke();
+
+            newAccessToken = access;
+            plan = cachedOAuthPlan;
+            failedRefreshToken = null;
+            Log.Write("claude oauth access token refreshed successfully");
+            return true;
         }
         catch (Exception ex)
         {
-            Log.WriteOnce("claude-code-creds", $"could not read Claude Code credentials: {ex.Message}");
-            return null;
+            oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+            Log.WriteOnce("claude-oauth-refresh-ex", $"claude oauth refresh failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static (int Status, string Body) PostOAuthTokenRefresh(string refreshToken, string? scope)
+    {
+        object payload = scope is not null
+            ? new
+            {
+                grant_type = "refresh_token",
+                refresh_token = refreshToken,
+                client_id = OAuthClientId,
+                scope,
+            }
+            : new
+            {
+                grant_type = "refresh_token",
+                refresh_token = refreshToken,
+                client_id = OAuthClientId,
+            };
+
+        string json = JsonSerializer.Serialize(payload);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var req = new HttpRequestMessage(HttpMethod.Post, OAuthTokenUrl) { Content = content };
+        req.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+        using var resp = http.Send(req, HttpCompletionOption.ResponseContentRead);
+        var body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        return ((int)resp.StatusCode, body);
+    }
+
+    private static void FetchOAuthProfileMetadata(
+        string accessToken,
+        ref string? orgUuid,
+        ref string? email,
+        out string? subscriptionType,
+        out string? rateLimitTier)
+    {
+        subscriptionType = null;
+        rateLimitTier = null;
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, OAuthProfileUrl);
+            req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {accessToken}");
+            req.Headers.TryAddWithoutValidation("anthropic-beta", OAuthBetaHeader);
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
+            req.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+            using var resp = http.Send(req, HttpCompletionOption.ResponseContentRead);
+            if (!resp.IsSuccessStatusCode) return;
+
+            var body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("account", out var acct) && acct.ValueKind == JsonValueKind.Object)
+                email ??= Text(acct, "email") ?? Text(acct, "email_address");
+
+            if (root.TryGetProperty("organization", out var org) && org.ValueKind == JsonValueKind.Object)
+            {
+                orgUuid ??= Text(org, "uuid");
+                rateLimitTier = Text(org, "rate_limit_tier");
+                subscriptionType = Text(org, "organization_type") switch
+                {
+                    "claude_max" => "max",
+                    "claude_pro" => "pro",
+                    "claude_enterprise" => "enterprise",
+                    "claude_team" => "team",
+                    var other => other,
+                };
+            }
+        }
+        catch { }
+    }
+
+    private static void SaveOAuthCredentialsToDiskAndCache(
+        string accessToken,
+        string? refreshToken,
+        long expiresAtMs,
+        List<string> scopes,
+        string? subType,
+        string? rateTier,
+        string? orgUuid,
+        string? email)
+    {
+        cachedOAuthAccessToken = accessToken;
+        cachedOAuthRefreshToken = refreshToken;
+        cachedOAuthExpiresAt = expiresAtMs;
+        cachedOAuthScopes = scopes;
+        cachedOAuthPlan = !string.IsNullOrWhiteSpace(subType) && !string.IsNullOrWhiteSpace(rateTier)
+            ? $"{subType} / {rateTier}"
+            : !string.IsNullOrWhiteSpace(subType) ? subType : rateTier;
+
+        try
+        {
+            var dir = Path.GetDirectoryName(CredentialsPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+            JsonObject rootObj = new();
+            if (File.Exists(CredentialsPath))
+            {
+                try
+                {
+                    if (JsonNode.Parse(File.ReadAllText(CredentialsPath)) is JsonObject parsed)
+                        rootObj = parsed;
+                }
+                catch { }
+            }
+
+            var oauthObj = rootObj["claudeAiOauth"] as JsonObject ?? new JsonObject();
+            oauthObj["accessToken"] = accessToken;
+            if (!string.IsNullOrWhiteSpace(refreshToken))
+                oauthObj["refreshToken"] = refreshToken;
+            oauthObj["expiresAt"] = expiresAtMs;
+
+            var scopesArr = new JsonArray();
+            foreach (var s in scopes) scopesArr.Add(s);
+            oauthObj["scopes"] = scopesArr;
+
+            if (!string.IsNullOrWhiteSpace(subType))
+                oauthObj["subscriptionType"] = subType;
+            if (!string.IsNullOrWhiteSpace(rateTier))
+                oauthObj["rateLimitTier"] = rateTier;
+
+            rootObj["claudeAiOauth"] = oauthObj;
+            File.WriteAllText(CredentialsPath, rootObj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce("claude-creds-write", $"could not update {CredentialsPath}: {ex.Message}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(orgUuid))
+        {
+            try
+            {
+                string globalConfigPath = RemoteChatUsage.ClaudeGlobalConfigPath;
+                JsonObject cfgObj = new();
+                if (File.Exists(globalConfigPath))
+                {
+                    try
+                    {
+                        if (JsonNode.Parse(File.ReadAllText(globalConfigPath)) is JsonObject parsed)
+                            cfgObj = parsed;
+                    }
+                    catch { }
+                }
+
+                var acctObj = cfgObj["oauthAccount"] as JsonObject ?? new JsonObject();
+                acctObj["organizationUuid"] = orgUuid;
+                if (!string.IsNullOrWhiteSpace(email))
+                    acctObj["emailAddress"] = email;
+                cfgObj["oauthAccount"] = acctObj;
+                File.WriteAllText(globalConfigPath, cfgObj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { }
         }
     }
 
     /// <summary>
-    /// Performs an authenticated GET against claude.ai using the stored browser session key (if any),
-    /// adopting any rotated session cookie along the way.
+    /// Performs an authenticated GET for Claude Code remote session/environment endpoints (`/v1/...`)
+    /// using the stored browser session key (if any), including the required organisation UUID,
+    /// `anthropic-version`, and `anthropic-beta` headers, and adopting any rotated session cookie.
     /// </summary>
-    internal static (int Status, string Body)? GetWithStoredSessionKey(string pathAndQuery)
+    internal static (int Status, string Body)? GetWithStoredSessionKey(string pathAndQuery, string? fallbackOrgUuid = null)
     {
         string? stored, key, org;
         lock (gate)
@@ -638,7 +1352,7 @@ public static class ClaudeUsage
         var activeKey = key!;
         if (string.IsNullOrWhiteSpace(org))
         {
-            org = ResolveOrg(ref activeKey);
+            org = ResolveOrg(ref activeKey) ?? fallbackOrgUuid;
             if (!string.IsNullOrWhiteSpace(org))
             {
                 lock (gate)
@@ -648,10 +1362,34 @@ public static class ClaudeUsage
             }
         }
 
-        var reply = Get($"{Origin}{pathAndQuery}", activeKey, org);
-        if (reply is null) return null;
-        if (reply.Status < 400) AdoptRotatedKey(reply, ref activeKey);
-        return (reply.Status, reply.Body);
+        var extraHeaders = new List<(string Name, string Value)>
+        {
+            ("anthropic-version", AnthropicVersionHeader),
+            ("anthropic-beta", RemoteBetaHeader),
+            ("Accept", "application/json"),
+            ("Referer", Origin + "/code"),
+        };
+        if (!string.IsNullOrWhiteSpace(org))
+            extraHeaders.Add(("x-organization-uuid", org));
+
+        // 1. Try claude.ai first (via curl.exe + SChannel) so rotated session cookies are adopted.
+        var reply = Get($"{Origin}{pathAndQuery}", activeKey, org, extraHeaders);
+        if (reply is not null && reply.Status < 400)
+        {
+            AdoptRotatedKey(reply, ref activeKey);
+            return (reply.Status, reply.Body);
+        }
+
+        // 2. Also try api.anthropic.com directly (which is never behind claude.ai's Cloudflare HTML
+        //    challenge and accepts the same sessionKey cookie + x-organization-uuid header).
+        var direct = Get($"{AnthropicApiOrigin}{pathAndQuery}", activeKey, org, extraHeaders);
+        if (direct is not null && (reply is null || direct.Status < 400 || !IsAuthRejection(reply)))
+        {
+            if (direct.Status < 400) AdoptRotatedKey(direct, ref activeKey);
+            return (direct.Status, direct.Body);
+        }
+
+        return reply is not null ? (reply.Status, reply.Body) : null;
     }
 
     /// <summary>
@@ -913,7 +1651,11 @@ public static class ClaudeUsage
     /// throughout) goes first, with a retry disabling Schannel revocation checks if OCSP/CRL is
     /// unreachable, and .NET's HttpClient as a final fallback.
     /// </summary>
-    private static Response? Get(string url, string key, string? org = null)
+    private static Response? Get(
+        string url,
+        string key,
+        string? org = null,
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null)
     {
         // claude.ai wants the active organisation alongside the session key on org-scoped calls.
         // Sending only the key gets a 401 that is indistinguishable from an expired one, which is
@@ -922,28 +1664,43 @@ public static class ClaudeUsage
             ? $"sessionKey={key}"
             : $"sessionKey={key}; lastActiveOrg={org}";
 
-        var viaCurl = ViaCurl(url, cookie, ignoreRevocation: false)
-                   ?? ViaCurl(url, cookie, ignoreRevocation: true);
+        var viaCurl = ViaCurl(url, cookie, ignoreRevocation: false, extraHeaders)
+                   ?? ViaCurl(url, cookie, ignoreRevocation: true, extraHeaders);
         if (viaCurl is not null) return viaCurl;
 
         Log.WriteOnce("claude-transport",
             "curl was unavailable or failed; falling back to the .NET client, which Cloudflare "
           + "may challenge regardless of the key");
 
-        return ViaHttpClient(url, cookie);
+        return ViaHttpClient(url, cookie, extraHeaders);
     }
 
-    private static Response? ViaHttpClient(string url, string cookie)
+    private static Response? ViaHttpClient(
+        string url,
+        string cookie,
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.TryAddWithoutValidation("User-Agent", BrowserAgent);
             request.Headers.TryAddWithoutValidation("anthropic-client-platform", "web_claude_ai");
-            request.Headers.TryAddWithoutValidation("Accept", "*/*");
             request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
-            request.Headers.TryAddWithoutValidation("Referer", Origin + "/");
             request.Headers.TryAddWithoutValidation("Cookie", cookie);
+
+            bool hasAccept = false;
+            bool hasReferer = false;
+            if (extraHeaders is not null)
+            {
+                foreach (var (name, value) in extraHeaders)
+                {
+                    if (string.Equals(name, "Accept", StringComparison.OrdinalIgnoreCase)) hasAccept = true;
+                    if (string.Equals(name, "Referer", StringComparison.OrdinalIgnoreCase)) hasReferer = true;
+                    request.Headers.TryAddWithoutValidation(name, value);
+                }
+            }
+            if (!hasAccept) request.Headers.TryAddWithoutValidation("Accept", "*/*");
+            if (!hasReferer) request.Headers.TryAddWithoutValidation("Referer", Origin + "/");
 
             using var reply = http.Send(request, HttpCompletionOption.ResponseContentRead);
             var body = reply.Content.ReadAsStringAsync().GetAwaiter().GetResult();
@@ -967,7 +1724,11 @@ public static class ClaudeUsage
     /// The options go in on stdin (-K -) rather than as arguments, because the cookie is a
     /// whole-account credential and a command line is readable by every process on the machine.
     /// </summary>
-    private static Response? ViaCurl(string url, string cookie, bool ignoreRevocation)
+    private static Response? ViaCurl(
+        string url,
+        string cookie,
+        bool ignoreRevocation,
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null)
     {
         try
         {
@@ -995,10 +1756,15 @@ public static class ClaudeUsage
                 .AppendLine($"--url \"{Escape(url)}\"")
                 .AppendLine($"-H \"User-Agent: {Escape(BrowserAgent)}\"")
                 .AppendLine("-H \"anthropic-client-platform: web_claude_ai\"")
-                .AppendLine($"-H \"Cookie: {Escape(cookie)}\"")
-                .ToString();
+                .AppendLine($"-H \"Cookie: {Escape(cookie)}\"");
 
-            curl.StandardInput.Write(config);
+            if (extraHeaders is not null)
+            {
+                foreach (var (name, value) in extraHeaders)
+                    config.AppendLine($"-H \"{Escape(name)}: {Escape(value)}\"");
+            }
+
+            curl.StandardInput.Write(config.ToString());
             curl.StandardInput.Close();
 
             var output = curl.StandardOutput.ReadToEnd();

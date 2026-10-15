@@ -68,7 +68,7 @@ public static class RemoteChatUsage
     public const string AntigravityWebUrl = "https://antigravity.google";
 
     private const string AnthropicApiBase = "https://api.anthropic.com";
-    private const string AnthropicBetaHeader = "ccr-byoc-2025-07-29,oauth-2025-04-20";
+    private const string AnthropicBetaHeader = "ccr-byoc-2025-07-29,environments-2025-11-01,oauth-2025-04-20";
     private const string AnthropicVersionHeader = "2023-06-01";
     private const string ClaudeCodeUserAgent = "claude-code/2.1.284";
 
@@ -360,12 +360,40 @@ public static class RemoteChatUsage
             if (changedConfig) save = persist;
 
             bool bothNeedAuth = claudeRes.NeedsAuth && agRes.NeedsAuth;
+            bool hasClaudeBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Claude);
+            bool hasAgBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Antigravity);
+
             lastNeedsAuth = bothNeedAuth && liveByRowId.Count == 0;
-            lastError = bothNeedAuth
-                ? "Sign in under Claude usage or Antigravity usage"
-                : (claudeRes.Error is not null && agRes.Error is not null && liveByRowId.Count == 0)
-                    ? $"{claudeRes.Error}; {agRes.Error}"
-                    : null;
+            if (bothNeedAuth && liveByRowId.Count == 0)
+            {
+                lastError = "Sign in under Claude usage or Antigravity usage";
+            }
+            else if (liveByRowId.Count == 0)
+            {
+                lastError = (claudeRes.Error, agRes.Error) switch
+                {
+                    (not null, not null) => $"{claudeRes.Error}; {agRes.Error}",
+                    (not null, null) => claudeRes.Error,
+                    (null, not null) => agRes.Error,
+                    _ => null,
+                };
+            }
+            else if (claudeRes.Error is not null && !hasClaudeBuckets && !claudeRes.NeedsAuth)
+            {
+                lastError = $"Claude: {claudeRes.Error}";
+            }
+            else if (claudeRes.Error is not null && !hasClaudeBuckets && ClaudeUsage.Enabled)
+            {
+                lastError = $"Claude: {claudeRes.Error}";
+            }
+            else if (agRes.Error is not null && !hasAgBuckets && AntigravityUsage.Enabled)
+            {
+                lastError = $"Antigravity: {agRes.Error}";
+            }
+            else
+            {
+                lastError = null;
+            }
 
             hasCompletedInitialSync = true;
             RebuildCurrentReadingLocked();
@@ -490,52 +518,135 @@ public static class RemoteChatUsage
     private sealed record PollServiceResult(
         Dictionary<string, ServerBucket> Buckets,
         string? Error,
-        bool NeedsAuth);
+        bool NeedsAuth,
+        string? Diagnostic = null);
 
-    private sealed record ClaudeEnvInfo(string Server, string? Repo, bool Online);
+    private sealed record ClaudeEnvInfo(string Server, string? Repo, bool Online, bool Active);
 
     private static PollServiceResult PollClaude(DateTimeOffset doneCutoff)
     {
         var buckets = new Dictionary<string, ServerBucket>(StringComparer.OrdinalIgnoreCase);
+        var diag = new List<string>();
 
-        var oauthToken = ClaudeUsage.ReadClaudeCodeToken(out _);
+        bool allowOAuth = ClaudeUsage.UseClaudeCodeEnabled || ClaudeUsage.HasSignedInOAuth;
+        string? oauthToken = allowOAuth
+            ? ClaudeUsage.ReadClaudeCodeToken(out _, forceRefresh: false, requireSessionsScope: true)
+            : null;
+        bool hasSessionKey = ClaudeUsage.HasStoredSessionKey;
+
         string? orgUuid = ResolveClaudeOrgUuid(oauthToken);
 
         (int Status, string Body)? envsReply = null;
         (int Status, string Body)? sessionsReply = null;
 
+        // 1. Try OAuth token (from ~/.claude/.credentials.json or ScweenSpit's 1-click Claude sign-in).
+        //    If the token was expired or lacked `user:sessions:claude_code`, ReadClaudeCodeToken already
+        //    attempted a refresh. If the endpoint still returns 401/403, force one refresh and retry.
         if (!string.IsNullOrWhiteSpace(oauthToken))
         {
             envsReply = GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid);
             sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=100", oauthToken, orgUuid);
+
+            if (envsReply is { Status: 401 or 403 } || sessionsReply is { Status: 401 or 403 })
+            {
+                var refreshed = ClaudeUsage.ReadClaudeCodeToken(out _, forceRefresh: true, requireSessionsScope: true);
+                if (!string.IsNullOrWhiteSpace(refreshed) && refreshed != oauthToken)
+                {
+                    oauthToken = refreshed;
+                    orgUuid = ResolveClaudeOrgUuid(oauthToken) ?? orgUuid;
+                    if (envsReply is not { Status: >= 200 and < 300 })
+                        envsReply = GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid);
+                    if (sessionsReply is not { Status: >= 200 and < 300 })
+                        sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=100", oauthToken, orgUuid);
+                }
+            }
+
+            if (sessionsReply is not { Status: >= 200 and < 300 })
+            {
+                var v1Sessions = GetAnthropicOAuth("/v1/sessions", oauthToken, orgUuid);
+                if (v1Sessions is { Status: >= 200 and < 300 } || sessionsReply is null)
+                    sessionsReply = v1Sessions;
+            }
+
+            diag.Add($"OAuth: envs={envsReply?.Status.ToString() ?? "unreachable"}, sessions={sessionsReply?.Status.ToString() ?? "unreachable"}");
         }
-        else
+
+        // 2. Fall back to the stored browser sessionKey cookie whenever OAuth was unavailable or did not
+        //    return 2xx. Unlike the previous implementation, a stale ~/.claude/.credentials.json on
+        //    Windows will no longer block a working browser sessionKey from being used.
+        if (hasSessionKey &&
+            (envsReply is not { Status: >= 200 and < 300 } || sessionsReply is not { Status: >= 200 and < 300 }))
         {
-            envsReply = ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers");
-            sessionsReply = ClaudeUsage.GetWithStoredSessionKey("/v1/code/sessions?limit=100");
-            if (envsReply is null && sessionsReply is null)
-                return new PollServiceResult(buckets, "No Claude login configured", NeedsAuth: true);
+            if (envsReply is not { Status: >= 200 and < 300 })
+            {
+                var keyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers", orgUuid);
+                if (keyEnvs is not null && (envsReply is null || keyEnvs.Value.Status < 400))
+                    envsReply = keyEnvs;
+            }
+
+            if (sessionsReply is not { Status: >= 200 and < 300 })
+            {
+                var keySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/code/sessions?limit=100", orgUuid);
+                if (keySessions is not { Status: >= 200 and < 300 })
+                {
+                    var altKeySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/sessions", orgUuid);
+                    if (altKeySessions is { Status: >= 200 and < 300 } || keySessions is null)
+                        keySessions = altKeySessions;
+                }
+                if (keySessions is not null && (sessionsReply is null || keySessions.Value.Status < 400))
+                    sessionsReply = keySessions;
+            }
+
+            diag.Add($"SessionKey fallback: envs={envsReply?.Status.ToString() ?? "unreachable"}, sessions={sessionsReply?.Status.ToString() ?? "unreachable"}");
         }
+
+        if (string.IsNullOrWhiteSpace(oauthToken) && !hasSessionKey)
+            return new PollServiceResult(buckets, "No Claude login configured", NeedsAuth: true, string.Join(" | ", diag));
 
         if (sessionsReply is null && envsReply is null)
-            return new PollServiceResult(buckets, "api.anthropic.com unreachable", NeedsAuth: false);
+            return new PollServiceResult(buckets, "api.anthropic.com unreachable", NeedsAuth: false, string.Join(" | ", diag));
 
-        if (sessionsReply is { Status: 401 or 403 } && envsReply is { Status: 401 or 403 })
-            return new PollServiceResult(buckets, "Claude login expired", NeedsAuth: true);
+        bool envsOk = envsReply is { Status: >= 200 and < 300 };
+        bool sessionsOk = sessionsReply is { Status: >= 200 and < 300 };
+
+        if (!envsOk && !sessionsOk)
+        {
+            bool envsAuthRefused = envsReply is { } er && ClaudeUsage.IsAuthRejection(er.Status, er.Body);
+            bool sessionsAuthRefused = sessionsReply is { } sr && ClaudeUsage.IsAuthRejection(sr.Status, sr.Body);
+
+            if (envsAuthRefused || sessionsAuthRefused)
+            {
+                string combinedBody = $"{envsReply?.Body} {sessionsReply?.Body}";
+                bool isScopeErr = (envsReply?.Status == 403 || sessionsReply?.Status == 403)
+                    && (combinedBody.Contains("scope", StringComparison.OrdinalIgnoreCase)
+                     || combinedBody.Contains("permission", StringComparison.OrdinalIgnoreCase));
+
+                string msg = isScopeErr
+                    ? "Claude login needs sessions permission — click 'Sign in with Claude' in Settings"
+                    : "Claude login expired — click 'Sign in with Claude' in Settings";
+                return new PollServiceResult(buckets, msg, NeedsAuth: true, string.Join(" | ", diag));
+            }
+
+            if (envsReply?.Status == 403 || sessionsReply?.Status == 403)
+                return new PollServiceResult(buckets, "claude.ai challenged the request", NeedsAuth: false, string.Join(" | ", diag));
+
+            int errCode = sessionsReply?.Status ?? envsReply?.Status ?? 0;
+            return new PollServiceResult(buckets, $"Claude remote HTTP {errCode}", NeedsAuth: false, string.Join(" | ", diag));
+        }
 
         var envById = new Dictionary<string, ClaudeEnvInfo>(StringComparer.Ordinal);
-        if (envsReply is { Status: >= 200 and < 300 })
-        {
-            ParseClaudeEnvironments(envsReply.Value.Body, envById, buckets);
-        }
+        var envByRepo = new Dictionary<string, ClaudeEnvInfo>(StringComparer.OrdinalIgnoreCase);
 
-        if (sessionsReply is { Status: >= 200 and < 300 })
+        if (envsOk)
+            ParseClaudeEnvironments(envsReply!.Value.Body, envById, envByRepo, buckets);
+
+        if (sessionsOk)
         {
-            ParseClaudeSessions(sessionsReply.Value.Body, envById, buckets, doneCutoff);
+            ParseClaudeSessions(sessionsReply!.Value.Body, envById, envByRepo, buckets, doneCutoff);
         }
-        else if (sessionsReply is not null)
+        else if (sessionsReply is not null && buckets.Count == 0)
         {
-            return new PollServiceResult(buckets, $"Claude sessions HTTP {sessionsReply.Value.Status}", NeedsAuth: false);
+            return new PollServiceResult(buckets, $"Claude sessions HTTP {sessionsReply.Value.Status}", NeedsAuth: false, string.Join(" | ", diag));
         }
 
         foreach (var b in buckets.Values)
@@ -546,12 +657,13 @@ public static class RemoteChatUsage
                 .ToList();
         }
 
-        return new PollServiceResult(buckets, null, NeedsAuth: false);
+        return new PollServiceResult(buckets, null, NeedsAuth: false, string.Join(" | ", diag));
     }
 
     private static void ParseClaudeEnvironments(
         string body,
         Dictionary<string, ClaudeEnvInfo> envById,
+        Dictionary<string, ClaudeEnvInfo> envByRepo,
         Dictionary<string, ServerBucket> buckets)
     {
         try
@@ -575,12 +687,14 @@ public static class RemoteChatUsage
 
                 string? machineName = null;
                 string? directory = null;
+                string? gitRepoUrl = null;
                 bool online = false;
 
                 if (env.TryGetProperty("bridge_info", out var bridge) && bridge.ValueKind == JsonValueKind.Object)
                 {
                     machineName = Text(bridge, "machine_name");
                     directory = Text(bridge, "directory");
+                    gitRepoUrl = Text(bridge, "git_repo_url");
                     online = Bool(bridge, "online");
                 }
 
@@ -595,8 +709,25 @@ public static class RemoteChatUsage
                 if (string.IsNullOrWhiteSpace(machineName)) continue;
 
                 string server = NormalizeServerName(machineName);
-                string? repo = ShortRepoName(directory);
-                envById[envId] = new ClaudeEnvInfo(server, repo, online);
+                string? repo = ShortRepoName(directory) ?? ShortRepoName(NormalizeGitRepoSlug(gitRepoUrl));
+                var info = new ClaudeEnvInfo(server, repo, online, activeEnv);
+                envById[envId] = info;
+
+                // Index by git repository slug ("owner/repo") and short folder name ("repo") so
+                // CLI sessions started with `remote-control-auto` (which omit `environment_id` in
+                // `/v1/code/sessions` but carry `config.sources` / `current_branches`) still map
+                // back to their server (`hx525`, `lp-server-vm`, etc.) rather than "remote".
+                var slug = NormalizeGitRepoSlug(gitRepoUrl);
+                if (!string.IsNullOrWhiteSpace(slug))
+                {
+                    if (!envByRepo.TryGetValue(slug, out var prev) || (activeEnv && !prev.Active) || online)
+                        envByRepo[slug] = info;
+                }
+                if (!string.IsNullOrWhiteSpace(repo))
+                {
+                    if (!envByRepo.TryGetValue(repo, out var prev) || (activeEnv && !prev.Active) || online)
+                        envByRepo[repo] = info;
+                }
 
                 if (activeEnv)
                 {
@@ -628,6 +759,7 @@ public static class RemoteChatUsage
     private static void ParseClaudeSessions(
         string body,
         Dictionary<string, ClaudeEnvInfo> envById,
+        Dictionary<string, ClaudeEnvInfo> envByRepo,
         Dictionary<string, ServerBucket> buckets,
         DateTimeOffset doneCutoff)
     {
@@ -648,13 +780,21 @@ public static class RemoteChatUsage
                 if (IsInternalClaudeSessionTitle(title)) continue;
                 if (string.IsNullOrWhiteSpace(title)) title = "Untitled session";
 
+                // Support both `/v1/code/sessions` (`status` + `worker_status` + `connection_status`)
+                // and `/v1/sessions` (`session_status`).
                 var status = Text(s, "status") ?? "";
+                var sessionStatus = Text(s, "session_status") ?? "";
                 var conn = Text(s, "connection_status") ?? "";
                 var worker = Text(s, "worker_status") ?? "";
                 var bucketKind = Text(s, "status_bucket") ?? "";
                 bool unread = Bool(s, "unread");
 
-                bool isActive = string.Equals(status, "active", StringComparison.OrdinalIgnoreCase);
+                bool isArchived = string.Equals(status, "archived", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(status, "deleted", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(sessionStatus, "archived", StringComparison.OrdinalIgnoreCase);
+                bool isActive = !isArchived && (
+                    string.Equals(status, "active", StringComparison.OrdinalIgnoreCase) ||
+                    (string.IsNullOrEmpty(status) && !string.IsNullOrEmpty(sessionStatus)));
                 bool isConnected = string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase);
 
                 string? taskSummary = null;
@@ -673,8 +813,16 @@ public static class RemoteChatUsage
                     }
                 }
 
+                if (s.TryGetProperty("post_turn_summary", out var topPts) && topPts.ValueKind == JsonValueKind.Object)
+                {
+                    needsAction ??= Text(topPts, "needs_action");
+                    statusCategory ??= Text(topPts, "status_category");
+                    statusDetail ??= Text(topPts, "status_detail") ?? Text(topPts, "recent_action");
+                }
+
                 bool isWaiting = isActive && (
                     string.Equals(worker, "requires_action", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "requires_action", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(bucketKind, "requires_action", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(bucketKind, "blocked", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(statusCategory, "need_input", StringComparison.OrdinalIgnoreCase) ||
@@ -682,6 +830,7 @@ public static class RemoteChatUsage
 
                 bool isRunning = !isWaiting && isActive && (
                     string.Equals(worker, "running", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "running", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(bucketKind, "working", StringComparison.OrdinalIgnoreCase));
 
                 var updated = ParseIso(Text(s, "last_event_at"))
@@ -695,21 +844,36 @@ public static class RemoteChatUsage
                 if (!isWaiting && !isRunning && !isDone) continue;
 
                 var envId = Text(s, "environment_id") ?? "";
+                string? sessionRepoSlug = ExtractClaudeSessionRepoSlug(s);
+                string? sessionShortRepo = ShortRepoName(sessionRepoSlug);
+
                 string server;
-                string? repo = null;
+                string? repo = sessionShortRepo;
                 bool envOnline = isConnected;
 
-                if (envById.TryGetValue(envId, out var envInfo))
+                if (!string.IsNullOrWhiteSpace(envId) && envById.TryGetValue(envId, out var envInfo))
                 {
                     server = envInfo.Server;
-                    repo = envInfo.Repo;
+                    repo = envInfo.Repo ?? sessionShortRepo;
                     envOnline |= envInfo.Online;
+                }
+                else if (!string.IsNullOrWhiteSpace(sessionRepoSlug) && envByRepo.TryGetValue(sessionRepoSlug, out var bySlug))
+                {
+                    server = bySlug.Server;
+                    repo = bySlug.Repo ?? sessionShortRepo;
+                    envOnline |= bySlug.Online;
+                }
+                else if (!string.IsNullOrWhiteSpace(sessionShortRepo) && envByRepo.TryGetValue(sessionShortRepo, out var byShort))
+                {
+                    server = byShort.Server;
+                    repo = byShort.Repo ?? sessionShortRepo;
+                    envOnline |= byShort.Online;
                 }
                 else
                 {
                     // Skip orphaned sessions that cannot be mapped to a known server unless currently connected.
                     if (!isConnected) continue;
-                    server = "remote";
+                    server = buckets.Count == 1 ? buckets.Values.First().Server : "remote";
                 }
 
                 var chatState = isWaiting ? RemoteChatState.Waiting
@@ -737,6 +901,7 @@ public static class RemoteChatUsage
                     serverBucket.Online = true;
                 }
 
+                string webSessionId = ToWebSessionId(id);
                 serverBucket.Chats.Add(new RemoteChatItem(
                     id,
                     CleanTitle(title) ?? "Untitled chat",
@@ -747,13 +912,77 @@ public static class RemoteChatUsage
                     CleanTitle(detail),
                     unread,
                     updated,
-                    $"{ClaudeCodeWebUrl}/{id}"));
+                    $"{ClaudeCodeWebUrl}/{webSessionId}"));
             }
         }
         catch (Exception ex)
         {
             Log.WriteOnce("claude-sessions-parse", $"could not parse Claude sessions: {ex.Message}");
         }
+    }
+
+    private static string ToWebSessionId(string id) =>
+        id.StartsWith("cse_", StringComparison.Ordinal) ? "session_" + id[4..] : id;
+
+    private static string? ExtractClaudeSessionRepoSlug(JsonElement session)
+    {
+        if (session.TryGetProperty("config", out var cfg) && cfg.ValueKind == JsonValueKind.Object
+            && ExtractRepoFromSources(cfg) is { Length: > 0 } s1)
+            return s1;
+
+        if (session.TryGetProperty("session_context", out var ctx) && ctx.ValueKind == JsonValueKind.Object
+            && ExtractRepoFromSources(ctx) is { Length: > 0 } s2)
+            return s2;
+
+        if (session.TryGetProperty("external_metadata", out var ext) && ext.ValueKind == JsonValueKind.Object
+            && ext.TryGetProperty("current_branches", out var branches) && branches.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in branches.EnumerateObject())
+            {
+                if (!string.IsNullOrWhiteSpace(prop.Name))
+                    return NormalizeGitRepoSlug(prop.Name);
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ExtractRepoFromSources(JsonElement container)
+    {
+        if (!container.TryGetProperty("sources", out var sources) || sources.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var src in sources.EnumerateArray())
+        {
+            if (src.ValueKind != JsonValueKind.Object) continue;
+            if (Text(src, "url") is { Length: > 0 } url)
+                return NormalizeGitRepoSlug(url);
+        }
+        return null;
+    }
+
+    private static string? NormalizeGitRepoSlug(string? rawUrlOrSlug)
+    {
+        if (string.IsNullOrWhiteSpace(rawUrlOrSlug)) return null;
+        var s = rawUrlOrSlug.Trim().TrimEnd('/');
+        if (s.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            s = s[..^4];
+
+        int colonSlash = s.IndexOf("://", StringComparison.Ordinal);
+        if (colonSlash >= 0)
+        {
+            int firstSlashAfterHost = s.IndexOf('/', colonSlash + 3);
+            if (firstSlashAfterHost >= 0 && firstSlashAfterHost + 1 < s.Length)
+                s = s[(firstSlashAfterHost + 1)..];
+        }
+        else if (s.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+        {
+            int colon = s.IndexOf(':');
+            if (colon >= 0 && colon + 1 < s.Length)
+                s = s[(colon + 1)..];
+        }
+
+        return s.Length > 0 ? s : null;
     }
 
     private static bool IsInternalClaudeSessionTitle(string title) =>
@@ -763,6 +992,12 @@ public static class RemoteChatUsage
 
     private static string? ResolveClaudeOrgUuid(string? oauthToken)
     {
+        if (ClaudeUsage.GetConfiguredOrgId() is { Length: > 0 } configuredOrg)
+        {
+            cachedClaudeOrgUuid = configuredOrg;
+            return configuredOrg;
+        }
+
         try
         {
             if (File.Exists(ClaudeGlobalConfigPath))
@@ -1132,6 +1367,8 @@ public static class RemoteChatUsage
         report.AppendLine();
         report.AppendLine("--- Claude Code Remote Control ---");
         var claudeRes = PollClaude(cutoff);
+        if (!string.IsNullOrWhiteSpace(claudeRes.Diagnostic))
+            report.AppendLine($"transport: {claudeRes.Diagnostic}");
         if (claudeRes.Error is not null && claudeRes.Buckets.Count == 0)
         {
             report.AppendLine($"status: {claudeRes.Error}");

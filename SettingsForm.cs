@@ -1118,33 +1118,74 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        // ---- persistent login via Claude Code
+        // ---- persistent login via Claude OAuth / Claude Code
         bool haveClaudeCode = ClaudeUsage.HasClaudeCodeCredentials();
-        var useClaudeCode = Theme.Toggle("Use Claude Code login when available (recommended — does not expire like a browser cookie)",
+        bool signedInOAuth = ClaudeUsage.HasSignedInOAuth;
+        string? oauthEmail = ClaudeUsage.SignedInEmail;
+
+        var useClaudeCode = Theme.Toggle("Use Claude OAuth / Claude Code login when available (recommended — auto-renews & never expires)",
                                          claude.UseClaudeCode);
         useClaudeCode.CheckedChanged += (_, _) =>
         {
             claude.UseClaudeCode = useClaudeCode.Checked;
             Save();
             ClaudeUsage.Refresh();
+            RemoteChatUsage.Refresh();
             BeginInvoke(ShowClaude);
         };
         page.Controls.Add(useClaudeCode);
 
         page.Controls.Add(new Label
         {
-            Text = haveClaudeCode
-                ? $"● Claude Code login detected at {ClaudeUsage.CredentialsPath}"
-                : $"○ No Claude Code login found at {ClaudeUsage.CredentialsPath}",
+            Text = signedInOAuth && !string.IsNullOrWhiteSpace(oauthEmail)
+                ? $"● Signed in to Claude as {oauthEmail} (auto-renewing OAuth)"
+                : haveClaudeCode
+                    ? $"● Claude Code login detected at {ClaudeUsage.CredentialsPath} (auto-renewing OAuth)"
+                    : "○ Not signed in via Claude OAuth — click 'Sign in with Claude' below or paste a session key",
             AutoSize = true, MaximumSize = new Size(470, 0),
-            ForeColor = haveClaudeCode && claude.UseClaudeCode ? Color.FromArgb(110, 210, 140) : Theme.Muted,
-            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 2, 0, 2),
+            ForeColor = (haveClaudeCode || signedInOAuth) && claude.UseClaudeCode ? Color.FromArgb(110, 210, 140) : Theme.Muted,
+            Font = Theme.Face(9f, FontStyle.Bold), Margin = new Padding(0, 2, 0, 4),
         });
+
+        var oauthButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 2, 0, 4) };
+        var signInClaude = Theme.Action(signedInOAuth || haveClaudeCode ? "Re-sign in with Claude" : "Sign in with Claude", primary: !(signedInOAuth || haveClaudeCode));
+        signInClaude.AutoSize = true;
+        signInClaude.Click += async (_, _) =>
+        {
+            signInClaude.Enabled = false;
+            Say("Finish signing in to Claude in your browser…");
+            try
+            {
+                var (ok, message) = await ClaudeUsage.SignInWithClaudeAsync();
+                Say(message, problem: !ok);
+                if (ok && !IsDisposed) BeginInvoke(ShowClaude);
+            }
+            finally
+            {
+                if (!signInClaude.IsDisposed) signInClaude.Enabled = true;
+            }
+        };
+        oauthButtons.Controls.Add(signInClaude);
+
+        if (signedInOAuth)
+        {
+            var signOutClaude = Theme.Action("Sign out OAuth");
+            signOutClaude.AutoSize = true;
+            signOutClaude.Click += (_, _) =>
+            {
+                ClaudeUsage.SignOutOAuth();
+                Say("Signed out of Claude OAuth.");
+                BeginInvoke(ShowClaude);
+            };
+            oauthButtons.Controls.Add(signOutClaude);
+        }
+        page.Controls.Add(oauthButtons);
+
         page.Controls.Add(Theme.Caption(
-            "When you are signed in to Claude Code (CLI or IDE extension), it keeps an OAuth token in " +
-            "~/.claude/.credentials.json and renews it automatically as you use it — so the tracker " +
-            "never expires on its own. If you also save a browser session key below, ScweenSpit keeps " +
-            "both and falls back automatically if either is rate-limited or unavailable."));
+            "Signing in with Claude stores an OAuth refresh token encrypted to this Windows account (and " +
+            "syncs ~/.claude/.credentials.json) with full usage + remote session permissions, renewing it " +
+            "automatically so neither the usage tracker nor the remote chat tracker expires. If you also " +
+            "save a browser session key below, ScweenSpit keeps both as a fallback."));
 
         // ---- the browser session key (primary if Claude Code is not installed, or fallback)
         bool haveKey = !string.IsNullOrWhiteSpace(claude.SessionKey);
@@ -1891,8 +1932,51 @@ public sealed class SettingsForm : Form
         }
 
         page.Controls.Add(Theme.Caption(
-            "Reuses your signed-in Claude Code credentials (~/.claude/.credentials.json or claude.ai session key) " +
-            "and Google Cloud Code OAuth token from the Claude usage and Antigravity usage tabs."));
+            "Reuses your signed-in Claude OAuth / Claude Code credentials (or claude.ai session key) " +
+            "and Google Cloud Code OAuth token. You can also sign in or refresh either account directly below:"));
+
+        var authRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 2, 0, 6) };
+
+        bool claudeSignedIn = ClaudeUsage.HasSignedInOAuth || ClaudeUsage.HasClaudeCodeCredentials() || ClaudeUsage.HasStoredSessionKey;
+        var signInClaudeBtn = Theme.Action(claudeSignedIn ? "Re-sign in with Claude" : "Sign in with Claude", primary: !claudeSignedIn);
+        signInClaudeBtn.AutoSize = true;
+        signInClaudeBtn.Click += async (_, _) =>
+        {
+            signInClaudeBtn.Enabled = false;
+            Say("Finish signing in to Claude in your browser…");
+            try
+            {
+                var (ok, message) = await ClaudeUsage.SignInWithClaudeAsync();
+                Say(message, problem: !ok);
+                if (ok && !IsDisposed) BeginInvoke(ShowRemoteChats);
+            }
+            finally
+            {
+                if (!signInClaudeBtn.IsDisposed) signInClaudeBtn.Enabled = true;
+            }
+        };
+        authRow.Controls.Add(signInClaudeBtn);
+
+        bool agSignedIn = AntigravityUsage.HasSignedInAccount || AntigravityUsage.HasCliTokenFile();
+        var signInAgBtn = Theme.Action(agSignedIn ? "Re-sign in with Google (Antigravity)" : "Sign in with Google (Antigravity)", primary: !agSignedIn);
+        signInAgBtn.AutoSize = true;
+        signInAgBtn.Click += async (_, _) =>
+        {
+            signInAgBtn.Enabled = false;
+            Say("Finish signing in to Google in your browser…");
+            try
+            {
+                var (ok, message) = await AntigravityUsage.SignInWithGoogleAsync();
+                Say(message, problem: !ok);
+                if (ok && !IsDisposed) BeginInvoke(ShowRemoteChats);
+            }
+            finally
+            {
+                if (!signInAgBtn.IsDisposed) signInAgBtn.Enabled = true;
+            }
+        };
+        authRow.Controls.Add(signInAgBtn);
+        page.Controls.Add(authRow);
 
         // ---- Server × service row order & custom labels ---------------------
         page.Controls.Add(new Label

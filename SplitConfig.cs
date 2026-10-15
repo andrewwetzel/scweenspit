@@ -227,6 +227,17 @@ public sealed class ClaudeSettings
     public string? SessionKey { get; set; }
 
     /// <summary>
+    /// Optional Claude Code OAuth refresh token encrypted to this Windows account by DPAPI (from
+    /// "Sign in with Claude" or mirrored from ~/.claude/.credentials.json) so ScweenSpit can renew
+    /// expired access tokens and query remote Claude Code sessions even when the CLI is not running
+    /// locally on Windows.
+    /// </summary>
+    public string? RefreshToken { get; set; }
+
+    /// <summary>Display email for the signed-in Claude OAuth account, if known.</summary>
+    public string? AccountEmail { get; set; }
+
+    /// <summary>
     /// Which organisation's usage to read. Resolved from the key on first poll and cached, because
     /// working it out costs two extra requests; cleared whenever the key changes.
     /// </summary>
