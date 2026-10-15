@@ -1061,6 +1061,15 @@ public sealed class TaskbarWindow : Form
     private void PaintTray(Graphics g)
     {
         using var hot = new SolidBrush(Theme.Raised);
+        using var divider = new Pen(Theme.Divider, 1f);
+
+        void DrawStripSeparator(Rectangle strip)
+        {
+            if (Vertical)
+                g.DrawLine(divider, strip.X + 8, strip.Y, strip.Right - 8, strip.Y);
+            else
+                g.DrawLine(divider, strip.X, strip.Y + 8, strip.X, strip.Bottom - 8);
+        }
 
         if (UsageVisible)
         {
@@ -1073,6 +1082,7 @@ public sealed class TaskbarWindow : Form
         {
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
+            if (UsageVisible) DrawStripSeparator(strip);
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current);
         }
 
@@ -1080,6 +1090,7 @@ public sealed class TaskbarWindow : Form
         {
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
+            if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
             MeterStrip.Paint(g, strip, machine);
         }
 

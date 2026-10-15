@@ -1057,21 +1057,14 @@ public sealed class SettingsForm : Form
             "DPAPI. Because refresh tokens do not expire on their own, the strip stays live without " +
             "needing Antigravity open on this machine."));
 
-        var pro = Theme.Toggle("Show Gemini Pro quota pool (Pro)", antigravity.ShowPro);
-        pro.CheckedChanged += (_, _) => { antigravity.ShowPro = pro.Checked; Save(); AntigravityUsage.Refresh(); };
-        page.Controls.Add(pro);
-
-        var flash = Theme.Toggle("Show Gemini Flash quota pool (Flash)", antigravity.ShowFlash);
-        flash.CheckedChanged += (_, _) => { antigravity.ShowFlash = flash.Checked; Save(); AntigravityUsage.Refresh(); };
-        page.Controls.Add(flash);
-
-        var claude = Theme.Toggle("Show Claude / partner quota pool (Claude)", antigravity.ShowClaude);
-        claude.CheckedChanged += (_, _) => { antigravity.ShowClaude = claude.Checked; Save(); AntigravityUsage.Refresh(); };
-        page.Controls.Add(claude);
+        var weekly = Theme.Toggle("Show the seven-day limit", antigravity.ShowWeekly);
+        weekly.CheckedChanged += (_, _) => { antigravity.ShowWeekly = weekly.Checked; Save(); AntigravityUsage.Refresh(); };
+        page.Controls.Add(weekly);
 
         page.Controls.Add(Theme.Caption(
-            "The bar strip plots the three shared quota pools (Pro, Flash, Claude), while hovering " +
-            "over the strip lists every individual model and when its quota window resets."));
+            "Antigravity groups Gemini Pro and Gemini Flash into a single quota pool with a five-hour " +
+            "session limit and a seven-day weekly limit. Both are drawn under an '✦ Antigravity Pro·Flash' " +
+            "header in violet so they are immediately distinct from the Claude usage bars beside them."));
 
         var interval = Theme.Number(antigravity.RefreshSeconds, 15, 3600, 15);
         interval.ValueChanged += (_, _) => { antigravity.RefreshSeconds = (int)interval.Value; Save(); };

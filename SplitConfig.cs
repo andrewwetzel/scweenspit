@@ -246,14 +246,8 @@ public sealed class AntigravitySettings
     /// </summary>
     public int RefreshSeconds { get; set; } = 60;
 
-    /// <summary>Show the Gemini Pro quota pool.</summary>
-    public bool ShowPro { get; set; } = true;
-
-    /// <summary>Show the Gemini Flash quota pool.</summary>
-    public bool ShowFlash { get; set; } = true;
-
-    /// <summary>Show the Claude / third-party quota pool.</summary>
-    public bool ShowClaude { get; set; } = true;
+    /// <summary>Show the seven-day Gemini (Pro &amp; Flash) limit under the five-hour session one.</summary>
+    public bool ShowWeekly { get; set; } = true;
 }
 
 public sealed class MonitorLayout

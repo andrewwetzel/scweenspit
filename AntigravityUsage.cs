@@ -10,16 +10,19 @@ using System.Text.RegularExpressions;
 namespace ScweenSpit;
 
 /// <summary>
-/// Reads model quota limits from Antigravity for the strip the bar draws.
+/// Reads Gemini (Pro &amp; Flash) session and weekly quota limits from Antigravity for the strip
+/// the bar draws.
 ///
 /// Supports two ways of reading quotas (adapted from AntigravityQuota by Henrik-3 and
 /// antigravity-usage by skainguyen1412, both MIT licence — full notices in THIRD-PARTY-NOTICES.md):
 ///
-///   1. Direct Google Cloud Code API (`cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`)
+///   1. Direct Google Cloud Code API (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`)
 ///      using a Google OAuth refresh token (from "Sign in with Google" in Settings, or from
 ///      `~/.gemini/antigravity-cli/antigravity-oauth-token` when present). Because a Google OAuth
 ///      refresh token is long-lived, this works 24/7 even when Antigravity is completely closed on
-///      Windows or running on another machine (such as WSL / remote Linux).
+///      Windows or running on another machine (such as WSL / remote Linux), and provides both the
+///      5-hour session limit (`gemini-5h`) and the 7-day weekly limit (`gemini-weekly`) shared by
+///      Gemini Pro and Gemini Flash.
 ///
 ///   2. Local Antigravity language server (`127.0.0.1` Connect-RPC `GetUserStatus`) when the
 ///      Antigravity IDE is open locally and no Google sign-in has been configured.
@@ -42,6 +45,7 @@ public static class AntigravityUsage
     private const string CloudCodeBaseUrl = "https://cloudcode-pa.googleapis.com";
     private const string LoadCodeAssistPath = "/v1internal:loadCodeAssist";
     private const string OnboardUserPath = "/v1internal:onboardUser";
+    private const string RetrieveUserQuotaSummaryPath = "/v1internal:retrieveUserQuotaSummary";
     private const string FetchAvailableModelsPath = "/v1internal:fetchAvailableModels";
     private const string LoadCodeAssistBody =
         "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}}";
@@ -481,7 +485,7 @@ public static class AntigravityUsage
             : "tracking is on");
 
         // 1. Check Google Cloud Code API (stored sign-in or CLI token file)
-        bool hasCliFile = ReadCliTokens(out var cliAccess, out var cliRefresh, out var cliExpiry);
+        bool hasCliFile = ReadCliTokens(out _, out var cliRefresh, out _);
         report.AppendLine(
             !string.IsNullOrWhiteSpace(refreshToken)
                 ? $"google sign-in: signed in{(email is not null ? $" as {email}" : "")} (refresh token stored, {refreshToken.Length} chars)"
@@ -507,29 +511,22 @@ public static class AntigravityUsage
                     $"cloud code project: {resolvedProject ?? "(default)"}" +
                     (tierName is not null ? $"  (tier: {tierName})" : ""));
 
-                var modelsReply = QueryCloudCodeModels(tokenResult.Value.AccessToken, resolvedProject);
-                report.AppendLine(modelsReply is null
-                    ? "cloud code models: no reply from cloudcode-pa.googleapis.com"
-                    : $"cloud code models: HTTP {modelsReply.Value.Status}");
+                var summaryReply = QueryCloudCodeQuotaSummary(tokenResult.Value.AccessToken, resolvedProject);
+                report.AppendLine(summaryReply is null
+                    ? "quota summary: no reply from cloudcode-pa.googleapis.com"
+                    : $"quota summary: HTTP {summaryReply.Value.Status}");
 
-                if (modelsReply is { Status: 200 })
+                if (summaryReply is { Status: 200 })
                 {
-                    var parsed = ParseCloudCode(modelsReply.Value.Body, showPro: true, showFlash: true, showClaude: true);
-                    if (parsed.Error is not null)
+                    var parsed = ParseQuotaSummary(summaryReply.Value.Body, showWeekly: true);
+                    if (parsed.Error is null && parsed.Limits.Count > 0)
                     {
-                        report.AppendLine($"reading: {parsed.Error}");
-                    }
-                    else
-                    {
-                        report.AppendLine($"pools: {parsed.Limits.Count} — " +
+                        report.AppendLine("gemini (pro & flash): " +
                             string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
-                        if (parsed.Details is { Count: > 0 })
-                        {
-                            report.AppendLine("models: " +
-                                string.Join(", ", parsed.Details.Select(m => $"{m.Label} {m.Percent}%")));
-                        }
                         return report.ToString().TrimEnd();
                     }
+                    if (parsed.Error is not null)
+                        report.AppendLine($"summary reading: {parsed.Error}");
                 }
             }
         }
@@ -563,7 +560,7 @@ public static class AntigravityUsage
                     report.AppendLine($"probe {scheme}://127.0.0.1:{port}: HTTP {reply.Value.Status}");
                     if (reply.Value.Status != 200) continue;
 
-                    var parsed = ParseLocal(reply.Value.Body, showPro: true, showFlash: true, showClaude: true, out var plan);
+                    var parsed = ParseLocal(reply.Value.Body, out var plan);
                     if (plan is not null) report.AppendLine($"plan: {plan}");
 
                     if (parsed.Error is not null)
@@ -572,13 +569,8 @@ public static class AntigravityUsage
                     }
                     else
                     {
-                        report.AppendLine($"pools: {parsed.Limits.Count} — " +
+                        report.AppendLine("gemini (pro & flash): " +
                             string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
-                        if (parsed.Details is { Count: > 0 })
-                        {
-                            report.AppendLine("models: " +
-                                string.Join(", ", parsed.Details.Select(m => $"{m.Label} {m.Percent}%")));
-                        }
                     }
                     return report.ToString().TrimEnd();
                 }
@@ -608,8 +600,6 @@ public static class AntigravityUsage
             int seconds;
             lock (gate) seconds = Math.Clamp(settings?.RefreshSeconds ?? 60, 15, 3600);
 
-            // When waiting for Antigravity to be launched (and not signed in to Google), check
-            // every 15 seconds so the strip comes alive shortly after the IDE opens.
             if (current is { Standby: true }) seconds = Math.Min(seconds, 15);
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -623,25 +613,23 @@ public static class AntigravityUsage
 
     private static void Poll()
     {
-        bool showPro, showFlash, showClaude;
+        bool showWeekly;
         ServerEndpoint? cached;
         string? storedRefresh, projectId;
 
         lock (gate)
         {
             if (settings is not { Enabled: true }) return;
-            showPro = settings.ShowPro;
-            showFlash = settings.ShowFlash;
-            showClaude = settings.ShowClaude;
+            showWeekly = settings.ShowWeekly;
             cached = cachedEndpoint;
             storedRefresh = settings.RefreshToken;
             projectId = settings.ProjectId;
         }
 
         // 1. Primary path when signed in (or when ~/.gemini/antigravity-cli/antigravity-oauth-token
-        //    is present): query Google's Cloud Code API directly. Works 24/7 without Antigravity
-        //    running locally.
-        var cloudReading = PollCloudCode(storedRefresh, projectId, showPro, showFlash, showClaude);
+        //    is present): query Google's Cloud Code API directly for the Gemini (Pro & Flash)
+        //    5-hour session and 7-day weekly limits. Works 24/7 without Antigravity running locally.
+        var cloudReading = PollCloudCode(storedRefresh, projectId, showWeekly);
         if (cloudReading is { Error: null })
         {
             lastGood = cloudReading;
@@ -657,7 +645,6 @@ public static class AntigravityUsage
             lock (gate) cachedEndpoint = null;
             if (cloudReading is not null)
             {
-                // Cloud Code was configured and returned an explicit error (and no local IDE is open).
                 if (lastGood is { Limits.Count: > 0 })
                     PublishStandby();
                 else
@@ -674,7 +661,7 @@ public static class AntigravityUsage
         {
             if (QueryPort(cached.Scheme, cached.Port, cached.CsrfToken) is { Status: 200 } fastReply)
             {
-                var fastReading = ParseLocal(fastReply.Body, showPro, showFlash, showClaude, out _);
+                var fastReading = ParseLocal(fastReply.Body, out _);
                 if (fastReading.Error is null)
                 {
                     lastGood = fastReading;
@@ -696,7 +683,7 @@ public static class AntigravityUsage
                     if (QueryPort(scheme, port, candidate.CsrfToken) is not { Status: 200 } reply)
                         continue;
 
-                    var reading = ParseLocal(reply.Body, showPro, showFlash, showClaude, out _);
+                    var reading = ParseLocal(reply.Body, out _);
                     if (reading.Error is not null) continue;
 
                     lock (gate) cachedEndpoint = new ServerEndpoint(candidate.Pid, port, scheme, candidate.CsrfToken);
@@ -710,8 +697,7 @@ public static class AntigravityUsage
         PublishStandby();
     }
 
-    private static UsageReading? PollCloudCode(string? storedRefresh, string? projectId,
-                                               bool showPro, bool showFlash, bool showClaude)
+    private static UsageReading? PollCloudCode(string? storedRefresh, string? projectId, bool showWeekly)
     {
         var refreshToken = Secret.Unprotect(storedRefresh);
         string? cliAccess = null;
@@ -749,22 +735,30 @@ public static class AntigravityUsage
             }
         }
 
-        var reply = QueryCloudCodeModels(accessToken, projectId);
+        var reply = QueryCloudCodeQuotaSummary(accessToken, projectId);
         if (reply is { Status: 401 })
         {
-            // Access token expired early — force a refresh once.
             accessToken = GetOrRefreshAccessToken(refreshToken, null, null, forceRefresh: true);
             if (accessToken is not null)
-                reply = QueryCloudCodeModels(accessToken, projectId);
+                reply = QueryCloudCodeQuotaSummary(accessToken, projectId);
         }
 
-        if (reply is null)
+        if (reply is { Status: 200 })
+        {
+            var parsed = ParseQuotaSummary(reply.Value.Body, showWeekly);
+            if (parsed.Error is null && parsed.Limits.Count > 0)
+                return parsed;
+        }
+
+        // Fallback to fetchAvailableModels if retrieveUserQuotaSummary returned no buckets.
+        var modelsReply = QueryCloudCodeModels(accessToken!, projectId);
+        if (modelsReply is null)
             return new UsageReading([], "Google Cloud Code unreachable", false, Transient: true);
 
-        if (reply.Value.Status != 200)
-            return new UsageReading([], $"Cloud Code HTTP {reply.Value.Status}", false, Transient: reply.Value.Status >= 500);
+        if (modelsReply.Value.Status != 200)
+            return new UsageReading([], $"Cloud Code HTTP {modelsReply.Value.Status}", false, Transient: modelsReply.Value.Status >= 500);
 
-        return ParseCloudCode(reply.Value.Body, showPro, showFlash, showClaude);
+        return ParseCloudCodeModelsFallback(modelsReply.Value.Body);
     }
 
     private static string? GetOrRefreshAccessToken(string refreshToken, string? cliAccess,
@@ -870,7 +864,6 @@ public static class AntigravityUsage
             if (ExtractProjectId(root) is { Length: > 0 } proj)
                 return proj;
 
-            // If loadCodeAssist did not return a project ID, try onboardUser once.
             string tierId = "LEGACY";
             if (root.TryGetProperty("paidTier", out var pt) && pt.ValueKind == JsonValueKind.Object && Text(pt, "id") is { } ptId)
                 tierId = ptId;
@@ -922,6 +915,14 @@ public static class AntigravityUsage
         return null;
     }
 
+    private static (int Status, string Body)? QueryCloudCodeQuotaSummary(string accessToken, string? projectId)
+    {
+        string body = string.IsNullOrWhiteSpace(projectId)
+            ? "{}"
+            : JsonSerializer.Serialize(new { project = projectId });
+        return PostCloudCode(accessToken, RetrieveUserQuotaSummaryPath, body);
+    }
+
     private static (int Status, string Body)? QueryCloudCodeModels(string accessToken, string? projectId)
     {
         string body = string.IsNullOrWhiteSpace(projectId)
@@ -949,12 +950,6 @@ public static class AntigravityUsage
         }
     }
 
-    /// <summary>
-    /// When Antigravity is not running and no Cloud Code reading is available, keep the last
-    /// reading on screen (dropping any bucket whose reset time has already passed to 0%) and mark
-    /// it as standby for the tooltip; if we have never seen a reading this session, show a quiet
-    /// "standby" placeholder instead of an error.
-    /// </summary>
     private static void PublishStandby()
     {
         if (lastGood is { Limits.Count: > 0 } previous)
@@ -1257,8 +1252,77 @@ public static class AntigravityUsage
         }
     }
 
-    /// <summary>Parses the `fetchAvailableModels` response from `cloudcode-pa.googleapis.com`.</summary>
-    private static UsageReading ParseCloudCode(string body, bool showPro, bool showFlash, bool showClaude)
+    /// <summary>
+    /// Parses `/v1internal:retrieveUserQuotaSummary`, extracting the 5-hour session limit
+    /// (`gemini-5h`) and 7-day weekly limit (`gemini-weekly`) shared by Gemini Pro and Flash.
+    /// Deliberately ignores the third-party Claude/GPT group so the Antigravity strip only ever
+    /// shows Gemini Pro &amp; Flash limits.
+    /// </summary>
+    private static UsageReading ParseQuotaSummary(string body, bool showWeekly)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("groups", out var groups) || groups.ValueKind != JsonValueKind.Array)
+                return new UsageReading([], "Unexpected quota summary reply", false);
+
+            UsageLimit? session = null;
+            UsageLimit? weekly = null;
+
+            foreach (var group in groups.EnumerateArray())
+            {
+                if (group.ValueKind != JsonValueKind.Object) continue;
+
+                var groupName = Text(group, "displayName") ?? "";
+                bool isGeminiGroup = groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase);
+
+                if (!group.TryGetProperty("buckets", out var buckets) || buckets.ValueKind != JsonValueKind.Array)
+                    continue;
+
+                foreach (var bucket in buckets.EnumerateArray())
+                {
+                    if (bucket.ValueKind != JsonValueKind.Object) continue;
+
+                    var bucketId = Text(bucket, "bucketId") ?? "";
+                    var window = Text(bucket, "window") ?? "";
+
+                    // Only consider buckets from the Gemini (Pro & Flash) group.
+                    if (!isGeminiGroup && !bucketId.StartsWith("gemini", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    int usedPercent = ReadRemainingAsUsedPercent(bucket);
+                    var resetsAt = Moment(Text(bucket, "resetTime"));
+
+                    if (bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase)
+                        || window.Equals("5h", StringComparison.OrdinalIgnoreCase))
+                    {
+                        session = new UsageLimit("Session", usedPercent, resetsAt);
+                    }
+                    else if (bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase)
+                             || window.Equals("weekly", StringComparison.OrdinalIgnoreCase))
+                    {
+                        weekly = new UsageLimit("Weekly", usedPercent, resetsAt);
+                    }
+                }
+            }
+
+            var limits = new List<UsageLimit>();
+            if (session is not null) limits.Add(session);
+            if (showWeekly && weekly is not null) limits.Add(weekly);
+
+            return new UsageReading(limits, null, false);
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"antigravity quota summary unreadable: {ex.Message}");
+            return new UsageReading([], "Unexpected reply from Cloud Code API", false);
+        }
+    }
+
+    /// <summary>Fallback parser for `fetchAvailableModels` (only carries the 5h Gemini session window).</summary>
+    private static UsageReading ParseCloudCodeModelsFallback(string body)
     {
         try
         {
@@ -1268,67 +1332,32 @@ public static class AntigravityUsage
             if (!root.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Object)
                 return new UsageReading([], "Unexpected reply from Cloud Code API", false);
 
-            var byLabel = new Dictionary<string, UsageLimit>(StringComparer.OrdinalIgnoreCase);
-
+            var geminiModels = new List<UsageLimit>();
             foreach (var prop in models.EnumerateObject())
             {
                 var modelId = prop.Name;
                 var item = prop.Value;
                 if (item.ValueKind != JsonValueKind.Object) continue;
-                if (!ShouldIncludeCloudModel(modelId, item, out var label)) continue;
-                if (!TryReadQuotaLimit(item, label, out var limit)) continue;
-
-                // Multiple internal model IDs can share a displayName (e.g. gemini-3.1-pro-high and
-                // gemini-pro-agent); keep the entry with the highest used % / earliest reset time.
-                if (!byLabel.TryGetValue(label, out var existing)
-                    || limit.Percent > existing.Percent
-                    || (limit.Percent == existing.Percent
-                        && (limit.ResetsAt ?? DateTimeOffset.MaxValue) < (existing.ResetsAt ?? DateTimeOffset.MaxValue)))
-                {
-                    byLabel[label] = limit;
-                }
+                if (!modelId.StartsWith("gemini", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!TryReadQuotaInfo(item, modelId, out var limit)) continue;
+                geminiModels.Add(limit);
             }
 
-            var allModels = byLabel.Values
-                .OrderBy(m => IsProModel(m.Label) ? 0 : IsFlashModel(m.Label) ? 1 : 2)
-                .ThenBy(m => m.Label, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var limits = new List<UsageLimit>();
+            if (PickPool("Session", geminiModels) is { } session)
+                limits.Add(session);
 
-            return BuildReadingFromModels(allModels, showPro, showFlash, showClaude);
+            return new UsageReading(limits, null, false);
         }
         catch (Exception ex)
         {
-            Log.Write($"antigravity cloud code reply unreadable: {ex.Message}");
+            Log.Write($"antigravity cloud code fallback unreadable: {ex.Message}");
             return new UsageReading([], "Unexpected reply from Cloud Code API", false);
         }
     }
 
-    private static bool ShouldIncludeCloudModel(string modelId, JsonElement model, out string label)
-    {
-        label = (Text(model, "displayName") ?? Text(model, "label") ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(label)) return false;
-
-        if (modelId.StartsWith("chat_", StringComparison.OrdinalIgnoreCase)
-            || modelId.StartsWith("tab_", StringComparison.OrdinalIgnoreCase)
-            || modelId.StartsWith("rev", StringComparison.OrdinalIgnoreCase)
-            || modelId.Contains("image", StringComparison.OrdinalIgnoreCase)
-            || modelId.Contains("mquery", StringComparison.OrdinalIgnoreCase)
-            || modelId.Contains("lite", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (label.Contains("Lite", StringComparison.OrdinalIgnoreCase)
-            || label.Contains("Image", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
     /// <summary>Parses the `GetUserStatus` response from the local Antigravity language server.</summary>
-    private static UsageReading ParseLocal(string body, bool showPro, bool showFlash, bool showClaude, out string? plan)
+    private static UsageReading ParseLocal(string body, out string? plan)
     {
         plan = null;
         try
@@ -1345,7 +1374,7 @@ public static class AntigravityUsage
                 plan = Text(planInfo, "planName") ?? Text(planInfo, "teamsTier");
             }
 
-            var allModels = new List<UsageLimit>();
+            var geminiModels = new List<UsageLimit>();
 
             if (status.TryGetProperty("cascadeModelConfigData", out var cascade)
                 && cascade.ValueKind == JsonValueKind.Object
@@ -1356,12 +1385,18 @@ public static class AntigravityUsage
                 {
                     var label = Text(item, "label")?.Trim();
                     if (string.IsNullOrWhiteSpace(label)) continue;
-                    if (TryReadQuotaLimit(item, label!, out var limit))
-                        allModels.Add(limit);
+                    if (!IsGeminiProOrFlash(label!)) continue;
+
+                    if (TryReadQuotaInfo(item, label!, out var limit))
+                        geminiModels.Add(limit);
                 }
             }
 
-            return BuildReadingFromModels(allModels, showPro, showFlash, showClaude);
+            var limits = new List<UsageLimit>();
+            if (PickPool("Session", geminiModels) is { } session)
+                limits.Add(session);
+
+            return new UsageReading(limits, null, false);
         }
         catch (Exception ex)
         {
@@ -1370,28 +1405,36 @@ public static class AntigravityUsage
         }
     }
 
-    private static bool TryReadQuotaLimit(JsonElement item, string label, out UsageLimit limit)
+    private static bool TryReadQuotaInfo(JsonElement item, string label, out UsageLimit limit)
     {
         limit = default!;
         if (!item.TryGetProperty("quotaInfo", out var quota) || quota.ValueKind != JsonValueKind.Object)
             return false;
 
+        int usedPercent = ReadRemainingAsUsedPercent(quota);
+        var resetsAt = Moment(Text(quota, "resetTime"));
+        limit = new UsageLimit(label, usedPercent, resetsAt);
+        return true;
+    }
+
+    private static int ReadRemainingAsUsedPercent(JsonElement quotaOrBucket)
+    {
         double remaining;
-        bool exhausted = quota.TryGetProperty("isExhausted", out var exh)
+        bool exhausted = quotaOrBucket.TryGetProperty("isExhausted", out var exh)
                       && exh.ValueKind == JsonValueKind.True;
 
         if (exhausted)
         {
             remaining = 0.0;
         }
-        else if (quota.TryGetProperty("remainingFraction", out var fracEl) && Number(fracEl, out double frac))
+        else if (quotaOrBucket.TryGetProperty("remainingFraction", out var fracEl) && Number(fracEl, out double frac))
         {
             remaining = Math.Clamp(frac, 0.0, 1.0);
         }
-        else if (quota.TryGetProperty("resetTime", out _))
+        else if (quotaOrBucket.TryGetProperty("resetTime", out _))
         {
-            // Protobuf JSON omits numeric fields when their value is 0: a model with an
-            // active resetTime and no remainingFraction has 0 remaining (100% used).
+            // Protobuf JSON omits numeric fields when their value is 0: a bucket with an active
+            // resetTime and no remainingFraction has 0 remaining (100% used).
             remaining = 0.0;
         }
         else
@@ -1399,35 +1442,7 @@ public static class AntigravityUsage
             remaining = 1.0;
         }
 
-        int usedPercent = (int)Math.Round(Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0));
-        var resetsAt = Moment(Text(quota, "resetTime"));
-        limit = new UsageLimit(label, usedPercent, resetsAt);
-        return true;
-    }
-
-    private static UsageReading BuildReadingFromModels(List<UsageLimit> allModels,
-                                                       bool showPro, bool showFlash, bool showClaude)
-    {
-        // Group models into the three shared quota pools drawn on the bar: Pro, Flash, Claude.
-        var limits = new List<UsageLimit>();
-
-        if (showPro && PickPool("Pro", allModels.Where(m => IsProModel(m.Label))) is { } pro)
-            limits.Add(pro);
-
-        if (showFlash && PickPool("Flash", allModels.Where(m => IsFlashModel(m.Label))) is { } flash)
-            limits.Add(flash);
-
-        if (showClaude && PickPool("Claude", allModels.Where(m => IsClaudeOrPartnerModel(m.Label))) is { } claude)
-            limits.Add(claude);
-
-        // Fallback if future models use names outside those three families and at least one pool is enabled.
-        if (limits.Count == 0 && allModels.Count > 0 && (showPro || showFlash || showClaude))
-        {
-            foreach (var m in allModels.Take(3))
-                limits.Add(m with { Label = ShortLabel(m.Label) });
-        }
-
-        return new UsageReading(limits, null, false, Details: allModels);
+        return (int)Math.Round(Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0));
     }
 
     private static UsageLimit? PickPool(string poolName, IEnumerable<UsageLimit> matches)
@@ -1435,8 +1450,6 @@ public static class AntigravityUsage
         var list = matches.ToList();
         if (list.Count == 0) return null;
 
-        // Models in the same family share a quota pool; pick the highest used percentage (and
-        // earliest reset time on a tie) so the bar reflects the tightest constraint in that pool.
         var chosen = list
             .OrderByDescending(m => m.Percent)
             .ThenBy(m => m.ResetsAt ?? DateTimeOffset.MaxValue)
@@ -1445,26 +1458,14 @@ public static class AntigravityUsage
         return new UsageLimit(poolName, chosen.Percent, chosen.ResetsAt);
     }
 
-    private static bool IsProModel(string label) =>
-        label.Contains("Pro", StringComparison.OrdinalIgnoreCase) && !IsClaudeOrPartnerModel(label);
-
-    private static bool IsFlashModel(string label) =>
-        label.Contains("Flash", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsClaudeOrPartnerModel(string label) =>
-        label.Contains("Claude", StringComparison.OrdinalIgnoreCase)
-        || label.Contains("Sonnet", StringComparison.OrdinalIgnoreCase)
-        || label.Contains("Opus", StringComparison.OrdinalIgnoreCase)
-        || label.Contains("Haiku", StringComparison.OrdinalIgnoreCase)
-        || label.Contains("GPT", StringComparison.OrdinalIgnoreCase);
-
-    private static string ShortLabel(string label)
-    {
-        var trimmed = label.Replace("Gemini ", "", StringComparison.OrdinalIgnoreCase)
-                           .Replace("Claude ", "", StringComparison.OrdinalIgnoreCase)
-                           .Trim();
-        return trimmed.Length <= 7 ? trimmed : trimmed[..7].TrimEnd();
-    }
+    private static bool IsGeminiProOrFlash(string label) =>
+        (label.Contains("Gemini", StringComparison.OrdinalIgnoreCase)
+         || label.Contains("Pro", StringComparison.OrdinalIgnoreCase)
+         || label.Contains("Flash", StringComparison.OrdinalIgnoreCase))
+        && !label.Contains("Claude", StringComparison.OrdinalIgnoreCase)
+        && !label.Contains("Sonnet", StringComparison.OrdinalIgnoreCase)
+        && !label.Contains("Opus", StringComparison.OrdinalIgnoreCase)
+        && !label.Contains("GPT", StringComparison.OrdinalIgnoreCase);
 
     private static bool Number(JsonElement e, out double value)
     {
