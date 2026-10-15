@@ -717,13 +717,16 @@ public static class ClaudeUsage
             var root = doc.RootElement;
             var limits = new List<UsageLimit>();
 
-            if (Window(root, "five_hour", "utilization") is { } session)
+            var sessionWindow = Window(root, "five_hour", "utilization", "session");
+            var weeklyWindow = Window(root, "seven_day", "utilization", "weekly_all");
+
+            if (sessionWindow is { } session)
                 limits.Add(session with { Label = "Session" });
 
-            if (weekly && Window(root, "seven_day", "utilization") is { } week)
+            if (weekly && weeklyWindow is { } week)
                 limits.Add(week with { Label = "Weekly" });
 
-            if (model && ScopedModel(root) is { } scoped)
+            if (model && ScopedModel(root, weeklyWindow?.ResetsAt) is { } scoped)
                 limits.Add(scoped);
 
             return new UsageReading(limits, null, false);
@@ -736,7 +739,7 @@ public static class ClaudeUsage
     }
 
     /// <summary>A named limit bucket, or null when this account does not have one.</summary>
-    private static UsageLimit? Window(JsonElement root, string name, string field)
+    private static UsageLimit? Window(JsonElement root, string name, string field, string? limitsKind = null)
     {
         if (!root.TryGetProperty(name, out var bucket) || bucket.ValueKind != JsonValueKind.Object)
             return null;
@@ -744,7 +747,27 @@ public static class ClaudeUsage
         if (!bucket.TryGetProperty(field, out var used) || !Number(used, out double percent))
             return null;
 
-        return new UsageLimit(name, Clamp(percent), Moment(Text(bucket, "resets_at")));
+        var resetsAt = Moment(Text(bucket, "resets_at") ?? Text(bucket, "reset_at"));
+        if (resetsAt is null && limitsKind is not null)
+            resetsAt = FindLimitReset(root, limitsKind);
+
+        return new UsageLimit(name, Clamp(percent), resetsAt);
+    }
+
+    private static DateTimeOffset? FindLimitReset(JsonElement root, string kind)
+    {
+        if (!root.TryGetProperty("limits", out var list) || list.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var item in list.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            if (!string.Equals(Text(item, "kind"), kind, StringComparison.OrdinalIgnoreCase)) continue;
+            if (Moment(Text(item, "resets_at") ?? Text(item, "reset_at")) is { } when)
+                return when;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -752,7 +775,7 @@ public static class ClaudeUsage
     /// `limits` list, whose entry names the model it is scoped to — so read that when it is there
     /// and the bar follows whichever model the limit applies to, rather than naming a fixed one.
     /// </summary>
-    private static UsageLimit? ScopedModel(JsonElement root)
+    private static UsageLimit? ScopedModel(JsonElement root, DateTimeOffset? fallbackWeeklyReset)
     {
         if (root.TryGetProperty("limits", out var list) && list.ValueKind == JsonValueKind.Array)
         {
@@ -765,12 +788,13 @@ public static class ClaudeUsage
                 if (string.IsNullOrWhiteSpace(name)) continue;
                 if (!limit.TryGetProperty("percent", out var pct) || !Number(pct, out double percent)) continue;
 
-                return new UsageLimit(name!, Clamp(percent), Moment(Text(limit, "resets_at")));
+                var resetsAt = Moment(Text(limit, "resets_at") ?? Text(limit, "reset_at")) ?? fallbackWeeklyReset;
+                return new UsageLimit(name!, Clamp(percent), resetsAt);
             }
         }
 
         return Window(root, "seven_day_sonnet", "utilization") is { } legacy
-            ? legacy with { Label = "Sonnet" }
+            ? legacy with { Label = "Sonnet", ResetsAt = legacy.ResetsAt ?? fallbackWeeklyReset }
             : null;
     }
 
@@ -797,9 +821,22 @@ public static class ClaudeUsage
         var left = when - DateTimeOffset.Now;
         if (left <= TimeSpan.Zero) return "resets any moment";
 
-        return left.TotalHours >= 48 ? $"resets in {(int)left.TotalDays}d {left.Hours}h"
-             : left.TotalHours >= 1  ? $"resets in {(int)left.TotalHours}h {left.Minutes:00}m"
-             : $"resets in {Math.Max(1, (int)left.TotalMinutes)}m";
+        return left.TotalDays >= 1  ? $"resets in {(int)left.TotalDays}d {left.Hours}h"
+             : left.TotalHours >= 1 ? $"resets in {(int)left.TotalHours}h {left.Minutes:00}m"
+             : $"resets in {Math.Max(1, (int)Math.Ceiling(left.TotalMinutes))}m";
+    }
+
+    /// <summary>Compact time-to-reset ("2h 21m", "5d 18h", "42m") for drawing directly on a bar row.</summary>
+    public static string ShortCountdown(DateTimeOffset? resets)
+    {
+        if (resets is not { } when) return "—";
+
+        var left = when - DateTimeOffset.Now;
+        if (left <= TimeSpan.Zero) return "now";
+
+        return left.TotalDays >= 1  ? $"{(int)left.TotalDays}d {left.Hours}h"
+             : left.TotalHours >= 1 ? $"{(int)left.TotalHours}h {left.Minutes:00}m"
+             : $"{Math.Max(1, (int)Math.Ceiling(left.TotalMinutes))}m";
     }
 
     // ---- transport ---------------------------------------------------------

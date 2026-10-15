@@ -522,7 +522,10 @@ public static class AntigravityUsage
                     if (parsed.Error is null && parsed.Limits.Count > 0)
                     {
                         report.AppendLine("gemini (pro & flash): " +
-                            string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
+                            string.Join(", ", parsed.Limits.Select(l =>
+                                ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } rst
+                                    ? $"{l.Label} {l.Percent}% ({rst})"
+                                    : $"{l.Label} {l.Percent}%")));
                         return report.ToString().TrimEnd();
                     }
                     if (parsed.Error is not null)
@@ -570,7 +573,10 @@ public static class AntigravityUsage
                     else
                     {
                         report.AppendLine("gemini (pro & flash): " +
-                            string.Join(", ", parsed.Limits.Select(l => $"{l.Label} {l.Percent}%")));
+                            string.Join(", ", parsed.Limits.Select(l =>
+                                ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } rst
+                                    ? $"{l.Label} {l.Percent}% ({rst})"
+                                    : $"{l.Label} {l.Percent}%")));
                     }
                     return report.ToString().TrimEnd();
                 }

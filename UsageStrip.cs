@@ -18,7 +18,7 @@ internal static class UsageStrip
     private static readonly Color AntigravityTitleColour = Color.FromArgb(196, 160, 255);
 
     /// <summary>Room the strip needs along the bar.</summary>
-    public static int Extent(bool vertical) => MeterStrip.Extent(vertical);
+    public static int Extent(bool vertical) => MeterStrip.UsageExtent(vertical);
 
     public static void Paint(Graphics g, Rectangle area, UsageReading? reading)
     {
@@ -52,7 +52,8 @@ internal static class UsageStrip
                 l.Percent,
                 detail,
                 LabelColour: highlightFirst ? ClaudeTitleColour : null,
-                BoldLabel: highlightFirst));
+                BoldLabel: highlightFirst,
+                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
         }
 
         MeterStrip.Paint(
@@ -83,7 +84,11 @@ internal static class UsageStrip
                 ? $"{l.Label}: {l.Percent}%  ({left})"
                 : $"{l.Label}: {l.Percent}%";
 
-            return new Meter(displayLabel, l.Percent, detail);
+            return new Meter(
+                displayLabel,
+                l.Percent,
+                detail,
+                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt));
         }).ToList();
 
         MeterStrip.Paint(
