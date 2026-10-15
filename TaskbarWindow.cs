@@ -89,6 +89,7 @@ public sealed class TaskbarWindow : Form
     private bool hoveredUsage;
     private bool hoveredAntigravity;
     private bool hoveredRemoteChats;
+    private string? hoveredRemoteChatId;
     private bool hoveredBambu;
     private bool hoveredMachine;
     private long lastStatusPoll, lastMachinePoll;
@@ -707,11 +708,16 @@ public sealed class TaskbarWindow : Form
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
         bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
         bool remoteChats = RemoteChatsVisible && RemoteChatsArea.Contains(e.Location);
+        RemoteChatItem? remoteChatCircle = remoteChats
+            ? UsageStrip.HitTestRemoteChat(RemoteChatsArea, RemoteChatUsage.Current, e.Location, Math.Clamp(settings.TrackerMaxRows, 1, 6))
+            : null;
+        string? remoteChatCircleId = remoteChatCircle?.Id;
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
         if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
             && antigravity == hoveredAntigravity && remoteChats == hoveredRemoteChats
+            && remoteChatCircleId == hoveredRemoteChatId
             && bambu == hoveredBambu && load == hoveredMachine && start == hoveredStart) return;
 
         hovered = under;
@@ -719,6 +725,7 @@ public sealed class TaskbarWindow : Form
         hoveredUsage = usage;
         hoveredAntigravity = antigravity;
         hoveredRemoteChats = remoteChats;
+        hoveredRemoteChatId = remoteChatCircleId;
         hoveredBambu = bambu;
         hoveredMachine = load;
         hoveredStart = start;
@@ -732,6 +739,7 @@ public sealed class TaskbarWindow : Form
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
                             : bambu ? UsageStrip.BambuTip(BambuUsage.Current)
+                            : remoteChatCircle is not null ? UsageStrip.RemoteChatItemTip(remoteChatCircle)
                             : remoteChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current)
                             : antigravity ? UsageStrip.AntigravityTip(AntigravityUsage.Current)
                             : usage ? UsageStrip.Tip(ClaudeUsage.Current)
@@ -817,6 +825,7 @@ public sealed class TaskbarWindow : Form
         hoveredUsage = false;
         hoveredAntigravity = false;
         hoveredRemoteChats = false;
+        hoveredRemoteChatId = null;
         hoveredBambu = false;
         hoveredMachine = false;
 
@@ -862,6 +871,13 @@ public sealed class TaskbarWindow : Form
                     SettingsRequested.Invoke("Remote chats");
                 else
                     MenuRequested?.Invoke(Cursor.Position);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left
+                && UsageStrip.HitTestRemoteChat(RemoteChatsArea, RemoteChatUsage.Current, e.Location, Math.Clamp(settings.TrackerMaxRows, 1, 6)) is { } clickedChat)
+            {
+                RemoteChatUsage.OpenChat(clickedChat);
                 return;
             }
 
@@ -1292,7 +1308,7 @@ public sealed class TaskbarWindow : Form
             var strip = RemoteChatsArea;
             if (hoveredRemoteChats) g.FillRectangle(hot, strip);
             if (UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
-            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows);
+            UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, hoveredRemoteChatId);
         }
 
         if (BambuVisible)

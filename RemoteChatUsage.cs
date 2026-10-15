@@ -407,6 +407,18 @@ public static class RemoteChatUsage
         if (settings is null) return false;
         bool changed = false;
 
+        // If a previous poll fell back to the generic "remote:Claude" row before environment metadata
+        // was resolved, remove that placeholder once real named Claude servers are discovered.
+        bool hasNamedClaudeServer = liveByRowId.Values.Any(b =>
+            b.Service == RemoteChatService.Claude &&
+            !string.Equals(b.Server, "remote", StringComparison.OrdinalIgnoreCase));
+        if (hasNamedClaudeServer && !liveByRowId.ContainsKey("remote:Claude"))
+        {
+            int removed = settings.Rows.RemoveAll(r =>
+                string.Equals(r.Id, "remote:Claude", StringComparison.OrdinalIgnoreCase));
+            if (removed > 0) changed = true;
+        }
+
         // Order newly discovered buckets by server name, then Claude before Antigravity.
         var orderedBuckets = liveByRowId.Values
             .OrderBy(b => b.Server, StringComparer.OrdinalIgnoreCase)
@@ -561,6 +573,13 @@ public static class RemoteChatUsage
                 }
             }
 
+            if (envsReply is not { Status: >= 200 and < 300 })
+            {
+                var v1Envs = GetAnthropicOAuth("/v1/environments", oauthToken, orgUuid);
+                if (v1Envs is { Status: >= 200 and < 300 } || envsReply is null)
+                    envsReply = v1Envs;
+            }
+
             if (sessionsReply is not { Status: >= 200 and < 300 })
             {
                 var v1Sessions = GetAnthropicOAuth("/v1/sessions", oauthToken, orgUuid);
@@ -580,6 +599,12 @@ public static class RemoteChatUsage
             if (envsReply is not { Status: >= 200 and < 300 })
             {
                 var keyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers", orgUuid);
+                if (keyEnvs is not { Status: >= 200 and < 300 })
+                {
+                    var altKeyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environments", orgUuid);
+                    if (altKeyEnvs is { Status: >= 200 and < 300 } || keyEnvs is null)
+                        keyEnvs = altKeyEnvs;
+                }
                 if (keyEnvs is not null && (envsReply is null || keyEnvs.Value.Status < 400))
                     envsReply = keyEnvs;
             }
@@ -669,20 +694,32 @@ public static class RemoteChatUsage
         try
         {
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("environments", out var envs)
-                || envs.ValueKind != JsonValueKind.Array)
+            JsonElement envs;
+            if (!doc.RootElement.TryGetProperty("environments", out envs) &&
+                !doc.RootElement.TryGetProperty("data", out envs))
+                return;
+
+            if (envs.ValueKind != JsonValueKind.Array)
                 return;
 
             foreach (var env in envs.EnumerateArray())
             {
                 if (env.ValueKind != JsonValueKind.Object) continue;
+
+                // Support both `/v1/environment_providers` (`kind: "bridge"`, `environment_id`, `bridge_info`)
+                // and `/v1/environments` (`config.type: "bridge"`, `id`, `config.machine_name`).
                 var kind = Text(env, "kind");
+                JsonElement cfgObj = default;
+                bool hasCfgObj = env.TryGetProperty("config", out cfgObj) && cfgObj.ValueKind == JsonValueKind.Object;
+                if (string.IsNullOrWhiteSpace(kind) && hasCfgObj)
+                    kind = Text(cfgObj, "type");
+
                 if (!string.Equals(kind, "bridge", StringComparison.OrdinalIgnoreCase)) continue;
 
                 var state = Text(env, "state");
                 bool activeEnv = string.Equals(state, "active", StringComparison.OrdinalIgnoreCase);
 
-                var envId = Text(env, "environment_id");
+                var envId = Text(env, "environment_id") ?? Text(env, "id");
                 if (string.IsNullOrWhiteSpace(envId)) continue;
 
                 string? machineName = null;
@@ -696,6 +733,13 @@ public static class RemoteChatUsage
                     directory = Text(bridge, "directory");
                     gitRepoUrl = Text(bridge, "git_repo_url");
                     online = Bool(bridge, "online");
+                }
+                else if (hasCfgObj)
+                {
+                    machineName = Text(cfgObj, "machine_name");
+                    directory = Text(cfgObj, "directory");
+                    gitRepoUrl = Text(cfgObj, "git_repo_url");
+                    online = activeEnv;
                 }
 
                 var envName = Text(env, "name");
@@ -1044,9 +1088,13 @@ public static class RemoteChatUsage
     {
         try
         {
+            string betaHeader = pathAndQuery.StartsWith("/v1/environments", StringComparison.OrdinalIgnoreCase)
+                ? "environments-2025-11-01,oauth-2025-04-20"
+                : AnthropicBetaHeader;
+
             using var req = new HttpRequestMessage(HttpMethod.Get, AnthropicApiBase + pathAndQuery);
             req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-            req.Headers.TryAddWithoutValidation("anthropic-beta", AnthropicBetaHeader);
+            req.Headers.TryAddWithoutValidation("anthropic-beta", betaHeader);
             req.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersionHeader);
             if (!string.IsNullOrWhiteSpace(orgUuid))
                 req.Headers.TryAddWithoutValidation("x-organization-uuid", orgUuid);

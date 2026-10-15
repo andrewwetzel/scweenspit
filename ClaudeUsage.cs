@@ -1362,10 +1362,16 @@ public static class ClaudeUsage
             }
         }
 
+        // `/v1/environments` rejects `ccr-byoc-2025-07-29` with HTTP 400 and requires only
+        // `environments-2025-11-01`.
+        string betaHeader = pathAndQuery.StartsWith("/v1/environments", StringComparison.OrdinalIgnoreCase)
+            ? "environments-2025-11-01"
+            : RemoteBetaHeader;
+
         var extraHeaders = new List<(string Name, string Value)>
         {
             ("anthropic-version", AnthropicVersionHeader),
-            ("anthropic-beta", RemoteBetaHeader),
+            ("anthropic-beta", betaHeader),
             ("Accept", "application/json"),
             ("Referer", Origin + "/code"),
         };
@@ -1373,23 +1379,35 @@ public static class ClaudeUsage
             extraHeaders.Add(("x-organization-uuid", org));
 
         // 1. Try claude.ai first (via curl.exe + SChannel) so rotated session cookies are adopted.
+        //    Verify the body is JSON (`{` or `[`) because Next.js on claude.ai can return HTTP 200
+        //    with `<!DOCTYPE html>` on routes it does not proxy.
         var reply = Get($"{Origin}{pathAndQuery}", activeKey, org, extraHeaders);
-        if (reply is not null && reply.Status < 400)
+        if (reply is not null && reply.Status < 400 && LooksLikeJson(reply.Body))
         {
             AdoptRotatedKey(reply, ref activeKey);
             return (reply.Status, reply.Body);
         }
 
-        // 2. Also try api.anthropic.com directly (which is never behind claude.ai's Cloudflare HTML
-        //    challenge and accepts the same sessionKey cookie + x-organization-uuid header).
+        // 2. Also try api.anthropic.com directly.
         var direct = Get($"{AnthropicApiOrigin}{pathAndQuery}", activeKey, org, extraHeaders);
-        if (direct is not null && (reply is null || direct.Status < 400 || !IsAuthRejection(reply)))
+        if (direct is not null && direct.Status < 400 && LooksLikeJson(direct.Body))
         {
-            if (direct.Status < 400) AdoptRotatedKey(direct, ref activeKey);
+            AdoptRotatedKey(direct, ref activeKey);
             return (direct.Status, direct.Body);
         }
 
+        if (reply is not null && reply.Status >= 400)
+            return (reply.Status, reply.Body);
+        if (direct is not null)
+            return (direct.Status, direct.Body);
         return reply is not null ? (reply.Status, reply.Body) : null;
+    }
+
+    private static bool LooksLikeJson(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return false;
+        var trimmed = body.TrimStart();
+        return trimmed.StartsWith('{') || trimmed.StartsWith('[');
     }
 
     /// <summary>
