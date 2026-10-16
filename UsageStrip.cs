@@ -464,13 +464,19 @@ internal static class UsageStrip
                 colWidths[c] += extraPerCol;
         }
 
-        // If the taskbar is narrower than intrinsicWidth on a cramped display, scale column widths down proportionally.
+        // Scale column widths proportionally to fit the actual strip width (whether dragged narrower or wider).
         int availInnerW = Math.Max(24, area.Width - outerPad * 2);
-        if (!vertical && totalColsW > availInnerW && totalColsW > 0)
+        bool measuringIntrinsic = g is null && hitPoint is null;
+        if (!vertical && !measuringIntrinsic && cols > 0)
         {
-            double shrink = Math.Max(0.5, (availInnerW - Math.Max(0, cols - 1) * colGap) / (double)colWidths.Sum());
-            for (int c = 0; c < cols; c++)
-                colWidths[c] = Math.Max(48, (int)Math.Floor(colWidths[c] * shrink));
+            int currentSum = colWidths.Sum();
+            int targetSum = Math.Max(cols * 32, availInnerW - Math.Max(0, cols - 1) * colGap);
+            if (currentSum > 0 && targetSum != currentSum)
+            {
+                double ratio = targetSum / (double)currentSum;
+                for (int c = 0; c < cols; c++)
+                    colWidths[c] = Math.Max(32, (int)Math.Round(colWidths[c] * ratio));
+            }
         }
 
         int meterStartRow = 0;
@@ -484,8 +490,8 @@ internal static class UsageStrip
                         ? $"{totalRunning} run · {totalChats}"
                         : $"{totalChats} live";
                 Color hdrCol = totalWaiting > 0 ? Color.FromArgb(255, 210, 115) : RemoteChatsTitleColour;
-                var hdrRow = new Rectangle(area.X + outerPad, top, Math.Min(availInnerW, contentW), rowHeight);
-                if (stripHovered)
+                var hdrRow = new Rectangle(area.X + outerPad, top, availInnerW, rowHeight);
+                if (stripHovered && availInnerW >= 120)
                 {
                     PaintRemoteKeyHeaderRow(g, hdrRow, subFont, scale);
                 }
@@ -547,10 +553,13 @@ internal static class UsageStrip
                     nameRect = new Rectangle(rowRect.X, rowRect.Y, nameW, rowHeight);
                     int subW = rowSubWidths[idx];
                     int trackX = rowRect.X + nameW + trackGap;
-                    int maxTrackW = Math.Max(12, rowRect.Right - trackX - trackGap - subW);
-                    int tightTrackW = Math.Min(rowCapWidths[idx], maxTrackW);
+                    int maxTrackW = Math.Max(10, rowRect.Right - trackX - trackGap - subW);
+                    int desiredCapW = area.Width > intrinsicWidth
+                        ? MeasureRowCapsuleWidth(rowData, idealDia, padX, maxCircles: Math.Max(10, rowData.Chats.Count))
+                        : rowCapWidths[idx];
+                    int tightTrackW = Math.Min(desiredCapW, maxTrackW);
                     trackRect = new Rectangle(trackX, rowRect.Y + (rowHeight - capsuleH) / 2, tightTrackW, capsuleH);
-                    subRect = new Rectangle(trackRect.Right + trackGap, rowRect.Y, subW + 4, rowHeight);
+                    subRect = new Rectangle(trackRect.Right + trackGap, rowRect.Y, Math.Max(8, rowRect.Right - (trackRect.Right + trackGap)), rowHeight);
                 }
 
                 if (PaintOrHitTestRowCircles(g, trackRect, rowData, hoveredChatId, hitPoint, overflowFont, out var rowHit))
@@ -929,16 +938,23 @@ internal static class UsageStrip
 
         g.SmoothingMode = previous;
 
+        int availTextW = Math.Max(8, row.Right - textX);
+        float titleW = g.MeasureString(title, titleFont).Width;
+        float tagW = !string.IsNullOrEmpty(tag) ? g.MeasureString(tag, tagFont).Width : 0f;
+        bool drawTag = !string.IsNullOrEmpty(tag) && availTextW >= titleW + tagW + 4f;
+
         using var left = new StringFormat
         {
             Alignment = StringAlignment.Near,
             LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter,
             FormatFlags = StringFormatFlags.NoWrap,
         };
+        int titleBoxW = drawTag ? Math.Max(8, availTextW - (int)Math.Ceiling(tagW) - 2) : availTextW;
         g.DrawString(title, titleFont, titleBrush,
-                     new Rectangle(textX, row.Y, row.Width - (textX - row.X), row.Height), left);
+                     new Rectangle(textX, row.Y, titleBoxW, row.Height), left);
 
-        if (!string.IsNullOrEmpty(tag))
+        if (drawTag)
         {
             using var right = new StringFormat
             {

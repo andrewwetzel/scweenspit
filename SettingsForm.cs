@@ -1098,10 +1098,34 @@ public sealed class SettingsForm : Form
             trackerRows.ValueChanged += (_, _) => { settings.TrackerMaxRows = (int)trackerRows.Value; Save(); };
             Row(page, "Max rows per tracker column (horizontal bar)", trackerRows);
             page.Controls.Add(Theme.Caption(
-                "3 puts 5 Bambu printers or multiple server rows into 2 side-by-side columns so every " +
-                "tracker matches the 3-row height. Lowering this to 2 wraps 3-row strips into 2 columns " +
-                "as well, making every bar and label much taller. Raising the bar's Thickness above " +
-                "50 px also scales up tracker fonts and bar thickness automatically."));
+                "You can also drag the dividers on the taskbar to resize individual trackers (e.g. making " +
+                "Computer usage smaller), or double-click a divider to reset it. " +
+                "3 rows per column puts 5 Bambu printers or multiple server rows into 2 side-by-side " +
+                "columns. Raising the bar's Thickness above 50 px also scales up tracker fonts and bars."));
+
+            bool anyCustomWidths = barSettings.RemoteChatsWidth is not null
+                || barSettings.UsageWidth is not null
+                || barSettings.AntigravityWidth is not null
+                || barSettings.BambuWidth is not null
+                || barSettings.MachineWidth is not null;
+
+            if (anyCustomWidths)
+            {
+                var resetWidths = Theme.Action("Reset dragged tracker sizes");
+                resetWidths.AutoSize = true;
+                resetWidths.Margin = new Padding(0, 4, 0, 4);
+                resetWidths.Click += (_, _) =>
+                {
+                    barSettings.RemoteChatsWidth = null;
+                    barSettings.UsageWidth = null;
+                    barSettings.AntigravityWidth = null;
+                    barSettings.BambuWidth = null;
+                    barSettings.MachineWidth = null;
+                    Save();
+                    BeginInvoke(ShowTaskbar);
+                };
+                page.Controls.Add(resetWidths);
+            }
         }
     }
 

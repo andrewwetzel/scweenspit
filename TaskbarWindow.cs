@@ -91,6 +91,11 @@ public sealed class TaskbarWindow : Form
     // Plasma task manager does, rather than always raising the same one.
     private readonly Dictionary<string, int> cycle = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
+    private enum TrackerSection { RemoteChats, Usage, Antigravity, Bambu, Machine }
+    private const int DividerGrabRadius = 5;
+    private const int MinTrackerExtent = 48;
+    private const int MaxTrackerExtent = 1200;
+
     private int hovered = -1, hoveredStatus = -1;
     private bool hoveredStart;
     private bool hoveredUsage;
@@ -99,6 +104,10 @@ public sealed class TaskbarWindow : Form
     private string? hoveredRemoteChatId;
     private bool hoveredBambu;
     private bool hoveredMachine;
+    private TrackerSection? hoveredDivider;
+    private TrackerSection? draggingDivider;
+    private int dragStartCoord;
+    private int dragStartExtent;
     private long lastStatusPoll, lastMachinePoll;
 
     /// <summary>The machine's last reading. Kept, because the processor figure is a rate: asking for
@@ -406,7 +415,7 @@ public sealed class TaskbarWindow : Form
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
-    private (int Usage, int Antigravity, int RemoteChats, int Bambu, int Machine) TrackerExtents()
+    private (int Usage, int Antigravity, int RemoteChats, int Bambu, int Machine) DefaultTrackerExtents()
     {
         int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
         int scale = Math.Clamp(settings.TrackerScale, 80, 300);
@@ -448,6 +457,155 @@ public sealed class TaskbarWindow : Form
         }
 
         return (u, a, r, b, m);
+    }
+
+    private (int Usage, int Antigravity, int RemoteChats, int Bambu, int Machine) TrackerExtents()
+    {
+        var (u, a, r, b, m) = DefaultTrackerExtents();
+
+        if (UsageVisible && settings.UsageWidth is > 0 and var uw)
+            u = Math.Clamp(uw, MinTrackerExtent, MaxTrackerExtent);
+        if (AntigravityVisible && settings.AntigravityWidth is > 0 and var aw)
+            a = Math.Clamp(aw, MinTrackerExtent, MaxTrackerExtent);
+        if (RemoteChatsVisible && settings.RemoteChatsWidth is > 0 and var rw)
+            r = Math.Clamp(rw, MinTrackerExtent, MaxTrackerExtent);
+        if (BambuVisible && settings.BambuWidth is > 0 and var bw)
+            b = Math.Clamp(bw, MinTrackerExtent, MaxTrackerExtent);
+        if (MachineVisible && settings.MachineWidth is > 0 and var mw)
+            m = Math.Clamp(mw, MinTrackerExtent, MaxTrackerExtent);
+
+        int barLength = Vertical ? Height : Width;
+        if (barLength > 0)
+        {
+            int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
+            int minLeft = (Leading + 1) * Slot;
+            int maxCluster = Math.Max(MinTrackerExtent, barLength - trayAndClock - minLeft);
+            int total = u + a + r + b + m;
+            if (total > maxCluster && total > 0)
+            {
+                double shrink = maxCluster / (double)total;
+                u = (int)Math.Round(u * shrink);
+                a = (int)Math.Round(a * shrink);
+                r = (int)Math.Round(r * shrink);
+                b = (int)Math.Round(b * shrink);
+                m = (int)Math.Round(m * shrink);
+            }
+        }
+
+        return (u, a, r, b, m);
+    }
+
+    private int ExtentForTracker(TrackerSection section) => section switch
+    {
+        TrackerSection.RemoteChats => RemoteChatsExtent,
+        TrackerSection.Usage => UsageExtent,
+        TrackerSection.Antigravity => AntigravityExtent,
+        TrackerSection.Bambu => BambuExtent,
+        _ => MachineExtent,
+    };
+
+    private Rectangle AreaForTracker(TrackerSection section) => section switch
+    {
+        TrackerSection.RemoteChats => RemoteChatsArea,
+        TrackerSection.Usage => UsageArea,
+        TrackerSection.Antigravity => AntigravityArea,
+        TrackerSection.Bambu => BambuArea,
+        _ => MachineArea,
+    };
+
+    private static string NameForTracker(TrackerSection section) => section switch
+    {
+        TrackerSection.RemoteChats => "Remote chats",
+        TrackerSection.Usage => "Claude usage",
+        TrackerSection.Antigravity => "Antigravity usage",
+        TrackerSection.Bambu => "Bambu printers",
+        _ => "Computer usage",
+    };
+
+    private int? CustomWidthForTracker(TrackerSection section) => section switch
+    {
+        TrackerSection.RemoteChats => settings.RemoteChatsWidth,
+        TrackerSection.Usage => settings.UsageWidth,
+        TrackerSection.Antigravity => settings.AntigravityWidth,
+        TrackerSection.Bambu => settings.BambuWidth,
+        _ => settings.MachineWidth,
+    };
+
+    private void SetCustomWidthForTracker(TrackerSection section, int? width)
+    {
+        int? clamped = width is > 0 and var w ? Math.Clamp(w, MinTrackerExtent, MaxTrackerExtent) : null;
+        switch (section)
+        {
+            case TrackerSection.RemoteChats: settings.RemoteChatsWidth = clamped; break;
+            case TrackerSection.Usage: settings.UsageWidth = clamped; break;
+            case TrackerSection.Antigravity: settings.AntigravityWidth = clamped; break;
+            case TrackerSection.Bambu: settings.BambuWidth = clamped; break;
+            case TrackerSection.Machine: settings.MachineWidth = clamped; break;
+        }
+    }
+
+    private void ResetAllTrackerWidths()
+    {
+        settings.RemoteChatsWidth = null;
+        settings.UsageWidth = null;
+        settings.AntigravityWidth = null;
+        settings.BambuWidth = null;
+        settings.MachineWidth = null;
+    }
+
+    private int MaxAllowedExtentFor(TrackerSection section)
+    {
+        int barLength = Vertical ? Height : Width;
+        if (barLength <= 0) return MaxTrackerExtent;
+
+        var (u, a, r, b, m) = TrackerExtents();
+        int current = section switch
+        {
+            TrackerSection.RemoteChats => r,
+            TrackerSection.Usage => u,
+            TrackerSection.Antigravity => a,
+            TrackerSection.Bambu => b,
+            _ => m,
+        };
+        int others = (u + a + r + b + m) - current;
+        int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
+        int minLeft = (Leading + 1) * Slot;
+        return Math.Clamp(barLength - trayAndClock - minLeft - others, MinTrackerExtent, MaxTrackerExtent);
+    }
+
+    private List<TrackerSection> VisibleTrackers()
+    {
+        var list = new List<TrackerSection>(5);
+        if (RemoteChatsVisible) list.Add(TrackerSection.RemoteChats);
+        if (UsageVisible) list.Add(TrackerSection.Usage);
+        if (AntigravityVisible) list.Add(TrackerSection.Antigravity);
+        if (BambuVisible) list.Add(TrackerSection.Bambu);
+        if (MachineVisible) list.Add(TrackerSection.Machine);
+        return list;
+    }
+
+    private TrackerSection? DividerUnder(Point p)
+    {
+        if (Vertical ? (p.X < 0 || p.X >= Width) : (p.Y < 0 || p.Y >= Height))
+            return null;
+
+        int coord = Vertical ? p.Y : p.X;
+        TrackerSection? best = null;
+        int bestDist = DividerGrabRadius + 1;
+
+        foreach (var section in VisibleTrackers())
+        {
+            var area = AreaForTracker(section);
+            int divCoord = Vertical ? area.Y : area.X;
+            int dist = Math.Abs(coord - divCoord);
+            if (dist <= DividerGrabRadius && dist < bestDist)
+            {
+                bestDist = dist;
+                best = section;
+            }
+        }
+
+        return best;
     }
 
     private int UsageExtent => TrackerExtents().Usage;
@@ -747,6 +905,46 @@ public sealed class TaskbarWindow : Form
     {
         base.OnMouseMove(e);
 
+        if (draggingDivider is { } activeDrag)
+        {
+            int coord = Vertical ? e.Y : e.X;
+            int delta = coord - dragStartCoord;
+            int maxAllowed = MaxAllowedExtentFor(activeDrag);
+            int nextExtent = Math.Clamp(dragStartExtent - delta, MinTrackerExtent, maxAllowed);
+            if (CustomWidthForTracker(activeDrag) != nextExtent)
+            {
+                SetCustomWidthForTracker(activeDrag, nextExtent);
+                Invalidate();
+                Update();
+            }
+            return;
+        }
+
+        var div = DividerUnder(e.Location);
+        if (div is not null)
+        {
+            if (hoveredDivider != div || hovered != -1 || hoveredStatus != -1 || hoveredUsage
+                || hoveredAntigravity || hoveredRemoteChats || hoveredRemoteChatId is not null
+                || hoveredBambu || hoveredMachine || hoveredStart)
+            {
+                hoveredDivider = div;
+                hovered = -1;
+                hoveredStatus = -1;
+                hoveredUsage = false;
+                hoveredAntigravity = false;
+                hoveredRemoteChats = false;
+                hoveredRemoteChatId = null;
+                hoveredBambu = false;
+                hoveredMachine = false;
+                hoveredStart = false;
+                Cursor = Vertical ? Cursors.HSplit : Cursors.VSplit;
+                tips.SetToolTip(this, $"{NameForTracker(div.Value)} — drag divider to resize, double-click to reset");
+                TrackPreview(-1, false);
+                Invalidate();
+            }
+            return;
+        }
+
         int under = SlotUnder(e.Location), tray = TrayUnder(e.Location);
         bool usage = UsageVisible && UsageArea.Contains(e.Location);
         bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
@@ -758,11 +956,12 @@ public sealed class TaskbarWindow : Form
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
-        if (under == hovered && tray == hoveredStatus && usage == hoveredUsage
+        if (hoveredDivider is null && under == hovered && tray == hoveredStatus && usage == hoveredUsage
             && antigravity == hoveredAntigravity && remoteChats == hoveredRemoteChats
             && remoteChatCircleId == hoveredRemoteChatId
             && bambu == hoveredBambu && load == hoveredMachine && start == hoveredStart) return;
 
+        hoveredDivider = null;
         hovered = under;
         hoveredStatus = tray;
         hoveredUsage = usage;
@@ -863,6 +1062,8 @@ public sealed class TaskbarWindow : Form
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
+        if (draggingDivider is not null) return;
+
         hovered = hoveredStatus = -1;
         hoveredStart = false;
         hoveredUsage = false;
@@ -871,6 +1072,8 @@ public sealed class TaskbarWindow : Form
         hoveredRemoteChatId = null;
         hoveredBambu = false;
         hoveredMachine = false;
+        hoveredDivider = null;
+        Cursor = Cursors.Default;
 
         // The preview closes itself once the pointer is over neither it nor the button: leaving the
         // bar is how you reach it, so a leave here cannot mean it is finished with.
@@ -880,9 +1083,95 @@ public sealed class TaskbarWindow : Form
         Invalidate();
     }
 
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (draggingDivider is not null)
+        {
+            draggingDivider = null;
+            Capture = false;
+            PinsChanged?.Invoke();
+            Invalidate();
+        }
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!Capture && draggingDivider is not null)
+        {
+            draggingDivider = null;
+            PinsChanged?.Invoke();
+            Invalidate();
+        }
+    }
+
+    private void ShowDividerMenu(TrackerSection section, Point at)
+    {
+        var menu = Theme.Menu();
+        string name = NameForTracker(section);
+
+        menu.Items.Add(new ToolStripMenuItem($"Reset {name} size", null, (_, _) =>
+        {
+            SetCustomWidthForTracker(section, null);
+            PinsChanged?.Invoke();
+            Invalidate();
+        })
+        {
+            Enabled = CustomWidthForTracker(section) is not null,
+        });
+
+        bool anyCustom = settings.RemoteChatsWidth is not null
+            || settings.UsageWidth is not null
+            || settings.AntigravityWidth is not null
+            || settings.BambuWidth is not null
+            || settings.MachineWidth is not null;
+
+        menu.Items.Add(new ToolStripMenuItem("Reset all tracker sizes", null, (_, _) =>
+        {
+            ResetAllTrackerWidths();
+            PinsChanged?.Invoke();
+            Invalidate();
+        })
+        {
+            Enabled = anyCustom,
+        });
+
+        menu.Show(at);
+    }
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+
+        if (DividerUnder(e.Location) is { } div)
+        {
+            preview.Dismiss();
+            if (e.Button == MouseButtons.Right)
+            {
+                ShowDividerMenu(div, Cursor.Position);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left)
+            {
+                if (e.Clicks >= 2)
+                {
+                    SetCustomWidthForTracker(div, null);
+                    PinsChanged?.Invoke();
+                    Invalidate();
+                    return;
+                }
+
+                draggingDivider = div;
+                hoveredDivider = div;
+                dragStartCoord = Vertical ? e.Y : e.X;
+                dragStartExtent = ExtentForTracker(div);
+                Capture = true;
+                Invalidate();
+                return;
+            }
+        }
 
         if (UsageVisible && UsageArea.Contains(e.Location))
         {
@@ -1319,14 +1608,34 @@ public sealed class TaskbarWindow : Form
     private void PaintTray(Graphics g)
     {
         using var hot = new SolidBrush(Theme.Raised);
+        using var resizeWash = new SolidBrush(Color.FromArgb(24, 74, 158, 255));
         using var divider = new Pen(Theme.Divider, 1f);
+        using var activeDivider = new Pen(Theme.Accent, 2f);
+        using var gripBrush = new SolidBrush(Color.FromArgb(95, 110, 132));
+        using var activeGripBrush = new SolidBrush(Theme.Accent);
 
-        void DrawStripSeparator(Rectangle strip)
+        void DrawStripSeparator(Rectangle strip, TrackerSection section)
         {
+            bool active = draggingDivider == section || hoveredDivider == section;
+            if (active)
+                g.FillRectangle(resizeWash, strip);
+
             if (Vertical)
-                g.DrawLine(divider, strip.X + 8, strip.Y, strip.Right - 8, strip.Y);
+            {
+                g.DrawLine(active ? activeDivider : divider, strip.X + 6, strip.Y, strip.Right - 6, strip.Y);
+                int pillW = active ? 16 : 10;
+                int pillH = active ? 3 : 2;
+                g.FillRectangle(active ? activeGripBrush : gripBrush,
+                                strip.X + (strip.Width - pillW) / 2, strip.Y - pillH / 2, pillW, pillH);
+            }
             else
-                g.DrawLine(divider, strip.X, strip.Y + 8, strip.X, strip.Bottom - 8);
+            {
+                g.DrawLine(active ? activeDivider : divider, strip.X, strip.Y + 6, strip.X, strip.Bottom - 6);
+                int pillW = active ? 3 : 2;
+                int pillH = active ? 16 : 10;
+                g.FillRectangle(active ? activeGripBrush : gripBrush,
+                                strip.X - pillW / 2, strip.Y + (strip.Height - pillH) / 2, pillW, pillH);
+            }
         }
 
         int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
@@ -1336,38 +1645,39 @@ public sealed class TaskbarWindow : Form
             var strip = RemoteChatsArea;
             if (hoveredRemoteChats) g.FillRectangle(hot, strip);
             UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, hoveredRemoteChatId, hoveredRemoteChats);
+            DrawStripSeparator(strip, TrackerSection.RemoteChats);
         }
 
         if (UsageVisible)
         {
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
-            if (RemoteChatsVisible) DrawStripSeparator(strip);
             UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows);
+            DrawStripSeparator(strip, TrackerSection.Usage);
         }
 
         if (AntigravityVisible)
         {
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
-            if (RemoteChatsVisible || UsageVisible) DrawStripSeparator(strip);
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows);
+            DrawStripSeparator(strip, TrackerSection.Antigravity);
         }
 
         if (BambuVisible)
         {
             var strip = BambuArea;
             if (hoveredBambu) g.FillRectangle(hot, strip);
-            if (RemoteChatsVisible || UsageVisible || AntigravityVisible) DrawStripSeparator(strip);
             UsageStrip.PaintBambu(g, strip, BambuUsage.Current, maxRows);
+            DrawStripSeparator(strip, TrackerSection.Bambu);
         }
 
         if (MachineVisible)
         {
             var strip = MachineArea;
             if (hoveredMachine) g.FillRectangle(hot, strip);
-            if (RemoteChatsVisible || UsageVisible || AntigravityVisible || BambuVisible) DrawStripSeparator(strip);
             MeterStrip.Paint(g, strip, machine, maxRowsPerColumn: maxRows);
+            DrawStripSeparator(strip, TrackerSection.Machine);
         }
 
         var items = TrayItems();

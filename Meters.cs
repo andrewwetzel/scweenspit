@@ -130,8 +130,8 @@ internal static class MeterStrip
         using var subBrush = new SolidBrush(SubtextColour);
         using var innerSepPen = new Pen(InnerDivider, 1f);
 
-        int outerPad = vertical ? 4 : Math.Clamp((int)Math.Round(5 * scale), 4, 10);
-        int colGap = cols > 1 ? Math.Clamp((int)Math.Round(12 * scale), 10, 20) : 0;
+        int outerPad = vertical ? 4 : (area.Width < 96 ? 3 : Math.Clamp((int)Math.Round(5 * scale), 4, 10));
+        int colGap = cols > 1 ? (area.Width < 180 ? 6 : Math.Clamp((int)Math.Round(12 * scale), 10, 20)) : 0;
 
         int meterStartRow = 0;
         if (showHeader)
@@ -143,7 +143,7 @@ internal static class MeterStrip
         }
 
         int totalInnerW = Math.Max(16, area.Width - outerPad * 2);
-        int colWidth = cols == 1 ? totalInnerW : Math.Max(40, (totalInnerW - colGap * (cols - 1)) / cols);
+        int colWidth = cols == 1 ? totalInnerW : Math.Max(24, (totalInnerW - colGap * (cols - 1)) / cols);
 
         using var centred = new StringFormat
         {
@@ -179,7 +179,7 @@ internal static class MeterStrip
             // Measure the widest label, figure, and subtext in this column so larger fonts never clip
             // and short labels (like "A1M" or "CPU") donate their spare width to the progress bar.
             bool colHasSubtext = false;
-            float maxLblW = 0f, maxFigW = g.MeasureString("100%", figureFont).Width, maxSubW = 0f;
+            float maxLblW = 0f, maxFigW = 0f, maxSubW = 0f;
             for (int j = 0; j < countInCol; j++)
             {
                 var m = meters[startIdx + j];
@@ -198,23 +198,48 @@ internal static class MeterStrip
                 }
             }
 
-            int minNameW = (int)Math.Round((colHasSubtext ? 38 : 32) * scale);
-            int nameW = Math.Clamp(Math.Max(minNameW, (int)Math.Ceiling(maxLblW) + 4),
-                                   28, Math.Max(34, colWidth * 42 / 100));
+            int naturalLblW = (int)Math.Ceiling(maxLblW) + 2;
+            int naturalFigW = (int)Math.Ceiling(maxFigW) + 2;
+            int naturalSubW = (int)Math.Ceiling(maxSubW) + 3;
 
-            int minFigW = (int)Math.Round(28 * scale);
-            int figW = Math.Clamp(Math.Max(minFigW, (int)Math.Ceiling(maxFigW) + 3),
-                                  26, Math.Max(30, colWidth * 24 / 100));
+            bool showSubInCol = colHasSubtext
+                && colWidth >= naturalLblW + naturalFigW + naturalSubW + 20
+                && colWidth >= 112;
 
-            int subW = 0;
-            if (colHasSubtext)
+            // If subtext is omitted because the column was dragged narrow, any row whose figure was a
+            // placeholder "—" (e.g. Bambu "Idle" / "Off") promotes its subtext into the figure slot.
+            if (!showSubInCol && colHasSubtext)
             {
-                int minSubW = (int)Math.Round(40 * scale);
-                subW = Math.Clamp(Math.Max(minSubW, (int)Math.Ceiling(maxSubW) + 4),
-                                  36, Math.Max(40, colWidth * 30 / 100));
+                for (int j = 0; j < countInCol; j++)
+                {
+                    var m = meters[startIdx + j];
+                    if (m.FigureText == "—" && !string.IsNullOrEmpty(m.Subtext))
+                    {
+                        float fw = g.MeasureString(m.Subtext, figureFont).Width;
+                        if (fw > maxFigW) maxFigW = fw;
+                    }
+                }
+                naturalFigW = (int)Math.Ceiling(maxFigW) + 2;
             }
 
-            int trackGap = Math.Clamp((int)Math.Round(4 * scale), 4, 8);
+            bool tightCol = colWidth < 115;
+            int minNameW = tightCol ? naturalLblW : (int)Math.Round((showSubInCol ? 36 : 28) * scale);
+            int nameW = Math.Clamp(Math.Max(minNameW, naturalLblW),
+                                   18, Math.Max(22, colWidth * 44 / 100));
+
+            int minFigW = tightCol ? naturalFigW : (int)Math.Round(26 * scale);
+            int figW = Math.Clamp(Math.Max(minFigW, naturalFigW),
+                                  18, Math.Max(22, colWidth * 36 / 100));
+
+            int subW = 0;
+            if (showSubInCol)
+            {
+                int minSubW = (int)Math.Round(36 * scale);
+                subW = Math.Clamp(Math.Max(minSubW, naturalSubW),
+                                  30, Math.Max(34, colWidth * 30 / 100));
+            }
+
+            int trackGap = tightCol ? 3 : Math.Clamp((int)Math.Round(4 * scale), 4, 8);
 
             for (int j = 0; j < countInCol; j++)
             {
@@ -230,24 +255,27 @@ internal static class MeterStrip
                     track  = new Rectangle(row.X, row.Y + nameH, row.Width, barThick);
                     figure = new Rectangle(row.X, row.Y + nameH + barThick, row.Width, Math.Max(8, rowHeight - barThick - nameH));
                 }
-                else if (colHasSubtext)
+                else if (showSubInCol)
                 {
                     name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
                     sub    = new Rectangle(row.Right - subW, row.Y, subW, rowHeight);
                     figure = new Rectangle(sub.X - figW - 2, row.Y, figW, rowHeight);
-                    track  = new Rectangle(row.X + nameW + trackGap / 2, row.Y + (rowHeight - barThick) / 2,
-                                           Math.Max(10, figure.X - (row.X + nameW) - trackGap), barThick);
+                    int trackX = row.X + nameW + trackGap / 2;
+                    int trackW = Math.Max(0, figure.X - trackX - trackGap / 2);
+                    track  = new Rectangle(trackX, row.Y + (rowHeight - barThick) / 2, trackW, barThick);
                 }
                 else
                 {
                     name   = new Rectangle(row.X, row.Y, nameW, rowHeight);
                     figure = new Rectangle(row.Right - figW, row.Y, figW, rowHeight);
-                    track  = new Rectangle(row.X + nameW + trackGap / 2, row.Y + (rowHeight - barThick) / 2,
-                                           Math.Max(10, figure.X - (row.X + nameW) - trackGap), barThick);
+                    int trackX = row.X + nameW + trackGap / 2;
+                    int trackW = Math.Max(0, figure.X - trackX - trackGap / 2);
+                    track  = new Rectangle(trackX, row.Y + (rowHeight - barThick) / 2, trackW, barThick);
                 }
 
                 var barColour = meter.BarColour ?? Fill(meter.Percent, lowColour);
-                Track(g, track, meter.Percent, barColour);
+                if (vertical || track.Width >= 6)
+                    Track(g, track, meter.Percent, barColour);
 
                 if (meter.LabelColour is { } customLbl)
                 {
@@ -269,8 +297,11 @@ internal static class MeterStrip
                 }
                 else
                 {
-                    g.DrawString(figText, figureFont, brush, figure, figures);
-                    if (!vertical && !string.IsNullOrEmpty(meter.Subtext))
+                    string shownFig = (!showSubInCol && figText == "—" && !string.IsNullOrEmpty(meter.Subtext))
+                        ? meter.Subtext!
+                        : figText;
+                    g.DrawString(shownFig, figureFont, brush, figure, figures);
+                    if (!vertical && showSubInCol && !string.IsNullOrEmpty(meter.Subtext))
                     {
                         if (meter.SubtextColour is { } customSub)
                         {
@@ -337,16 +368,23 @@ internal static class MeterStrip
 
         g.SmoothingMode = previous;
 
+        int availTextW = Math.Max(8, row.Right - textX);
+        float titleW = g.MeasureString(title, titleFont).Width;
+        float tagW = !string.IsNullOrEmpty(tag) ? g.MeasureString(tag, tagFont).Width : 0f;
+        bool drawTag = !string.IsNullOrEmpty(tag) && availTextW >= titleW + tagW + 4f;
+
         using var left = new StringFormat
         {
             Alignment = StringAlignment.Near,
             LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter,
             FormatFlags = StringFormatFlags.NoWrap,
         };
+        int titleBoxW = drawTag ? Math.Max(8, availTextW - (int)Math.Ceiling(tagW) - 2) : availTextW;
         g.DrawString(title, titleFont, titleBrush,
-                     new Rectangle(textX, row.Y, row.Width - (textX - row.X), row.Height), left);
+                     new Rectangle(textX, row.Y, titleBoxW, row.Height), left);
 
-        if (!string.IsNullOrEmpty(tag))
+        if (drawTag)
         {
             using var right = new StringFormat
             {

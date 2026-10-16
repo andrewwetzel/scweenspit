@@ -188,6 +188,16 @@ public sealed class BarSettings
     /// </summary>
     public int TrackerMaxRows { get; set; } = 3;
 
+    /// <summary>
+    /// Custom pixel width (or height on a vertical bar) for each tracker strip when dragged on the
+    /// taskbar. Null uses automatic sizing.
+    /// </summary>
+    public int? RemoteChatsWidth { get; set; }
+    public int? UsageWidth { get; set; }
+    public int? AntigravityWidth { get; set; }
+    public int? BambuWidth { get; set; }
+    public int? MachineWidth { get; set; }
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
@@ -794,6 +804,11 @@ public sealed class SplitConfig
             bar.EdgeGap = Math.Clamp(bar.EdgeGap, 0, 40);
             bar.TrackerScale = bar.TrackerScale <= 0 ? 125 : Math.Clamp(bar.TrackerScale, 80, 300);
             bar.TrackerMaxRows = bar.TrackerMaxRows <= 0 ? 3 : Math.Clamp(bar.TrackerMaxRows, 1, 6);
+            bar.RemoteChatsWidth = bar.RemoteChatsWidth is > 0 and var rw ? Math.Clamp(rw, 44, 1200) : null;
+            bar.UsageWidth = bar.UsageWidth is > 0 and var uw ? Math.Clamp(uw, 44, 1200) : null;
+            bar.AntigravityWidth = bar.AntigravityWidth is > 0 and var aw ? Math.Clamp(aw, 44, 1200) : null;
+            bar.BambuWidth = bar.BambuWidth is > 0 and var bw ? Math.Clamp(bw, 44, 1200) : null;
+            bar.MachineWidth = bar.MachineWidth is > 0 and var mw ? Math.Clamp(mw, 44, 1200) : null;
             bar.Pinned ??= new();
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
@@ -1055,6 +1070,11 @@ public sealed class SplitConfig
                         activeBar.TrackerScale = richestUnattached.TrackerScale;
                         activeBar.TrackerMaxRows = richestUnattached.TrackerMaxRows;
                     }
+                    activeBar.RemoteChatsWidth ??= richestUnattached.RemoteChatsWidth;
+                    activeBar.UsageWidth ??= richestUnattached.UsageWidth;
+                    activeBar.AntigravityWidth ??= richestUnattached.AntigravityWidth;
+                    activeBar.BambuWidth ??= richestUnattached.BambuWidth;
+                    activeBar.MachineWidth ??= richestUnattached.MachineWidth;
 
                     foreach (var ub in unattachedBars)
                     {

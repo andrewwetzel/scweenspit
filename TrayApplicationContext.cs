@@ -39,6 +39,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly SplitConfig config;
     private SettingsForm? settings;
     private UpdateInfo? pendingUpdate;
+    private bool updating;
     private readonly Action raised;
 
     public TrayApplicationContext()
@@ -191,11 +192,20 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings()) { Font = new Font("Segoe UI", 9f, FontStyle.Bold) });
 
-        if (pendingUpdate is { } update)
-            items.Add(new ToolStripMenuItem($"Update to {update.Version}…", null, (_, _) => OpenSettings())
-            {
-                ForeColor = Theme.Accent,
-            });
+        var updateLabel = updating ? "Updating…"
+                        : pendingUpdate is { } update ? $"Update to {update.Version}"
+                        : $"Update (v{Updater.Current})";
+        var updateItem = new ToolStripMenuItem(updateLabel, null, (_, _) => RunUpdateFromMenuAsync())
+        {
+            Enabled = !updating,
+            ToolTipText = $"Running {Updater.Current}. Checks GitHub for a newer release and restarts into it.",
+        };
+        if (pendingUpdate is not null)
+        {
+            updateItem.ForeColor = Theme.Accent;
+            updateItem.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+        }
+        items.Add(updateItem);
         items.Add(new ToolStripSeparator());
         items.Add(LayoutMenu());
         items.Add(new ToolStripSeparator());
@@ -854,12 +864,64 @@ public sealed class TrayApplicationContext : ApplicationContext
             if (update is null) return;
 
             pendingUpdate = update;
-            Notify($"Version {update.Version} is available — open Settings to install it.");
+            Notify($"Version {update.Version} is available — click Update in the menu to install it.");
         }
         catch (Exception ex)
         {
             // A failed check is not worth interrupting anyone over.
             Log.WriteOnce("update-check", $"update check failed: {ex.Message}");
+        }
+    }
+
+    private async void RunUpdateFromMenuAsync()
+    {
+        if (updating) return;
+
+        if (Updater.LauncherPath() is null)
+        {
+            OpenSettings("Updates");
+            return;
+        }
+
+        updating = true;
+        try
+        {
+            var update = await Updater.CheckAsync(config) ?? pendingUpdate;
+            config.LastUpdateCheck = DateTime.Now;
+            config.Save();
+
+            if (update is null || update.Version <= Updater.Current)
+            {
+                pendingUpdate = null;
+                Notify($"Version {Updater.Current} is the latest.");
+                return;
+            }
+
+            pendingUpdate = update;
+            Notify($"Downloading ScweenSpit {update.Version} and restarting…");
+
+            if (!string.IsNullOrWhiteSpace(update.Notes))
+                Log.Write($"update {update.Version} notes: {update.Notes.Trim()}");
+
+            var replaced = await Updater.ApplyAsync(update);
+
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(replaced)
+            {
+                Arguments = $"--replacing {Environment.ProcessId}",
+                UseShellExecute = true,
+            });
+            tray.Visible = false;
+            ExitThread();
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"menu update failed: {ex}");
+            Notify($"Update failed: {ex.Message}");
+            OpenSettings("Updates");
+        }
+        finally
+        {
+            updating = false;
         }
     }
 
