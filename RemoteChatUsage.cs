@@ -75,9 +75,13 @@ public static class RemoteChatUsage
     private const string CloudCodeBaseUrl = "https://cloudcode-pa.googleapis.com";
     private const string ListInstancesPath = "/v1internal:listInstances";
     private const string ProxyCommandPath = "/v1internal:proxyCommand";
+    private const string StreamProxyCommandPath = "/v1internal:streamProxyCommand?alt=sse";
     private const string GetTrajectoriesRpc = "exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories";
+    private const string SubscribeSummariesRpc = "exa.language_server_pb.LanguageServerService/JetboxSubscribeToSummaries";
     // Base64 of {"excludeSubtrajectories":true}
     private const string GetTrajectoriesPayloadBase64 = "eyJleGNsdWRlU3VidHJhamVjdG9yaWVzIjp0cnVlfQ==";
+    // Base64 of Connect frame envelope (\x00\x00\x00\x00\x02) + "{}"
+    private const string SubscribeSummariesPayloadBase64 = "AAAAAAJ7fQ==";
 
     /// <summary>Where Claude Code stores its global CLI state (including `oauthAccount.organizationUuid`).</summary>
     public static string ClaudeGlobalConfigPath { get; } = Path.Combine(
@@ -88,7 +92,14 @@ public static class RemoteChatUsage
         UseCookies = false,
         AutomaticDecompression = DecompressionMethods.All,
     })
-    { Timeout = TimeSpan.FromSeconds(15) };
+    { Timeout = TimeSpan.FromSeconds(12) };
+
+    private static readonly HttpClient streamHttp = new(new HttpClientHandler
+    {
+        UseCookies = false,
+        AutomaticDecompression = DecompressionMethods.All,
+    })
+    { Timeout = Timeout.InfiniteTimeSpan };
 
     private sealed class ServerBucket
     {
@@ -99,8 +110,51 @@ public static class RemoteChatUsage
         public List<RemoteChatItem> Chats { get; set; } = new();
     }
 
+    private sealed record AntigravityTrajectorySummary(
+        string Id,
+        string Title,
+        string Server,
+        string Status,
+        bool NotFullyIdle,
+        bool HasActiveChildren,
+        bool Interrupted,
+        int WaitingSteps,
+        bool Killed,
+        bool Archived,
+        bool Unread,
+        string? Repo,
+        DateTimeOffset LastModified);
+
+    private sealed class AntigravityInstanceStreamState : IDisposable
+    {
+        public required AntigravityInstance Instance { get; set; }
+        public CancellationTokenSource Cts { get; } = new();
+        public Dictionary<string, AntigravityTrajectorySummary> Trajectories { get; } = new(StringComparer.Ordinal);
+        public bool StreamRunning { get; set; }
+        public bool StreamConnected { get; set; }
+        public bool HasSnapshot { get; set; }
+        public DateTimeOffset LastUnaryFetchUtc { get; set; } = DateTimeOffset.MinValue;
+
+        public void Dispose()
+        {
+            try { Cts.Cancel(); } catch { }
+        }
+    }
+
     private static readonly object gate = new();
+    private static readonly object agStreamLock = new();
     private static readonly Dictionary<string, ServerBucket> liveByRowId = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, AntigravityInstanceStreamState> agStreamsByUuid = new(StringComparer.Ordinal);
+
+    private static List<AntigravityInstance> cachedAgInstances = new();
+    private static DateTimeOffset lastAgListInstancesUtc = DateTimeOffset.MinValue;
+
+    private static string? cachedClaudeEnvsBody;
+    private static DateTimeOffset cachedClaudeEnvsUtc = DateTimeOffset.MinValue;
+    private static DateTime cachedClaudeGlobalConfigWriteUtc = DateTime.MinValue;
+
+    private static PollServiceResult? lastClaudePoll;
+    private static PollServiceResult? lastAgPoll;
 
     private static RemoteChatsSettings? settings;
     private static Action? persist;
@@ -113,6 +167,45 @@ public static class RemoteChatUsage
     private static string? lastError;
     private static bool lastNeedsAuth;
     private static bool hasCompletedInitialSync;
+    private const int AttentionGlowDurationMs = 2600;
+    private static int? lastSettledWaitingCount;
+    private static long attentionGlowStartTick;
+
+    /// <summary>Raised whenever <see cref="Current"/> changes so bars can repaint immediately.</summary>
+    public static event Action? Changed;
+
+    /// <summary>
+    /// Normalized [0..1] glow intensity when the tracker has just transitioned from 0 chats
+    /// needing help to at least 1 chat needing help, or 0 when not glowing.
+    /// </summary>
+    public static float AttentionGlowIntensity
+    {
+        get
+        {
+            long start = Interlocked.Read(ref attentionGlowStartTick);
+            if (start == 0) return 0f;
+            long elapsed = Environment.TickCount64 - start;
+            if (elapsed < 0 || elapsed >= AttentionGlowDurationMs) return 0f;
+
+            // Two smooth warm amber pulses over ~2.6 seconds, fading cleanly to 0.
+            double t = elapsed / (double)AttentionGlowDurationMs;
+            double pulse = 0.5 - 0.5 * Math.Cos(t * Math.PI * 4.0);
+            double envelope = 1.0 - t * 0.35;
+            return (float)Math.Clamp(pulse * envelope, 0.0, 1.0);
+        }
+    }
+
+    /// <summary>True while the brief attention glow animation is active.</summary>
+    public static bool IsAttentionGlowing
+    {
+        get
+        {
+            long start = Interlocked.Read(ref attentionGlowStartTick);
+            if (start == 0) return false;
+            long elapsed = Environment.TickCount64 - start;
+            return elapsed >= 0 && elapsed < AttentionGlowDurationMs;
+        }
+    }
 
     /// <summary>The latest reading across all enabled server × service rows.</summary>
     public static RemoteChatsReading? Current => current;
@@ -148,6 +241,9 @@ public static class RemoteChatUsage
                 life = null;
                 current = null;
                 hasCompletedInitialSync = false;
+                lastSettledWaitingCount = null;
+                Interlocked.Exchange(ref attentionGlowStartTick, 0);
+                StopAllAntigravityStreams();
                 return;
             }
 
@@ -189,10 +285,24 @@ public static class RemoteChatUsage
             enabled = false;
         }
 
+        StopAllAntigravityStreams();
+
         if (!listening) return;
         listening = false;
         System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerChanged;
+    }
+
+    private static void StopAllAntigravityStreams()
+    {
+        lock (agStreamLock)
+        {
+            foreach (var s in agStreamsByUuid.Values)
+                s.Dispose();
+            agStreamsByUuid.Clear();
+            cachedAgInstances.Clear();
+            lastAgListInstancesUtc = DateTimeOffset.MinValue;
+        }
     }
 
     private static bool listening;
@@ -264,11 +374,12 @@ public static class RemoteChatUsage
     {
         while (!ct.IsCancellationRequested)
         {
+            bool forceFullSync = wakeWanted || !hasCompletedInitialSync;
             wakeWanted = false;
 
             try
             {
-                await PollOnceAsync(ct);
+                await PollOnceAsync(ct, forceFullSync);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -287,9 +398,9 @@ public static class RemoteChatUsage
             int seconds;
             lock (gate)
             {
-                seconds = Math.Clamp(settings?.RefreshSeconds ?? 20, 10, 600);
+                seconds = Math.Clamp(settings?.RefreshSeconds ?? 2, 1, 300);
                 if (!hasCompletedInitialSync || lastError is not null)
-                    seconds = Math.Min(seconds, 10);
+                    seconds = Math.Min(seconds, 5);
             }
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -307,7 +418,7 @@ public static class RemoteChatUsage
         }
     }
 
-    private static async Task PollOnceAsync(CancellationToken ct)
+    private static async Task PollOnceAsync(CancellationToken ct, bool forceFullSync)
     {
         int doneWindowHours;
         lock (gate)
@@ -318,93 +429,104 @@ public static class RemoteChatUsage
 
         var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(doneWindowHours);
 
-        var claudeTask = Task.Run(() => PollClaude(cutoff), ct);
-        var agTask = Task.Run(() => PollAntigravity(cutoff), ct);
+        // Run Claude and Antigravity checks concurrently, but apply each service's result
+        // as soon as it arrives so a fast ~200ms Claude session check never waits on Antigravity.
+        var claudeTask = Task.Run(() =>
+        {
+            var res = PollClaude(cutoff, forceFullSync);
+            ApplyServiceResult(RemoteChatService.Claude, res);
+        }, ct);
+
+        var agTask = Task.Run(() =>
+        {
+            var res = PollAntigravity(cutoff, forceFullSync, ct);
+            ApplyServiceResult(RemoteChatService.Antigravity, res);
+        }, ct);
 
         await Task.WhenAll(claudeTask, agTask);
+    }
 
-        var claudeRes = await claudeTask;
-        var agRes = await agTask;
-
+    private static void ApplyServiceResult(RemoteChatService service, PollServiceResult res)
+    {
         Action? save = null;
         lock (gate)
         {
             if (settings is null) return;
 
-            // Update live buckets for services that returned valid data (or if not yet initialized).
-            if (claudeRes.Error is null || claudeRes.Buckets.Count > 0)
+            if (service == RemoteChatService.Claude)
+                lastClaudePoll = res;
+            else
+                lastAgPoll = res;
+
+            if (res.Error is null || res.Buckets.Count > 0)
             {
-                foreach (var oldKey in liveByRowId.Where(kv => kv.Value.Service == RemoteChatService.Claude)
+                foreach (var oldKey in liveByRowId.Where(kv => kv.Value.Service == service)
                                                   .Select(kv => kv.Key).ToList())
                 {
-                    if (!claudeRes.Buckets.ContainsKey(oldKey))
+                    if (!res.Buckets.ContainsKey(oldKey))
                         liveByRowId.Remove(oldKey);
                 }
 
-                foreach (var (id, bucket) in claudeRes.Buckets)
+                foreach (var (id, bucket) in res.Buckets)
                     liveByRowId[id] = bucket;
             }
 
-            if (agRes.Error is null || agRes.Buckets.Count > 0)
-            {
-                foreach (var oldKey in liveByRowId.Where(kv => kv.Value.Service == RemoteChatService.Antigravity)
-                                                  .Select(kv => kv.Key).ToList())
-                {
-                    if (!agRes.Buckets.ContainsKey(oldKey))
-                        liveByRowId.Remove(oldKey);
-                }
-
-                foreach (var (id, bucket) in agRes.Buckets)
-                    liveByRowId[id] = bucket;
-            }
-
-            // Ensure newly discovered server × service rows are added to settings.Rows so the user
-            // can reorder, rename, or toggle them in Settings. Group rows for the same server
-            // together on initial discovery.
             bool changedConfig = SyncDiscoveredRowsLocked();
             if (changedConfig) save = persist;
 
-            bool bothNeedAuth = claudeRes.NeedsAuth && agRes.NeedsAuth;
-            bool hasClaudeBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Claude);
-            bool hasAgBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Antigravity);
+            UpdateErrorStateLocked();
+            if (lastClaudePoll is not null && lastAgPoll is not null)
+                hasCompletedInitialSync = true;
 
-            lastNeedsAuth = bothNeedAuth && liveByRowId.Count == 0;
-            if (bothNeedAuth && liveByRowId.Count == 0)
-            {
-                lastError = "Sign in under Claude usage or Antigravity usage";
-            }
-            else if (liveByRowId.Count == 0)
-            {
-                lastError = (claudeRes.Error, agRes.Error) switch
-                {
-                    (not null, not null) => $"{claudeRes.Error}; {agRes.Error}",
-                    (not null, null) => claudeRes.Error,
-                    (null, not null) => agRes.Error,
-                    _ => null,
-                };
-            }
-            else if (claudeRes.Error is not null && !hasClaudeBuckets && !claudeRes.NeedsAuth)
-            {
-                lastError = $"Claude: {claudeRes.Error}";
-            }
-            else if (claudeRes.Error is not null && !hasClaudeBuckets && ClaudeUsage.Enabled)
-            {
-                lastError = $"Claude: {claudeRes.Error}";
-            }
-            else if (agRes.Error is not null && !hasAgBuckets && AntigravityUsage.Enabled)
-            {
-                lastError = $"Antigravity: {agRes.Error}";
-            }
-            else
-            {
-                lastError = null;
-            }
-
-            hasCompletedInitialSync = true;
             RebuildCurrentReadingLocked();
         }
 
         save?.Invoke();
+    }
+
+    private static void UpdateErrorStateLocked()
+    {
+        var claudeRes = lastClaudePoll;
+        var agRes = lastAgPoll;
+
+        bool claudeNeedsAuth = claudeRes?.NeedsAuth ?? false;
+        bool agNeedsAuth = agRes?.NeedsAuth ?? false;
+        bool bothNeedAuth = claudeNeedsAuth && agNeedsAuth;
+
+        bool hasClaudeBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Claude);
+        bool hasAgBuckets = liveByRowId.Values.Any(b => b.Service == RemoteChatService.Antigravity);
+
+        lastNeedsAuth = bothNeedAuth && liveByRowId.Count == 0;
+        if (bothNeedAuth && liveByRowId.Count == 0)
+        {
+            lastError = "Sign in under Claude usage or Antigravity usage";
+        }
+        else if (liveByRowId.Count == 0)
+        {
+            lastError = (claudeRes?.Error, agRes?.Error) switch
+            {
+                (not null, not null) => $"{claudeRes.Error}; {agRes.Error}",
+                (not null, null) => claudeRes.Error,
+                (null, not null) => agRes.Error,
+                _ => null,
+            };
+        }
+        else if (claudeRes?.Error is not null && !hasClaudeBuckets && !claudeRes.NeedsAuth)
+        {
+            lastError = $"Claude: {claudeRes.Error}";
+        }
+        else if (claudeRes?.Error is not null && !hasClaudeBuckets && ClaudeUsage.Enabled)
+        {
+            lastError = $"Claude: {claudeRes.Error}";
+        }
+        else if (agRes?.Error is not null && !hasAgBuckets && AntigravityUsage.Enabled)
+        {
+            lastError = $"Antigravity: {agRes.Error}";
+        }
+        else
+        {
+            lastError = null;
+        }
     }
 
     private static bool SyncDiscoveredRowsLocked()
@@ -477,9 +599,11 @@ public static class RemoteChatUsage
 
     private static void RebuildCurrentReadingLocked()
     {
+        var previous = current;
         if (settings is null || !settings.Enabled)
         {
             current = null;
+            if (previous is not null) FireChangedAsync();
             return;
         }
 
@@ -523,11 +647,67 @@ public static class RemoteChatUsage
             }
         }
 
-        current = new RemoteChatsReading(
+        var next = new RemoteChatsReading(
             rows,
             lastError,
             lastNeedsAuth,
             Transient: !hasCompletedInitialSync && rows.Count == 0 && lastError is null);
+
+        int totalWaiting = rows.Sum(r => r.WaitingCount);
+        bool glowTriggered = false;
+        if (hasCompletedInitialSync)
+        {
+            if (lastSettledWaitingCount is 0 && totalWaiting > 0)
+            {
+                Interlocked.Exchange(ref attentionGlowStartTick, Environment.TickCount64);
+                glowTriggered = true;
+            }
+            lastSettledWaitingCount = totalWaiting;
+        }
+
+        current = next;
+        if (glowTriggered || !ReadingsEqual(previous, next))
+            FireChangedAsync();
+    }
+
+    private static void FireChangedAsync()
+    {
+        var handler = Changed;
+        if (handler is null) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { handler(); } catch { }
+        });
+    }
+
+    private static bool ReadingsEqual(RemoteChatsReading? a, RemoteChatsReading? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        if (a.Error != b.Error || a.NeedsAuth != b.NeedsAuth || a.Transient != b.Transient) return false;
+        if (a.Rows.Count != b.Rows.Count) return false;
+
+        for (int i = 0; i < a.Rows.Count; i++)
+        {
+            var ra = a.Rows[i];
+            var rb = b.Rows[i];
+            if (ra.Id != rb.Id || ra.Server != rb.Server || ra.Label != rb.Label ||
+                ra.Service != rb.Service || ra.Online != rb.Online ||
+                ra.WaitingCount != rb.WaitingCount || ra.RunningCount != rb.RunningCount ||
+                ra.DoneCount != rb.DoneCount || ra.Chats.Count != rb.Chats.Count)
+                return false;
+
+            for (int j = 0; j < ra.Chats.Count; j++)
+            {
+                var ca = ra.Chats[j];
+                var cb = rb.Chats[j];
+                if (ca.Id != cb.Id || ca.Title != cb.Title || ca.State != cb.State ||
+                    ca.Repo != cb.Repo || ca.Detail != cb.Detail || ca.Unread != cb.Unread)
+                    return false;
+            }
+        }
+
+        return true;
     }
 
     // ---- Claude Code Remote Control polling --------------------------------
@@ -540,7 +720,7 @@ public static class RemoteChatUsage
 
     private sealed record ClaudeEnvInfo(string Server, string? Repo, bool Online, bool Active);
 
-    private static PollServiceResult PollClaude(DateTimeOffset doneCutoff)
+    private static PollServiceResult PollClaude(DateTimeOffset doneCutoff, bool forceFullSync = false)
     {
         var buckets = new Dictionary<string, ServerBucket>(StringComparer.OrdinalIgnoreCase);
         var diag = new List<string>();
@@ -556,13 +736,30 @@ public static class RemoteChatUsage
         (int Status, string Body)? envsReply = null;
         (int Status, string Body)? sessionsReply = null;
 
+        bool canUseCachedEnvs = !forceFullSync &&
+            !string.IsNullOrWhiteSpace(cachedClaudeEnvsBody) &&
+            (DateTimeOffset.UtcNow - cachedClaudeEnvsUtc) < TimeSpan.FromSeconds(15);
+
+        if (canUseCachedEnvs)
+            envsReply = (200, cachedClaudeEnvsBody!);
+
         // 1. Try OAuth token (from ~/.claude/.credentials.json or ScweenSpit's 1-click Claude sign-in).
-        //    If the token was expired or lacked `user:sessions:claude_code`, ReadClaudeCodeToken already
-        //    attempted a refresh. If the endpoint still returns 401/403, force one refresh and retry.
+        //    On regular 2s polls where environments were fetched within the last 15s, only fetch
+        //    `/v1/code/sessions?limit=50` (~200ms). When both are needed, fetch them in parallel.
         if (!string.IsNullOrWhiteSpace(oauthToken))
         {
-            envsReply = GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid);
-            sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=100", oauthToken, orgUuid);
+            if (envsReply is null)
+            {
+                var envTask = Task.Run(() => GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid));
+                var sessTask = Task.Run(() => GetAnthropicOAuth("/v1/code/sessions?limit=50", oauthToken, orgUuid));
+                Task.WhenAll(envTask, sessTask).GetAwaiter().GetResult();
+                envsReply = envTask.Result;
+                sessionsReply = sessTask.Result;
+            }
+            else
+            {
+                sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=50", oauthToken, orgUuid);
+            }
 
             if (envsReply is { Status: 401 or 403 } || sessionsReply is { Status: 401 or 403 })
             {
@@ -574,7 +771,7 @@ public static class RemoteChatUsage
                     if (envsReply is not { Status: >= 200 and < 300 })
                         envsReply = GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid);
                     if (sessionsReply is not { Status: >= 200 and < 300 })
-                        sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=100", oauthToken, orgUuid);
+                        sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=50", oauthToken, orgUuid);
                 }
             }
 
@@ -596,8 +793,7 @@ public static class RemoteChatUsage
         }
 
         // 2. Fall back to the stored browser sessionKey cookie whenever OAuth was unavailable or did not
-        //    return 2xx. Unlike the previous implementation, a stale ~/.claude/.credentials.json on
-        //    Windows will no longer block a working browser sessionKey from being used.
+        //    return 2xx.
         if (hasSessionKey &&
             (envsReply is not { Status: >= 200 and < 300 } || sessionsReply is not { Status: >= 200 and < 300 }))
         {
@@ -616,7 +812,7 @@ public static class RemoteChatUsage
 
             if (sessionsReply is not { Status: >= 200 and < 300 })
             {
-                var keySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/code/sessions?limit=100", orgUuid);
+                var keySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/code/sessions?limit=50", orgUuid);
                 if (keySessions is not { Status: >= 200 and < 300 })
                 {
                     var altKeySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/sessions", orgUuid);
@@ -638,6 +834,12 @@ public static class RemoteChatUsage
 
         bool envsOk = envsReply is { Status: >= 200 and < 300 };
         bool sessionsOk = sessionsReply is { Status: >= 200 and < 300 };
+
+        if (envsOk && !canUseCachedEnvs)
+        {
+            cachedClaudeEnvsBody = envsReply!.Value.Body;
+            cachedClaudeEnvsUtc = DateTimeOffset.UtcNow;
+        }
 
         if (!envsOk && !sessionsOk)
         {
@@ -672,6 +874,24 @@ public static class RemoteChatUsage
 
         if (sessionsOk)
         {
+            // If we used cached environments and a newly started session references an unknown
+            // environment_id, refresh `/v1/environment_providers` once so it maps to its server name.
+            if (canUseCachedEnvs && HasUnmappedConnectedSessionEnv(sessionsReply!.Value.Body, envById))
+            {
+                var freshEnvs = !string.IsNullOrWhiteSpace(oauthToken)
+                    ? GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid)
+                    : ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers", orgUuid);
+                if (freshEnvs is { Status: >= 200 and < 300 })
+                {
+                    cachedClaudeEnvsBody = freshEnvs.Value.Body;
+                    cachedClaudeEnvsUtc = DateTimeOffset.UtcNow;
+                    envById.Clear();
+                    envByRepo.Clear();
+                    buckets.Clear();
+                    ParseClaudeEnvironments(freshEnvs.Value.Body, envById, envByRepo, buckets);
+                }
+            }
+
             ParseClaudeSessions(sessionsReply!.Value.Body, envById, envByRepo, buckets, doneCutoff);
         }
         else if (sessionsReply is not null && buckets.Count == 0)
@@ -688,6 +908,28 @@ public static class RemoteChatUsage
         }
 
         return new PollServiceResult(buckets, null, NeedsAuth: false, string.Join(" | ", diag));
+    }
+
+    private static bool HasUnmappedConnectedSessionEnv(string sessionsBody, Dictionary<string, ClaudeEnvInfo> envById)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(sessionsBody);
+            if (!doc.RootElement.TryGetProperty("data", out var list) || list.ValueKind != JsonValueKind.Array)
+                return false;
+
+            foreach (var s in list.EnumerateArray())
+            {
+                if (s.ValueKind != JsonValueKind.Object) continue;
+                var conn = Text(s, "connection_status");
+                if (!string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase)) continue;
+                var envId = Text(s, "environment_id");
+                if (!string.IsNullOrWhiteSpace(envId) && !envById.ContainsKey(envId))
+                    return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     private static void ParseClaudeEnvironments(
@@ -850,10 +1092,27 @@ public static class RemoteChatUsage
                 string? needsAction = null;
                 string? statusCategory = null;
                 string? statusDetail = null;
+                string? pendingActionDetail = null;
+                bool hasPendingActionObj = false;
+
+                if (s.TryGetProperty("requires_action_details", out var rad) && rad.ValueKind == JsonValueKind.Object)
+                {
+                    hasPendingActionObj = true;
+                    pendingActionDetail = Text(rad, "action_description")
+                                       ?? Text(rad, "description")
+                                       ?? Text(rad, "tool_name");
+                }
 
                 if (s.TryGetProperty("external_metadata", out var ext) && ext.ValueKind == JsonValueKind.Object)
                 {
                     taskSummary = Text(ext, "task_summary");
+                    if (ext.TryGetProperty("pending_action", out var pa) && pa.ValueKind == JsonValueKind.Object)
+                    {
+                        hasPendingActionObj = true;
+                        pendingActionDetail ??= Text(pa, "action_description")
+                                             ?? Text(pa, "description")
+                                             ?? Text(pa, "tool_name");
+                    }
                     if (ext.TryGetProperty("post_turn_summary", out var pts) && pts.ValueKind == JsonValueKind.Object)
                     {
                         needsAction = Text(pts, "needs_action");
@@ -869,18 +1128,33 @@ public static class RemoteChatUsage
                     statusDetail ??= Text(topPts, "status_detail") ?? Text(topPts, "recent_action");
                 }
 
-                bool isWaiting = isActive && (
+                // 1. Mid-turn permission / tool / question block: worker is explicitly waiting on user action.
+                bool isBlockedMidTurn = isActive && (
                     string.Equals(worker, "requires_action", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(sessionStatus, "requires_action", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(bucketKind, "requires_action", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(bucketKind, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                    hasPendingActionObj);
+
+                // 2. Actively executing a turn: takes priority over `post_turn_summary` from the previous
+                //    turn so a resolved chat turns blue immediately when the worker resumes running,
+                //    rather than staying yellow until the new turn finishes and overwrites `post_turn_summary`.
+                bool isWorkerRunning = !isBlockedMidTurn && isActive && (
+                    string.Equals(worker, "running", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(worker, "starting", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "running", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "starting", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(bucketKind, "working", StringComparison.OrdinalIgnoreCase));
+
+                // 3. Post-turn waiting for input: turn finished (worker idle) and asked the user a question.
+                bool isWaitingPostTurn = !isBlockedMidTurn && !isWorkerRunning && isActive && (
                     string.Equals(statusCategory, "need_input", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusCategory, "needs_input", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusCategory, "blocked", StringComparison.OrdinalIgnoreCase) ||
                     !string.IsNullOrWhiteSpace(needsAction));
 
-                bool isRunning = !isWaiting && isActive && (
-                    string.Equals(worker, "running", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(sessionStatus, "running", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(bucketKind, "working", StringComparison.OrdinalIgnoreCase));
+                bool isWaiting = isBlockedMidTurn || isWaitingPostTurn;
+                bool isRunning = isWorkerRunning;
 
                 var updated = ParseIso(Text(s, "last_event_at"))
                            ?? ParseIso(Text(s, "updated_at"))
@@ -929,7 +1203,7 @@ public static class RemoteChatUsage
                               : isRunning ? RemoteChatState.Running
                               : RemoteChatState.Done;
 
-                string? detail = isWaiting ? (needsAction ?? statusDetail ?? "Waiting for input")
+                string? detail = isWaiting ? (pendingActionDetail ?? needsAction ?? statusDetail ?? "Waiting for input")
                                : isRunning ? (taskSummary ?? statusDetail ?? "Working")
                                : statusDetail;
 
@@ -1051,13 +1325,18 @@ public static class RemoteChatUsage
         {
             if (File.Exists(ClaudeGlobalConfigPath))
             {
-                using var doc = JsonDocument.Parse(File.ReadAllText(ClaudeGlobalConfigPath));
-                if (doc.RootElement.TryGetProperty("oauthAccount", out var acct)
-                    && acct.ValueKind == JsonValueKind.Object
-                    && Text(acct, "organizationUuid") is { Length: > 0 } fileOrg)
+                var writeUtc = File.GetLastWriteTimeUtc(ClaudeGlobalConfigPath);
+                if (writeUtc != cachedClaudeGlobalConfigWriteUtc || string.IsNullOrWhiteSpace(cachedClaudeOrgUuid))
                 {
-                    cachedClaudeOrgUuid = fileOrg;
-                    return fileOrg;
+                    using var doc = JsonDocument.Parse(File.ReadAllText(ClaudeGlobalConfigPath));
+                    if (doc.RootElement.TryGetProperty("oauthAccount", out var acct)
+                        && acct.ValueKind == JsonValueKind.Object
+                        && Text(acct, "organizationUuid") is { Length: > 0 } fileOrg)
+                    {
+                        cachedClaudeOrgUuid = fileOrg;
+                        cachedClaudeGlobalConfigWriteUtc = writeUtc;
+                        return fileOrg;
+                    }
                 }
             }
         }
@@ -1117,11 +1396,11 @@ public static class RemoteChatUsage
         }
     }
 
-    // ---- Antigravity Remote Control polling --------------------------------
+    // ---- Antigravity Remote Control polling & real-time SSE streaming ------
 
     private sealed record AntigravityInstance(string Uuid, string RawName, string Server, bool Connected);
 
-    private static PollServiceResult PollAntigravity(DateTimeOffset doneCutoff)
+    private static PollServiceResult PollAntigravity(DateTimeOffset doneCutoff, bool forceFullSync = false, CancellationToken ct = default)
     {
         var buckets = new Dictionary<string, ServerBucket>(StringComparer.OrdinalIgnoreCase);
 
@@ -1129,54 +1408,131 @@ public static class RemoteChatUsage
         if (string.IsNullOrWhiteSpace(accessToken))
             return new PollServiceResult(buckets, "No Google login configured for Antigravity", NeedsAuth: true);
 
-        var listReply = GetCloudCode(accessToken, ListInstancesPath);
-        if (listReply is { Status: 401 })
+        List<AntigravityInstance> instances;
+        bool needInstanceListFetch;
+        lock (agStreamLock)
         {
-            accessToken = AntigravityUsage.GetValidAccessToken(forceRefresh: true);
-            if (!string.IsNullOrWhiteSpace(accessToken))
-                listReply = GetCloudCode(accessToken, ListInstancesPath);
+            needInstanceListFetch = forceFullSync ||
+                cachedAgInstances.Count == 0 ||
+                (DateTimeOffset.UtcNow - lastAgListInstancesUtc) >= TimeSpan.FromSeconds(12);
+            instances = cachedAgInstances.ToList();
         }
 
-        if (listReply is null)
-            return new PollServiceResult(buckets, "cloudcode-pa.googleapis.com unreachable", NeedsAuth: false);
-
-        if (listReply.Value.Status is 401 or 403)
-            return new PollServiceResult(buckets, "Google login for Antigravity expired", NeedsAuth: true);
-
-        if (listReply.Value.Status != 200)
-            return new PollServiceResult(buckets, $"Antigravity listInstances HTTP {listReply.Value.Status}", NeedsAuth: false);
-
-        var instances = ParseAntigravityInstances(listReply.Value.Body);
-        var connected = instances.Where(i => i.Connected).ToList();
-
-        // Register a bucket for each connected instance, and query its live trajectories in parallel.
-        foreach (var inst in connected)
+        if (needInstanceListFetch)
         {
-            string rowId = RowKey(inst.Server, RemoteChatService.Antigravity);
-            if (!buckets.ContainsKey(rowId))
+            var listReply = GetCloudCode(accessToken, ListInstancesPath);
+            if (listReply is { Status: 401 })
             {
-                buckets[rowId] = new ServerBucket
+                accessToken = AntigravityUsage.GetValidAccessToken(forceRefresh: true);
+                if (!string.IsNullOrWhiteSpace(accessToken))
+                    listReply = GetCloudCode(accessToken, ListInstancesPath);
+            }
+
+            if (listReply is null)
+            {
+                if (instances.Count == 0)
+                    return new PollServiceResult(buckets, "cloudcode-pa.googleapis.com unreachable", NeedsAuth: false);
+            }
+            else if (listReply.Value.Status is 401 or 403)
+            {
+                return new PollServiceResult(buckets, "Google login for Antigravity expired", NeedsAuth: true);
+            }
+            else if (listReply.Value.Status != 200)
+            {
+                if (instances.Count == 0)
+                    return new PollServiceResult(buckets, $"Antigravity listInstances HTTP {listReply.Value.Status}", NeedsAuth: false);
+            }
+            else
+            {
+                instances = ParseAntigravityInstances(listReply.Value.Body);
+                lock (agStreamLock)
                 {
-                    Id = rowId,
-                    Server = inst.Server,
-                    Service = RemoteChatService.Antigravity,
-                    Online = true,
-                };
+                    cachedAgInstances = instances;
+                    lastAgListInstancesUtc = DateTimeOffset.UtcNow;
+                }
             }
         }
 
-        Parallel.ForEach(connected, inst =>
-        {
-            var items = FetchAntigravityInstanceChats(accessToken!, inst, doneCutoff);
-            if (items.Count == 0) return;
+        var connected = instances.Where(i => i.Connected).ToList();
+        var needUnaryFetch = new List<AntigravityInstanceStreamState>();
 
-            string rowId = RowKey(inst.Server, RemoteChatService.Antigravity);
-            lock (buckets)
+        lock (agStreamLock)
+        {
+            var connectedUuids = connected.Select(i => i.Uuid).ToHashSet(StringComparer.Ordinal);
+            foreach (var staleUuid in agStreamsByUuid.Keys.Where(u => !connectedUuids.Contains(u)).ToList())
             {
-                if (buckets.TryGetValue(rowId, out var bucket))
-                    bucket.Chats.AddRange(items);
+                agStreamsByUuid[staleUuid].Dispose();
+                agStreamsByUuid.Remove(staleUuid);
             }
-        });
+
+            foreach (var inst in connected)
+            {
+                if (!agStreamsByUuid.TryGetValue(inst.Uuid, out var state))
+                {
+                    state = new AntigravityInstanceStreamState { Instance = inst };
+                    agStreamsByUuid[inst.Uuid] = state;
+                }
+                else
+                {
+                    state.Instance = inst;
+                }
+
+                if (!state.StreamRunning && enabled && !ct.IsCancellationRequested)
+                {
+                    state.StreamRunning = true;
+                    var capturedState = state;
+                    _ = Task.Run(() => RunAntigravityStreamLoopAsync(capturedState, ct), ct);
+                }
+
+                // Only perform the heavy unary GetAllCascadeTrajectories call when we don't yet have
+                // a snapshot or if the real-time SSE stream is currently disconnected.
+                bool unaryStale = (DateTimeOffset.UtcNow - state.LastUnaryFetchUtc) >= TimeSpan.FromSeconds(12);
+                if (!state.HasSnapshot || (!state.StreamConnected && (forceFullSync || unaryStale)))
+                {
+                    needUnaryFetch.Add(state);
+                }
+            }
+        }
+
+        if (needUnaryFetch.Count > 0 && !string.IsNullOrWhiteSpace(accessToken))
+        {
+            Parallel.ForEach(needUnaryFetch, state =>
+            {
+                FetchAntigravityInstanceTrajectoriesUnary(accessToken!, state);
+            });
+        }
+
+        BuildAntigravityBuckets(doneCutoff, buckets);
+        return new PollServiceResult(buckets, null, NeedsAuth: false);
+    }
+
+    private static void BuildAntigravityBuckets(DateTimeOffset doneCutoff, Dictionary<string, ServerBucket> buckets)
+    {
+        lock (agStreamLock)
+        {
+            foreach (var state in agStreamsByUuid.Values)
+            {
+                string rowId = RowKey(state.Instance.Server, RemoteChatService.Antigravity);
+                if (!buckets.TryGetValue(rowId, out var bucket))
+                {
+                    bucket = new ServerBucket
+                    {
+                        Id = rowId,
+                        Server = state.Instance.Server,
+                        Service = RemoteChatService.Antigravity,
+                        Online = true,
+                    };
+                    buckets[rowId] = bucket;
+                }
+
+                foreach (var t in state.Trajectories.Values)
+                {
+                    var item = ToAntigravityChatItem(t, doneCutoff);
+                    if (item is not null)
+                        bucket.Chats.Add(item);
+                }
+            }
+        }
 
         foreach (var b in buckets.Values)
         {
@@ -1185,8 +1541,237 @@ public static class RemoteChatUsage
                 .ThenByDescending(c => c.LastUpdated)
                 .ToList();
         }
+    }
 
-        return new PollServiceResult(buckets, null, NeedsAuth: false);
+    private static void PublishAntigravityStreamUpdate()
+    {
+        int doneWindowHours;
+        lock (gate)
+        {
+            if (settings is not { Enabled: true }) return;
+            doneWindowHours = Math.Clamp(settings.DoneWindowHours, 1, 168);
+        }
+
+        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(doneWindowHours);
+        var buckets = new Dictionary<string, ServerBucket>(StringComparer.OrdinalIgnoreCase);
+        BuildAntigravityBuckets(cutoff, buckets);
+        ApplyServiceResult(RemoteChatService.Antigravity, new PollServiceResult(buckets, null, NeedsAuth: false));
+    }
+
+    private static async Task RunAntigravityStreamLoopAsync(AntigravityInstanceStreamState state, CancellationToken parentCt)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(parentCt, state.Cts.Token);
+        var ct = linked.Token;
+
+        try
+        {
+            while (!ct.IsCancellationRequested && enabled)
+            {
+                try
+                {
+                    var accessToken = AntigravityUsage.GetValidAccessToken(forceRefresh: false);
+                    if (string.IsNullOrWhiteSpace(accessToken))
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                        continue;
+                    }
+
+                    string reqBody = JsonSerializer.Serialize(new
+                    {
+                        targetInstanceUuid = state.Instance.Uuid,
+                        rpcPath = SubscribeSummariesRpc,
+                        payload = SubscribeSummariesPayloadBase64,
+                        headers = new Dictionary<string, string>
+                        {
+                            ["Content-Type"] = "application/connect+json",
+                            ["Connect-Protocol-Version"] = "1",
+                        },
+                    });
+
+                    using var content = new StringContent(reqBody, Encoding.UTF8, "application/json");
+                    using var req = new HttpRequestMessage(HttpMethod.Post, CloudCodeBaseUrl + StreamProxyCommandPath)
+                    {
+                        Content = content,
+                    };
+                    req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {accessToken}");
+                    req.Headers.TryAddWithoutValidation("User-Agent", "antigravity");
+                    req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
+
+                    using var resp = await streamHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+                    if (resp.StatusCode == HttpStatusCode.Unauthorized)
+                    {
+                        AntigravityUsage.GetValidAccessToken(forceRefresh: true);
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                        continue;
+                    }
+
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(4), ct);
+                        continue;
+                    }
+
+                    lock (agStreamLock)
+                    {
+                        state.StreamConnected = true;
+                    }
+
+                    using var stream = await resp.Content.ReadAsStreamAsync(ct);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                    var frameBuffer = new List<byte>(65536);
+                    bool isFirstFrame = true;
+
+                    while (!ct.IsCancellationRequested)
+                    {
+                        var line = await reader.ReadLineAsync(ct);
+                        if (line is null) break;
+                        if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+
+                        var dataJson = line[5..].Trim();
+                        if (!dataJson.StartsWith('{')) continue;
+
+                        string? payloadB64 = null;
+                        using (var evtDoc = JsonDocument.Parse(dataJson))
+                        {
+                            payloadB64 = Text(evtDoc.RootElement, "payload");
+                        }
+
+                        if (string.IsNullOrEmpty(payloadB64)) continue;
+
+                        byte[] chunk = Convert.FromBase64String(payloadB64);
+                        frameBuffer.AddRange(chunk);
+
+                        bool endOfStream = false;
+                        while (frameBuffer.Count >= 5)
+                        {
+                            byte flags = frameBuffer[0];
+                            int frameLen = (frameBuffer[1] << 24)
+                                         | (frameBuffer[2] << 16)
+                                         | (frameBuffer[3] << 8)
+                                         | frameBuffer[4];
+
+                            if (frameLen < 0 || frameLen > 32 * 1024 * 1024)
+                            {
+                                endOfStream = true;
+                                break;
+                            }
+
+                            if (frameBuffer.Count < 5 + frameLen)
+                                break;
+
+                            byte[] frameBytes = frameBuffer.GetRange(5, frameLen).ToArray();
+                            frameBuffer.RemoveRange(0, 5 + frameLen);
+
+                            if ((flags & 0x02) != 0)
+                            {
+                                endOfStream = true;
+                                break;
+                            }
+
+                            if (flags == 0 && frameBytes.Length > 0)
+                            {
+                                ApplyAntigravityStreamFrame(state, frameBytes, isFirstFrame);
+                                isFirstFrame = false;
+                            }
+                        }
+
+                        if (endOfStream) break;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.WriteOnce($"ag-stream-{state.Instance.Server}",
+                        $"Antigravity summary stream reconnecting for {state.Instance.Server}: {ex.Message}");
+                }
+                finally
+                {
+                    lock (agStreamLock)
+                    {
+                        state.StreamConnected = false;
+                    }
+                }
+
+                if (!ct.IsCancellationRequested)
+                    await Task.Delay(TimeSpan.FromMilliseconds(1500), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            lock (agStreamLock)
+            {
+                state.StreamConnected = false;
+                state.StreamRunning = false;
+            }
+        }
+    }
+
+    private static void ApplyAntigravityStreamFrame(
+        AntigravityInstanceStreamState state,
+        byte[] frameBytes,
+        bool isFirstFrame)
+    {
+        bool changed = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(frameBytes);
+            var root = doc.RootElement;
+
+            lock (agStreamLock)
+            {
+                if (isFirstFrame && root.TryGetProperty("updates", out _))
+                {
+                    state.Trajectories.Clear();
+                    changed = true;
+                }
+
+                if (root.TryGetProperty("updates", out var updates) && updates.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in updates.EnumerateObject())
+                    {
+                        var parsed = ParseAntigravityTrajectorySummary(prop.Name, prop.Value, state.Instance.Server);
+                        if (parsed is null || parsed.Killed || parsed.Archived)
+                        {
+                            if (state.Trajectories.Remove(prop.Name))
+                                changed = true;
+                        }
+                        else
+                        {
+                            state.Trajectories[prop.Name] = parsed;
+                            changed = true;
+                        }
+                    }
+                }
+
+                if (root.TryGetProperty("deletes", out var deletes) && deletes.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var del in deletes.EnumerateArray())
+                    {
+                        if (del.ValueKind == JsonValueKind.String && del.GetString() is { Length: > 0 } id)
+                        {
+                            if (state.Trajectories.Remove(id))
+                                changed = true;
+                        }
+                    }
+                }
+
+                state.HasSnapshot = true;
+                state.LastUnaryFetchUtc = DateTimeOffset.UtcNow;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.WriteOnce($"ag-stream-parse-{state.Instance.Server}",
+                $"could not parse Antigravity stream frame for {state.Instance.Server}: {ex.Message}");
+        }
+
+        if (changed)
+            PublishAntigravityStreamUpdate();
     }
 
     private static List<AntigravityInstance> ParseAntigravityInstances(string body)
@@ -1223,17 +1808,15 @@ public static class RemoteChatUsage
         return result;
     }
 
-    private static List<RemoteChatItem> FetchAntigravityInstanceChats(
+    private static void FetchAntigravityInstanceTrajectoriesUnary(
         string accessToken,
-        AntigravityInstance inst,
-        DateTimeOffset doneCutoff)
+        AntigravityInstanceStreamState state)
     {
-        var chats = new List<RemoteChatItem>();
         try
         {
             string reqBody = JsonSerializer.Serialize(new
             {
-                targetInstanceUuid = inst.Uuid,
+                targetInstanceUuid = state.Instance.Uuid,
                 rpcPath = GetTrajectoriesRpc,
                 payload = GetTrajectoriesPayloadBase64,
                 headers = new Dictionary<string, string>
@@ -1244,94 +1827,138 @@ public static class RemoteChatUsage
             });
 
             var reply = PostCloudCode(accessToken, ProxyCommandPath, reqBody);
-            if (reply is not { Status: 200 }) return chats;
+            if (reply is not { Status: 200 }) return;
 
             using var outerDoc = JsonDocument.Parse(reply.Value.Body);
             var payloadB64 = Text(outerDoc.RootElement, "payload");
-            if (string.IsNullOrWhiteSpace(payloadB64)) return chats;
+            if (string.IsNullOrWhiteSpace(payloadB64)) return;
 
             byte[] decoded = Convert.FromBase64String(payloadB64);
             using var innerDoc = JsonDocument.Parse(decoded);
             if (!innerDoc.RootElement.TryGetProperty("trajectorySummaries", out var summaries)
                 || summaries.ValueKind != JsonValueKind.Object)
-                return chats;
+                return;
 
+            var parsedMap = new Dictionary<string, AntigravityTrajectorySummary>(StringComparer.Ordinal);
             foreach (var prop in summaries.EnumerateObject())
             {
-                var t = prop.Value;
-                if (t.ValueKind != JsonValueKind.Object) continue;
+                var summary = ParseAntigravityTrajectorySummary(prop.Name, prop.Value, state.Instance.Server);
+                if (summary is not null && !summary.Killed && !summary.Archived)
+                    parsedMap[prop.Name] = summary;
+            }
 
-                if (Bool(t, "killed")) continue;
-
-                bool archived = false;
-                string? annTitle = null;
-                DateTimeOffset? lastViewed = null;
-
-                if (t.TryGetProperty("annotations", out var ann) && ann.ValueKind == JsonValueKind.Object)
+            lock (agStreamLock)
+            {
+                // Only overwrite with the unary snapshot if the real-time stream hasn't already
+                // taken over while the unary HTTP call was in flight.
+                if (!state.StreamConnected || !state.HasSnapshot)
                 {
-                    archived = Bool(ann, "archived");
-                    annTitle = Text(ann, "title");
-                    lastViewed = ParseIso(Text(ann, "lastUserViewTime"));
+                    state.Trajectories.Clear();
+                    foreach (var (id, s) in parsedMap)
+                        state.Trajectories[id] = s;
                 }
-
-                if (archived) continue;
-
-                string title = CleanTitle(annTitle ?? Text(t, "summary")) ?? "Untitled chat";
-                var status = Text(t, "status") ?? "";
-                bool notFullyIdle = Bool(t, "notFullyIdle");
-                bool hasActiveChildren = Bool(t, "hasActiveChildren");
-                bool interrupted = Bool(t, "interrupted");
-
-                int waitingSteps = 0;
-                if (t.TryGetProperty("waitingSteps", out var ws) && ws.ValueKind == JsonValueKind.Array)
-                    waitingSteps = ws.GetArrayLength();
-
-                var lastModified = ParseIso(Text(t, "lastModifiedTime"))
-                                ?? ParseIso(Text(t, "lastUserInputTime"))
-                                ?? DateTimeOffset.MinValue;
-
-                bool unread = lastViewed is null || lastModified > lastViewed.Value.AddSeconds(2);
-
-                bool isWaiting = waitingSteps > 0;
-                bool isRunning = !isWaiting && (
-                    string.Equals(status, "CASCADE_RUN_STATUS_RUNNING", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(status, "CASCADE_RUN_STATUS_BUSY", StringComparison.OrdinalIgnoreCase) ||
-                    notFullyIdle ||
-                    hasActiveChildren);
-
-                bool isDone = !isWaiting && !isRunning && lastModified >= doneCutoff;
-
-                if (!isWaiting && !isRunning && !isDone) continue;
-
-                string? repo = ExtractAntigravityRepo(t);
-                var chatState = isWaiting ? RemoteChatState.Waiting
-                              : isRunning ? RemoteChatState.Running
-                              : RemoteChatState.Done;
-
-                string? detail = isWaiting ? "Waiting for approval / input"
-                               : isRunning ? (hasActiveChildren ? "Running with subagents" : "Running")
-                               : interrupted ? "Interrupted"
-                               : unread ? "Finished (unread)"
-                               : "Ready";
-
-                chats.Add(new RemoteChatItem(
-                    prop.Name,
-                    title,
-                    inst.Server,
-                    RemoteChatService.Antigravity,
-                    chatState,
-                    repo,
-                    detail,
-                    unread,
-                    lastModified,
-                    AntigravityWebUrl));
+                state.HasSnapshot = true;
+                state.LastUnaryFetchUtc = DateTimeOffset.UtcNow;
             }
         }
         catch (Exception ex)
         {
-            Log.WriteOnce($"ag-proxy-{inst.Server}", $"Antigravity proxyCommand failed for {inst.Server}: {ex.Message}");
+            Log.WriteOnce($"ag-proxy-{state.Instance.Server}",
+                $"Antigravity proxyCommand failed for {state.Instance.Server}: {ex.Message}");
         }
-        return chats;
+    }
+
+    private static AntigravityTrajectorySummary? ParseAntigravityTrajectorySummary(
+        string id,
+        JsonElement t,
+        string server)
+    {
+        if (t.ValueKind != JsonValueKind.Object) return null;
+
+        bool killed = Bool(t, "killed");
+        bool archived = false;
+        string? annTitle = null;
+        DateTimeOffset? lastViewed = null;
+
+        if (t.TryGetProperty("annotations", out var ann) && ann.ValueKind == JsonValueKind.Object)
+        {
+            archived = Bool(ann, "archived");
+            annTitle = Text(ann, "title");
+            lastViewed = ParseIso(Text(ann, "lastUserViewTime"));
+        }
+
+        string title = CleanTitle(annTitle ?? Text(t, "summary")) ?? "Untitled chat";
+        var status = Text(t, "status") ?? "";
+        bool notFullyIdle = Bool(t, "notFullyIdle");
+        bool hasActiveChildren = Bool(t, "hasActiveChildren");
+        bool interrupted = Bool(t, "interrupted");
+
+        int waitingSteps = 0;
+        if (t.TryGetProperty("waitingSteps", out var ws) && ws.ValueKind == JsonValueKind.Array)
+            waitingSteps = ws.GetArrayLength();
+
+        var lastModified = ParseIso(Text(t, "lastModifiedTime"))
+                        ?? ParseIso(Text(t, "lastUserInputTime"))
+                        ?? DateTimeOffset.MinValue;
+
+        bool unread = lastViewed is null || lastModified > lastViewed.Value.AddSeconds(2);
+        string? repo = ExtractAntigravityRepo(t);
+
+        return new AntigravityTrajectorySummary(
+            id,
+            title,
+            server,
+            status,
+            notFullyIdle,
+            hasActiveChildren,
+            interrupted,
+            waitingSteps,
+            killed,
+            archived,
+            unread,
+            repo,
+            lastModified);
+    }
+
+    private static RemoteChatItem? ToAntigravityChatItem(
+        AntigravityTrajectorySummary t,
+        DateTimeOffset doneCutoff)
+    {
+        if (t.Killed || t.Archived) return null;
+
+        bool isWaiting = t.WaitingSteps > 0 ||
+            t.Status.Contains("WAITING", StringComparison.OrdinalIgnoreCase);
+
+        bool isRunning = !isWaiting && (
+            string.Equals(t.Status, "CASCADE_RUN_STATUS_RUNNING", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(t.Status, "CASCADE_RUN_STATUS_BUSY", StringComparison.OrdinalIgnoreCase) ||
+            t.NotFullyIdle ||
+            t.HasActiveChildren);
+
+        bool isDone = !isWaiting && !isRunning && t.LastModified >= doneCutoff;
+        if (!isWaiting && !isRunning && !isDone) return null;
+
+        var chatState = isWaiting ? RemoteChatState.Waiting
+                      : isRunning ? RemoteChatState.Running
+                      : RemoteChatState.Done;
+
+        string? detail = isWaiting ? "Waiting for approval / input"
+                       : isRunning ? (t.HasActiveChildren ? "Running with subagents" : "Running")
+                       : t.Interrupted ? "Interrupted"
+                       : t.Unread ? "Finished (unread)"
+                       : "Ready";
+
+        return new RemoteChatItem(
+            t.Id,
+            t.Title,
+            t.Server,
+            RemoteChatService.Antigravity,
+            chatState,
+            t.Repo,
+            detail,
+            t.Unread,
+            t.LastModified,
+            AntigravityWebUrl);
     }
 
     private static string? ExtractAntigravityRepo(JsonElement traj)
@@ -1419,7 +2046,7 @@ public static class RemoteChatUsage
         // 1. Claude Code Remote Control
         report.AppendLine();
         report.AppendLine("--- Claude Code Remote Control ---");
-        var claudeRes = PollClaude(cutoff);
+        var claudeRes = PollClaude(cutoff, forceFullSync: true);
         if (!string.IsNullOrWhiteSpace(claudeRes.Diagnostic))
             report.AppendLine($"transport: {claudeRes.Diagnostic}");
         if (claudeRes.Error is not null && claudeRes.Buckets.Count == 0)
@@ -1443,7 +2070,7 @@ public static class RemoteChatUsage
         // 2. Antigravity Remote Control
         report.AppendLine();
         report.AppendLine("--- Antigravity Remote Control ---");
-        var agRes = PollAntigravity(cutoff);
+        var agRes = PollAntigravity(cutoff, forceFullSync: true);
         if (agRes.Error is not null && agRes.Buckets.Count == 0)
         {
             report.AppendLine($"status: {agRes.Error}");
@@ -1453,10 +2080,18 @@ public static class RemoteChatUsage
             report.AppendLine($"connected instances: {agRes.Buckets.Count}");
             foreach (var b in agRes.Buckets.Values.OrderBy(x => x.Server))
             {
+                bool streamLive;
+                lock (agStreamLock)
+                {
+                    streamLive = agStreamsByUuid.Values.Any(s =>
+                        string.Equals(s.Instance.Server, b.Server, StringComparison.OrdinalIgnoreCase) &&
+                        s.StreamConnected);
+                }
+                string transportMode = streamLive ? "online, SSE live stream" : (b.Online ? "online, polling" : "offline");
                 int w = b.Chats.Count(c => c.State == RemoteChatState.Waiting);
                 int r = b.Chats.Count(c => c.State == RemoteChatState.Running);
                 int d = b.Chats.Count(c => c.State == RemoteChatState.Done);
-                report.AppendLine($"  • {b.Server} ({(b.Online ? "online" : "offline")}): {b.Chats.Count} live — {w} waiting, {r} running, {d} done");
+                report.AppendLine($"  • {b.Server} ({transportMode}): {b.Chats.Count} live — {w} waiting, {r} running, {d} done");
                 foreach (var c in b.Chats.Take(5))
                     report.AppendLine($"      [{c.State}] {(c.Repo is not null ? $"({c.Repo}) " : "")}{c.Title}");
             }

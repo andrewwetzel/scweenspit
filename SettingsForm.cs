@@ -2189,7 +2189,7 @@ public sealed class SettingsForm : Form
         doneHours.ValueChanged += (_, _) => { remote.DoneWindowHours = (int)doneHours.Value; Save(); };
         Row(page, "Hours to keep idle/finished chats in live count", doneHours);
 
-        var interval = Theme.Number(remote.RefreshSeconds, 10, 300, 5);
+        var interval = Theme.Number(remote.RefreshSeconds, 1, 300, 1);
         interval.ValueChanged += (_, _) => { remote.RefreshSeconds = (int)interval.Value; Save(); };
         Row(page, "Seconds between remote chat checks", interval);
 

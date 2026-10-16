@@ -112,6 +112,14 @@ public static class ClaudeUsage
     private static string? failedRefreshToken;
     private static DateTimeOffset oauthRefreshBackoffUntil = DateTimeOffset.MinValue;
 
+    private static DateTime cachedDiskCredsWriteUtc = DateTime.MinValue;
+    private static string? cachedDiskAccessToken;
+    private static string? cachedDiskRefreshToken;
+    private static long cachedDiskExpiresAt;
+    private static List<string> cachedDiskScopes = new();
+    private static string? cachedDiskSub;
+    private static string? cachedDiskTier;
+
     /// <summary>Wakes the poll loop early, for "check now" and for a key that just changed.</summary>
     private static volatile TaskCompletionSource? nudge;
 
@@ -1005,27 +1013,42 @@ public static class ClaudeUsage
             {
                 if (File.Exists(CredentialsPath))
                 {
-                    using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
-                    if (doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
-                        && oauth.ValueKind == JsonValueKind.Object)
+                    var writeUtc = File.GetLastWriteTimeUtc(CredentialsPath);
+                    if (writeUtc != cachedDiskCredsWriteUtc ||
+                        (cachedDiskAccessToken is null && cachedDiskRefreshToken is null))
                     {
-                        diskAccess = Text(oauth, "accessToken")?.Trim();
-                        diskRefresh = Text(oauth, "refreshToken")?.Trim();
-                        if (oauth.TryGetProperty("expiresAt", out var expEl) && Number(expEl, out double expMs))
-                            diskExpiresAt = (long)expMs;
-
-                        if (oauth.TryGetProperty("scopes", out var scEl) && scEl.ValueKind == JsonValueKind.Array)
+                        using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
+                        if (doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
+                            && oauth.ValueKind == JsonValueKind.Object)
                         {
-                            foreach (var item in scEl.EnumerateArray())
-                            {
-                                if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } s)
-                                    diskScopes.Add(s);
-                            }
-                        }
+                            cachedDiskAccessToken = Text(oauth, "accessToken")?.Trim();
+                            cachedDiskRefreshToken = Text(oauth, "refreshToken")?.Trim();
+                            cachedDiskExpiresAt = oauth.TryGetProperty("expiresAt", out var expEl) && Number(expEl, out double expMs)
+                                ? (long)expMs
+                                : 0;
 
-                        sub = Text(oauth, "subscriptionType");
-                        tier = Text(oauth, "rateLimitTier");
+                            var parsedScopes = new List<string>();
+                            if (oauth.TryGetProperty("scopes", out var scEl) && scEl.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var item in scEl.EnumerateArray())
+                                {
+                                    if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } s)
+                                        parsedScopes.Add(s);
+                                }
+                            }
+                            cachedDiskScopes = parsedScopes;
+                            cachedDiskSub = Text(oauth, "subscriptionType");
+                            cachedDiskTier = Text(oauth, "rateLimitTier");
+                            cachedDiskCredsWriteUtc = writeUtc;
+                        }
                     }
+
+                    diskAccess = cachedDiskAccessToken;
+                    diskRefresh = cachedDiskRefreshToken;
+                    diskExpiresAt = cachedDiskExpiresAt;
+                    diskScopes = cachedDiskScopes;
+                    sub = cachedDiskSub;
+                    tier = cachedDiskTier;
                 }
             }
             catch (Exception ex)
@@ -1340,6 +1363,13 @@ public static class ClaudeUsage
 
             rootObj["claudeAiOauth"] = oauthObj;
             File.WriteAllText(CredentialsPath, rootObj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            cachedDiskAccessToken = accessToken;
+            cachedDiskRefreshToken = refreshToken;
+            cachedDiskExpiresAt = expiresAtMs;
+            cachedDiskScopes = scopes;
+            cachedDiskSub = subType;
+            cachedDiskTier = rateTier;
+            cachedDiskCredsWriteUtc = File.GetLastWriteTimeUtc(CredentialsPath);
         }
         catch (Exception ex)
         {

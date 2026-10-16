@@ -18,6 +18,7 @@ public sealed class TaskbarWindow : Form
 
     private readonly AppBar appBar;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer remoteGlowTimer = new() { Interval = 33 };
     private readonly ToolTip tips = new() { InitialDelay = 180, ReshowDelay = 80 };
 
     private readonly TaskbarPreview preview = new();
@@ -172,6 +173,36 @@ public sealed class TaskbarWindow : Form
             if (AnchorsStartMenu) StartMenu.EnsureWatching();
         };
         refresh.Start();
+
+        remoteGlowTimer.Tick += (_, _) =>
+        {
+            if (IsDisposed || !RemoteChatsVisible)
+            {
+                remoteGlowTimer.Stop();
+                return;
+            }
+            Invalidate(RemoteChatsArea);
+            if (!RemoteChatUsage.IsAttentionGlowing)
+                remoteGlowTimer.Stop();
+        };
+
+        RemoteChatUsage.Changed += OnRemoteChatsChanged;
+    }
+
+    private void OnRemoteChatsChanged()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (IsDisposed || !settings.ShowRemoteChats) return;
+                if (RemoteChatUsage.IsAttentionGlowing && !remoteGlowTimer.Enabled)
+                    remoteGlowTimer.Start();
+                Invalidate();
+            });
+        }
+        catch { }
     }
 
     /// <summary>
@@ -1396,6 +1427,8 @@ public sealed class TaskbarWindow : Form
     {
         if (disposing)
         {
+            RemoteChatUsage.Changed -= OnRemoteChatsChanged;
+            remoteGlowTimer.Dispose();
             refresh.Dispose();
             hoverDelay.Dispose();
             tips.Dispose();

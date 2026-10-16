@@ -412,8 +412,8 @@ public sealed class RemoteChatsSettings
     /// <summary>Master switch. Off means we never query remote sessions or instances.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary>Seconds between polls. Twenty seconds keeps chat counts and states responsive.</summary>
-    public int RefreshSeconds { get; set; } = 20;
+    /// <summary>Seconds between polls. Two seconds keeps chat counts and states near-instantaneous.</summary>
+    public int RefreshSeconds { get; set; } = 2;
 
     /// <summary>
     /// How many hours a recently finished or idle unarchived chat stays counted in the "Done" tally
@@ -450,7 +450,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -798,6 +798,7 @@ public sealed class SplitConfig
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
 
+        int priorVersion = Version;
         Version = CurrentVersion;
 
         // Below half a minute this stops being a status readout and starts being a scraper.
@@ -817,7 +818,9 @@ public sealed class SplitConfig
             Bambu.Region = "China";
 
         RemoteChats ??= new RemoteChatsSettings();
-        RemoteChats.RefreshSeconds = Math.Clamp(RemoteChats.RefreshSeconds, 10, 600);
+        if (priorVersion < 5 && RemoteChats.RefreshSeconds == 20)
+            RemoteChats.RefreshSeconds = 2;
+        RemoteChats.RefreshSeconds = Math.Clamp(RemoteChats.RefreshSeconds, 1, 300);
         RemoteChats.DoneWindowHours = Math.Clamp(RemoteChats.DoneWindowHours, 1, 168);
         RemoteChats.Rows ??= new();
         RemoteChats.Rows.RemoveAll(r => r is null || string.IsNullOrWhiteSpace(r.Id));

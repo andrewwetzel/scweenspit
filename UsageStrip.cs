@@ -283,9 +283,54 @@ internal static class UsageStrip
         var rows = reading?.Rows ?? [];
         if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading); return; }
 
+        float glow = RemoteChatUsage.AttentionGlowIntensity;
+        if (glow > 0.01f)
+            PaintRemoteChatsAttentionGlow(g, area, glow);
+
         RenderOrHitTestRemoteChats(g, area, rows, maxRowsPerColumn, hoveredChatId,
                                    stripHovered || hoveredChatId is not null,
                                    hitPoint: null, out _, out _);
+    }
+
+    private static void PaintRemoteChatsAttentionGlow(Graphics g, Rectangle area, float glow)
+    {
+        var box = new Rectangle(area.X + 2, area.Y + 2, Math.Max(8, area.Width - 4), Math.Max(8, area.Height - 4));
+        var prev = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using var path = RoundedRectPath(box, 6);
+        int fillAlpha = (int)Math.Clamp(Math.Round(78 * glow), 0, 255);
+        int outerAlpha = (int)Math.Clamp(Math.Round(150 * glow), 0, 255);
+        int rimAlpha = (int)Math.Clamp(Math.Round(240 * glow), 0, 255);
+
+        using (var wash = new SolidBrush(Color.FromArgb(fillAlpha, 255, 168, 24)))
+            g.FillPath(wash, path);
+
+        using (var halo = new Pen(Color.FromArgb(outerAlpha, 255, 158, 24), 2.8f))
+            g.DrawPath(halo, path);
+
+        using (var rim = new Pen(Color.FromArgb(rimAlpha, 255, 224, 130), 1.2f))
+            g.DrawPath(rim, path);
+
+        g.SmoothingMode = prev;
+    }
+
+    private static GraphicsPath RoundedRectPath(Rectangle box, int radius)
+    {
+        var path = new GraphicsPath();
+        int r = Math.Min(radius, Math.Min(box.Width, box.Height) / 2);
+        if (r <= 1)
+        {
+            path.AddRectangle(box);
+            return path;
+        }
+        int d = r * 2;
+        path.AddArc(box.X, box.Y, d, d, 180, 90);
+        path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
+        path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
+        path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     /// <summary>Returns the individual chat circle under <paramref name="pt"/>, or null if none.</summary>
