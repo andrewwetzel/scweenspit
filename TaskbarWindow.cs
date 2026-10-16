@@ -1108,7 +1108,7 @@ public sealed class TaskbarWindow : Form
 
     private void ShowDividerMenu(TrackerSection section, Point at)
     {
-        var menu = Theme.Menu();
+        var menu = Theme.Menu("Divider");
         string name = NameForTracker(section);
 
         menu.Items.Add(new ToolStripMenuItem($"Reset {name} size", null, (_, _) =>
@@ -1143,6 +1143,8 @@ public sealed class TaskbarWindow : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
+
+        Theme.DismissOpenMenusOutside(Cursor.Position);
 
         if (DividerUnder(e.Location) is { } div)
         {
@@ -1319,7 +1321,7 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private void ShowButtonMenu(Button button, Point at)
     {
-        var menu = Theme.Menu();
+        var menu = Theme.Menu("Button");
         bool pinned = settings.Pinned.Any(p => Same(p, button.Id));
 
         if (button.Windows.Count > 1)
@@ -1369,7 +1371,10 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private void ShowRemoteChatsMenu(Point at)
     {
-        var menu = Theme.Menu();
+        if (Theme.WasJustDismissedAt("RemoteChats", at))
+            return;
+
+        var menu = Theme.Menu("RemoteChats");
         var reading = RemoteChatUsage.Current;
         var rows = reading?.Rows ?? [];
 

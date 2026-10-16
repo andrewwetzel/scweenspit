@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace ScweenSpit;
@@ -13,6 +14,21 @@ internal static class Theme
     public static readonly Color Text    = Color.FromArgb(230, 232, 236);
     public static readonly Color Muted   = Color.FromArgb(150, 157, 170);
     public static readonly Color Divider = Color.FromArgb(48, 52, 62);
+
+    private static readonly HashSet<ContextMenuStrip> wiredMenus = [];
+    private static readonly List<ContextMenuStrip> openMenus = [];
+    private static readonly System.Windows.Forms.Timer menuWatch = new() { Interval = 15 };
+    private static readonly Native.LowLevelMouseProc mouseHookProc = OnMouseHook;
+    private static IntPtr mouseHook = IntPtr.Zero;
+    private static bool prevLeft, prevRight, prevMiddle, prevEsc, prevWin;
+    private static long lastOutsideDismissTick;
+    private static string? lastOutsideDismissTag;
+    private static Point lastOutsideDismissPoint;
+
+    static Theme()
+    {
+        menuWatch.Tick += (_, _) => OnMenuWatchTick();
+    }
 
     public static Font Face(float size = 9.5f, FontStyle style = FontStyle.Regular) =>
         new("Segoe UI", size, style);
@@ -73,17 +89,12 @@ internal static class Theme
     private static Icon? appIcon;
 
     /// <summary>
-    /// The 70/30 glyph, drawn at runtime so there is no .ico to ship. Shared by the tray and the
-    /// settings window: a window with no icon does not look like an application, and this one is
-    /// meant to sit in the taskbar and Alt+Tab like any other.
-    /// </summary>
-    /// <summary>
     /// A menu in the same palette as everything else. Windows renders a stock ContextMenuStrip in
     /// system light grey whatever the surface it opens from, which on a dark bar reads as a bug.
     /// </summary>
-    public static ContextMenuStrip Menu()
+    public static ContextMenuStrip Menu(string? tag = null)
     {
-        var menu = Dress(new ContextMenuStrip());
+        var menu = Dress(new ContextMenuStrip { Tag = tag });
 
         // A menu that outlives its click is a handle held for the life of the process, once per
         // right-click. Nothing refers to it afterwards — but not from inside Closed, which is still
@@ -110,7 +121,201 @@ internal static class Theme
         menu.ForeColor = Text;
         menu.Font = Face();
         menu.Renderer = new ToolStripProfessionalRenderer(new MenuColours()) { RoundedEdges = false };
+
+        if (menu is ContextMenuStrip root && wiredMenus.Add(root))
+        {
+            root.Opened += (_, _) => OnMenuOpened(root);
+            root.Closed += (_, _) => OnMenuClosed(root);
+            root.Disposed += (_, _) =>
+            {
+                wiredMenus.Remove(root);
+                OnMenuClosed(root);
+            };
+        }
+
         return menu;
+    }
+
+    private static void OnMenuOpened(ContextMenuStrip root)
+    {
+        // Close any other menu that was already open so two popup menus never stack.
+        foreach (var existing in openMenus.ToArray())
+        {
+            if (!ReferenceEquals(existing, root))
+            {
+                openMenus.Remove(existing);
+                try { existing.Close(ToolStripDropDownCloseReason.AppClicked); } catch { }
+            }
+        }
+
+        if (!openMenus.Contains(root))
+            openMenus.Add(root);
+
+        prevLeft = Native.IsKeyDown(Native.VK_LBUTTON);
+        prevRight = Native.IsKeyDown(Native.VK_RBUTTON);
+        prevMiddle = Native.IsKeyDown(Native.VK_MBUTTON);
+        prevEsc = Native.IsKeyDown(Native.VK_ESCAPE);
+        prevWin = Native.IsKeyDown(Native.VK_LWIN) || Native.IsKeyDown(Native.VK_RWIN);
+
+        if (mouseHook == IntPtr.Zero)
+            mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseHookProc, IntPtr.Zero, 0);
+
+        if (!menuWatch.Enabled)
+            menuWatch.Start();
+    }
+
+    private static void OnMenuClosed(ContextMenuStrip root)
+    {
+        openMenus.Remove(root);
+        if (openMenus.Count == 0)
+            StopWatchingMenus();
+    }
+
+    private static void StopWatchingMenus()
+    {
+        menuWatch.Stop();
+        if (mouseHook != IntPtr.Zero)
+        {
+            Native.UnhookWindowsHookEx(mouseHook);
+            mouseHook = IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr OnMouseHook(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        var hook = mouseHook;
+        if (nCode >= 0 && openMenus.Count > 0)
+        {
+            int msg = wParam.ToInt32();
+            if (msg is Native.WM_LBUTTONDOWN or Native.WM_RBUTTONDOWN or Native.WM_MBUTTONDOWN or Native.WM_XBUTTONDOWN)
+            {
+                var info = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
+                DismissOpenMenusOutside(new Point(info.pt.X, info.pt.Y));
+            }
+        }
+        return Native.CallNextHookEx(hook, nCode, wParam, lParam);
+    }
+
+    private static void OnMenuWatchTick()
+    {
+        openMenus.RemoveAll(m => m.IsDisposed || !m.Visible);
+        if (openMenus.Count == 0)
+        {
+            StopWatchingMenus();
+            return;
+        }
+
+        bool left = Native.IsKeyDown(Native.VK_LBUTTON);
+        bool right = Native.IsKeyDown(Native.VK_RBUTTON);
+        bool middle = Native.IsKeyDown(Native.VK_MBUTTON);
+        bool esc = Native.IsKeyDown(Native.VK_ESCAPE);
+        bool win = Native.IsKeyDown(Native.VK_LWIN) || Native.IsKeyDown(Native.VK_RWIN);
+
+        bool escPressed = esc && !prevEsc;
+        bool winPressed = win && !prevWin;
+        bool mousePressed = (left && !prevLeft) || (right && !prevRight) || (middle && !prevMiddle);
+
+        prevLeft = left;
+        prevRight = right;
+        prevMiddle = middle;
+        prevEsc = esc;
+        prevWin = win;
+
+        if (escPressed || winPressed)
+        {
+            foreach (var menu in openMenus.ToArray())
+            {
+                openMenus.Remove(menu);
+                try { menu.Close(ToolStripDropDownCloseReason.Keyboard); } catch { }
+            }
+            StopWatchingMenus();
+            return;
+        }
+
+        if (mousePressed)
+            DismissOpenMenusOutside(Cursor.Position);
+    }
+
+    /// <summary>
+    /// Closes any open <see cref="ContextMenuStrip"/> when <paramref name="screenPt"/> lies outside
+    /// the menu and all of its currently open submenus.
+    /// </summary>
+    public static bool DismissOpenMenusOutside(Point screenPt)
+    {
+        bool dismissedAny = false;
+        foreach (var menu in openMenus.ToArray())
+        {
+            if (menu.IsDisposed || !menu.Visible)
+            {
+                openMenus.Remove(menu);
+                continue;
+            }
+
+            if (!IsPointInsideMenuTree(menu, screenPt))
+            {
+                lastOutsideDismissTick = Environment.TickCount64;
+                lastOutsideDismissTag = menu.Tag as string;
+                lastOutsideDismissPoint = screenPt;
+                openMenus.Remove(menu);
+                dismissedAny = true;
+                try { menu.Close(ToolStripDropDownCloseReason.AppClicked); } catch { }
+            }
+        }
+
+        if (openMenus.Count == 0)
+            StopWatchingMenus();
+
+        return dismissedAny;
+    }
+
+    /// <summary>
+    /// True when the menu identified by <paramref name="tag"/> was just closed by the very click at
+    /// <paramref name="screenPt"/>, so clicking a taskbar button to dismiss its open menu does not
+    /// immediately pop the same menu back open.
+    /// </summary>
+    public static bool WasJustDismissedAt(string tag, Point screenPt)
+    {
+        if (!string.Equals(lastOutsideDismissTag, tag, StringComparison.Ordinal))
+            return false;
+
+        long elapsed = Environment.TickCount64 - lastOutsideDismissTick;
+        if (elapsed <= 120
+            && Math.Abs(screenPt.X - lastOutsideDismissPoint.X) <= 8
+            && Math.Abs(screenPt.Y - lastOutsideDismissPoint.Y) <= 8)
+        {
+            lastOutsideDismissTag = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsPointInsideMenuTree(ToolStripDropDown menu, Point screenPt)
+    {
+        if (menu.IsDisposed || !menu.Visible) return false;
+        if (ContainsScreenPoint(menu, screenPt)) return true;
+
+        foreach (ToolStripItem item in menu.Items)
+        {
+            if (item is ToolStripDropDownItem dd && dd.HasDropDownItems && dd.DropDown is { Visible: true } sub)
+            {
+                if (IsPointInsideMenuTree(sub, screenPt))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsScreenPoint(ToolStripDropDown dropDown, Point screenPt)
+    {
+        if (dropDown.Bounds.Contains(screenPt)) return true;
+        if (dropDown.IsHandleCreated && Native.GetWindowRect(dropDown.Handle, out var r))
+        {
+            if (screenPt.X >= r.Left && screenPt.X <= r.Right && screenPt.Y >= r.Top && screenPt.Y <= r.Bottom)
+                return true;
+        }
+        return false;
     }
 
     private sealed class MenuColours : ProfessionalColorTable

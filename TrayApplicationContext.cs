@@ -95,7 +95,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             Icon = Theme.AppIcon(),
             Text = "ScweenSpit",
             Visible = true,
-            ContextMenuStrip = Theme.Dress(new ContextMenuStrip()),
+            ContextMenuStrip = Theme.Dress(new ContextMenuStrip { Tag = "QuickMenu" }),
         };
         tray.ContextMenuStrip.Opening += (_, e) =>
         {
@@ -116,6 +116,13 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         bars.MenuRequested += at =>
         {
+            if (Theme.WasJustDismissedAt("QuickMenu", at))
+                return;
+            if (tray.ContextMenuStrip!.Visible)
+            {
+                tray.ContextMenuStrip.Close(ToolStripDropDownCloseReason.AppClicked);
+                return;
+            }
             BuildMenu();
             tray.ContextMenuStrip!.Show(at);
         };
