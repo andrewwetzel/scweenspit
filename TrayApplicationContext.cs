@@ -143,6 +143,19 @@ public sealed class TrayApplicationContext : ApplicationContext
         // What we started in, so the first real change is compared against the arrangement on screen
         // rather than against the empty string.
         topology = DisplayTopology.Signature();
+        if (config.HandedBack is { } handedBack &&
+            !string.IsNullOrEmpty(config.HandedBackFrom) &&
+            topology == config.HandedBackFrom)
+        {
+            handedBack.ApplyTo(config);
+            config.HandedBack = null;
+            config.HandedBackFrom = null;
+            config.Save();
+            Log.Write($"restored handed-back settings on startup for {topology}");
+        }
+
+        if (config.ReconcileMonitorsAndTrackers(ZoneManager.AllMonitors()))
+            config.Save();
 
         displaySettle.Tick += (_, _) => { displaySettle.Stop(); DisplaysChanged(); };
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
@@ -455,6 +468,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Re-reconciles everything with the current config. Safe to call repeatedly.</summary>
     private void ApplyChanges()
     {
+        if (config.ReconcileMonitorsAndTrackers(ZoneManager.AllMonitors()))
+            config.Save();
+
         ApplySnapSuppression();
 
         // Order matters: free the shell taskbar's reserved strip first, then let our bars claim it.
@@ -668,6 +684,12 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void DisplaysChanged()
     {
         var now = DisplayTopology.Signature();
+        if (now == "none")
+        {
+            Log.Write("displays now none — ignoring transient zero-display state");
+            return;
+        }
+
         var was = topology;
         bool different = now != topology;
         topology = now;
@@ -688,6 +710,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// </summary>
     private void Decide(string now, string was)
     {
+        if (now == "none") return;
         // Back where we handed back from — the monitor is plugged in again. Picking up is the whole
         // point of having recorded it; leaving it stood down would be safe and useless.
         if (config.HandedBack is not null && now == config.HandedBackFrom)

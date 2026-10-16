@@ -11,7 +11,9 @@ public sealed class BarManager : IDisposable
 {
     private readonly record struct Applied(string Edge, int Thickness, bool ThisDisplayOnly,
                                            bool IconsOnly, bool ShowStatus, bool ShowUsage,
-                                           bool ShowAntigravity, int? Zone, bool Floating,
+                                           bool ShowAntigravity, bool ShowBambu, bool ShowRemoteChats,
+                                           bool ExpandTrackers, int TrackerScale, int TrackerMaxRows,
+                                           int? Zone, bool Floating,
                                            int FloatMargin, int SideGap, int EdgeGap,
                                            bool ShowStartButton, bool ShowPreviews, bool ShowMachine, bool ShowBadges);
 
@@ -80,12 +82,18 @@ public sealed class BarManager : IDisposable
 
             var wanted = new Applied(settings.Edge, settings.Thickness, settings.ThisDisplayOnly,
                                      settings.IconsOnly, settings.ShowStatus, settings.ShowUsage,
-                                     settings.ShowAntigravity, settings.Zone, settings.Floating,
+                                     settings.ShowAntigravity, settings.ShowBambu, settings.ShowRemoteChats,
+                                     settings.ExpandTrackers, settings.TrackerScale, settings.TrackerMaxRows,
+                                     settings.Zone, settings.Floating,
                                      settings.FloatMargin, settings.SideGap, settings.EdgeGap,
                                      settings.ShowStartButton, settings.ShowPreviews,
                                      settings.ShowMachine, settings.ShowBadges);
-            if (applied.TryGetValue(device, out var current) && current == wanted && bars.ContainsKey(device))
+            if (applied.TryGetValue(device, out var current) && current == wanted &&
+                bars.TryGetValue(device, out var existingBar))
+            {
+                existingBar.UpdateSettings(settings);
                 continue;
+            }
 
             Close(device);
 

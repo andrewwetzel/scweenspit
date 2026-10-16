@@ -285,7 +285,12 @@ public static class RemoteChatUsage
             }
 
             int seconds;
-            lock (gate) seconds = Math.Clamp(settings?.RefreshSeconds ?? 20, 10, 600);
+            lock (gate)
+            {
+                seconds = Math.Clamp(settings?.RefreshSeconds ?? 20, 10, 600);
+                if (!hasCompletedInitialSync || lastError is not null)
+                    seconds = Math.Min(seconds, 10);
+            }
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             nudge = wake;
@@ -503,14 +508,14 @@ public static class RemoteChatUsage
                     done,
                     bucket.Chats.ToList()));
             }
-            else if (hasCompletedInitialSync)
+            else
             {
                 rows.Add(new RemoteServerRow(
                     cfg.Id,
                     cfg.Server,
                     cfg.DisplayName,
                     svc,
-                    Online: false,
+                    Online: !hasCompletedInitialSync,
                     WaitingCount: 0,
                     RunningCount: 0,
                     DoneCount: 0,

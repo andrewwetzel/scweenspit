@@ -151,9 +151,23 @@ public static class ClaudeUsage
         key is not null && key.StartsWith(KeyPrefix, StringComparison.Ordinal) && key.Length >= KeyMinLength;
 
     /// <summary>True when ~/.claude/.credentials.json or a stored OAuth refresh token is available.</summary>
-    public static bool HasClaudeCodeCredentials() =>
-        ReadClaudeCodeToken(out _, forceRefresh: false, requireSessionsScope: false, allowNetworkRefresh: false) is not null
-        || HasSignedInOAuth;
+    public static bool HasClaudeCodeCredentials()
+    {
+        if (HasSignedInOAuth) return true;
+        try
+        {
+            if (!File.Exists(CredentialsPath)) return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(CredentialsPath));
+            if (doc.RootElement.TryGetProperty("claudeAiOauth", out var oauth)
+                && oauth.ValueKind == JsonValueKind.Object)
+            {
+                return !string.IsNullOrWhiteSpace(Text(oauth, "refreshToken"))
+                    || !string.IsNullOrWhiteSpace(Text(oauth, "accessToken"));
+            }
+        }
+        catch { }
+        return false;
+    }
 
     /// <summary>True when an OAuth refresh token is stored directly in ScweenSpit's settings.</summary>
     public static bool HasSignedInOAuth
@@ -774,10 +788,11 @@ public static class ClaudeUsage
         }
 
         bool haveSessionKey = Plausible(key);
+        bool hasOAuthCredentials = useClaudeCode && HasClaudeCodeCredentials();
         var oauthToken = useClaudeCode ? ReadClaudeCodeToken(out _) : null;
         bool haveOAuth = oauthToken is not null;
 
-        hasKey = !string.IsNullOrWhiteSpace(stored) || haveOAuth;
+        hasKey = !string.IsNullOrWhiteSpace(stored) || haveOAuth || hasOAuthCredentials;
         enabled = hasKey;
 
         // 1. Try Claude Code's self-renewing OAuth token first when available and not rate-limited.
@@ -847,6 +862,14 @@ public static class ClaudeUsage
             // Rate-limited on OAuth and no session key to fall back to: hold the last reading steady.
             if (current is not { Limits.Count: > 0 })
                 current = new UsageReading([], "Rate-limited — waiting to retry", false, Transient: true);
+            return;
+        }
+        else if (hasOAuthCredentials && !haveSessionKey)
+        {
+            // OAuth credentials exist on disk or in settings, but refreshing the expired access
+            // token failed (typically because the network was not ready yet right after boot).
+            // Record a transient failure so the loop retries in 10s instead of sleeping 3m.
+            Failed(new UsageReading([], "Waiting to refresh Claude login", false, Transient: true));
             return;
         }
 
@@ -1061,6 +1084,24 @@ public static class ClaudeUsage
                     plan = refreshedPlan ?? plan;
                     return refreshedAccess;
                 }
+
+                // If both ~/.claude/.credentials.json and ScweenSpit's stored RefreshToken exist and
+                // differ (e.g. one was rotated more recently than the other), try the alternate token.
+                string? altRefresh = !string.IsNullOrWhiteSpace(storedRefresh)
+                                  && !string.Equals(storedRefresh, refreshToken, StringComparison.Ordinal)
+                    ? storedRefresh
+                    : !string.IsNullOrWhiteSpace(diskRefresh)
+                      && !string.Equals(diskRefresh, refreshToken, StringComparison.Ordinal)
+                        ? diskRefresh
+                        : null;
+
+                if (!string.IsNullOrWhiteSpace(altRefresh) &&
+                    !string.Equals(altRefresh, failedRefreshToken, StringComparison.Ordinal) &&
+                    TryRefreshOAuthToken(altRefresh!, sub, tier, out var altAccess, out var altPlan))
+                {
+                    plan = altPlan ?? plan;
+                    return altAccess;
+                }
             }
 
             // Never hand back a token that is already past its expiry timestamp or that just failed a
@@ -1103,7 +1144,7 @@ public static class ClaudeUsage
 
             if (status != 200)
             {
-                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(2);
+                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddSeconds(8);
                 Log.WriteOnce("claude-oauth-refresh-err",
                     $"claude oauth refresh returned HTTP {status}");
                 return false;
@@ -1114,7 +1155,7 @@ public static class ClaudeUsage
             var access = Text(root, "access_token")?.Trim();
             if (string.IsNullOrWhiteSpace(access))
             {
-                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(2);
+                oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddSeconds(8);
                 return false;
             }
 
@@ -1170,7 +1211,7 @@ public static class ClaudeUsage
         }
         catch (Exception ex)
         {
-            oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+            oauthRefreshBackoffUntil = DateTimeOffset.UtcNow.AddSeconds(5);
             Log.WriteOnce("claude-oauth-refresh-ex", $"claude oauth refresh failed: {ex.Message}");
             return false;
         }

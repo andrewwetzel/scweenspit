@@ -809,8 +809,21 @@ public sealed class SettingsForm : Form
             var enabled = Theme.Toggle("Show a ScweenSpit bar on this display", settings is not null);
             enabled.CheckedChanged += (_, _) =>
             {
-                if (enabled.Checked) config.Bars[device] = settings ?? new BarSettings();
-                else config.Bars.Remove(device);
+                if (enabled.Checked)
+                {
+                    config.Bars[device] = settings ?? new BarSettings
+                    {
+                        ShowUsage = config.Claude.Enabled || config.Bars.Values.Any(b => b.ShowUsage),
+                        ShowAntigravity = config.Antigravity.Enabled || config.Bars.Values.Any(b => b.ShowAntigravity),
+                        ShowRemoteChats = config.RemoteChats.Enabled || config.Bars.Values.Any(b => b.ShowRemoteChats),
+                        ShowBambu = config.Bambu.Enabled || config.Bars.Values.Any(b => b.ShowBambu),
+                        ShowMachine = config.Bars.Values.Any(b => b.ShowMachine),
+                    };
+                }
+                else
+                {
+                    config.Bars.Remove(device);
+                }
                 Save();
                 BeginInvoke(ShowTaskbar);
             };
@@ -937,7 +950,15 @@ public sealed class SettingsForm : Form
             page.Controls.Add(status);
 
             var usage = Theme.Toggle("Show Claude usage bars", settings.ShowUsage);
-            usage.CheckedChanged += (_, _) => { settings.ShowUsage = usage.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            usage.CheckedChanged += (_, _) =>
+            {
+                settings.ShowUsage = usage.Checked;
+                if (usage.Checked) config.Claude.Enabled = true;
+                else if (!config.Bars.Values.Any(b => b.ShowUsage)) config.Claude.Enabled = false;
+                Save();
+                if (config.Claude.Enabled) ClaudeUsage.Refresh();
+                BeginInvoke(ShowTaskbar);
+            };
             page.Controls.Add(usage);
 
             // A toggle that appears to do nothing is worse than one that is not there. Say what is
@@ -963,7 +984,15 @@ public sealed class SettingsForm : Form
                     "Nothing is drawn for Claude until tracking is switched on under Claude usage."));
 
             var antigravity = Theme.Toggle("Show Antigravity usage bars", settings.ShowAntigravity);
-            antigravity.CheckedChanged += (_, _) => { settings.ShowAntigravity = antigravity.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            antigravity.CheckedChanged += (_, _) =>
+            {
+                settings.ShowAntigravity = antigravity.Checked;
+                if (antigravity.Checked) config.Antigravity.Enabled = true;
+                else if (!config.Bars.Values.Any(b => b.ShowAntigravity)) config.Antigravity.Enabled = false;
+                Save();
+                if (config.Antigravity.Enabled) AntigravityUsage.Refresh();
+                BeginInvoke(ShowTaskbar);
+            };
             page.Controls.Add(antigravity);
 
             if (settings.ShowAntigravity && !AntigravityUsage.Enabled)
@@ -987,7 +1016,15 @@ public sealed class SettingsForm : Form
                     "Drawn next to the Claude bars; reads from Google's Cloud Code API or the local Antigravity language server once enabled."));
 
             var remoteChats = Theme.Toggle("Show remote server chat status (Claude & Antigravity)", settings.ShowRemoteChats);
-            remoteChats.CheckedChanged += (_, _) => { settings.ShowRemoteChats = remoteChats.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            remoteChats.CheckedChanged += (_, _) =>
+            {
+                settings.ShowRemoteChats = remoteChats.Checked;
+                if (remoteChats.Checked) config.RemoteChats.Enabled = true;
+                else if (!config.Bars.Values.Any(b => b.ShowRemoteChats)) config.RemoteChats.Enabled = false;
+                Save();
+                if (config.RemoteChats.Enabled) RemoteChatUsage.Refresh();
+                BeginInvoke(ShowTaskbar);
+            };
             page.Controls.Add(remoteChats);
 
             if (settings.ShowRemoteChats && !RemoteChatUsage.Enabled)
@@ -1012,7 +1049,15 @@ public sealed class SettingsForm : Form
                     "chats needing interaction, and completed sessions per remote server."));
 
             var bambu = Theme.Toggle("Show Bambu printer status bars", settings.ShowBambu);
-            bambu.CheckedChanged += (_, _) => { settings.ShowBambu = bambu.Checked; Save(); BeginInvoke(ShowTaskbar); };
+            bambu.CheckedChanged += (_, _) =>
+            {
+                settings.ShowBambu = bambu.Checked;
+                if (bambu.Checked) config.Bambu.Enabled = true;
+                else if (!config.Bars.Values.Any(b => b.ShowBambu)) config.Bambu.Enabled = false;
+                Save();
+                if (config.Bambu.Enabled) BambuUsage.Refresh();
+                BeginInvoke(ShowTaskbar);
+            };
             page.Controls.Add(bambu);
 
             if (settings.ShowBambu && !BambuUsage.Enabled)
@@ -1094,6 +1139,29 @@ public sealed class SettingsForm : Form
         BeginInvoke(ShowTaskbar);
     }
 
+    /// <summary>
+    /// Ensures that turning a tracker on from its own settings page also turns its strip on for the
+    /// active bar(s), and turning it off clears the per-bar flag so the two settings never disagree.
+    /// </summary>
+    private void SyncTrackerToBars(bool enabled, Func<BarSettings, bool> getter, Action<BarSettings, bool> setter)
+    {
+        if (!enabled)
+        {
+            foreach (var b in config.Bars.Values) setter(b, false);
+            return;
+        }
+
+        var attached = ZoneManager.AllMonitors()
+            .Where(m => config.Bars.ContainsKey(m.Device))
+            .Select(m => config.Bars[m.Device])
+            .ToList();
+        var targets = attached.Count > 0 ? attached : config.Bars.Values.ToList();
+        if (targets.Count > 0 && !targets.Any(getter))
+        {
+            foreach (var b in targets) setter(b, true);
+        }
+    }
+
     private void ShowClaude()
     {
         var claude = config.Claude;
@@ -1108,7 +1176,14 @@ public sealed class SettingsForm : Form
         var on = Theme.Toggle("Track claude.ai usage", claude.Enabled);
         // Rebuilt after the event unwinds: Page() disposes this checkbox, and doing that
         // inside its own handler leaves WinForms raising events on a dead control.
-        on.CheckedChanged += (_, _) => { claude.Enabled = on.Checked; Save(); ClaudeUsage.Refresh(); BeginInvoke(ShowClaude); };
+        on.CheckedChanged += (_, _) =>
+        {
+            claude.Enabled = on.Checked;
+            SyncTrackerToBars(claude.Enabled, b => b.ShowUsage, (b, v) => b.ShowUsage = v);
+            Save();
+            if (claude.Enabled) ClaudeUsage.Refresh();
+            BeginInvoke(ShowClaude);
+        };
         page.Controls.Add(on);
 
         if (!claude.Enabled)
@@ -1329,6 +1404,7 @@ public sealed class SettingsForm : Form
         on.CheckedChanged += (_, _) =>
         {
             antigravity.Enabled = on.Checked;
+            SyncTrackerToBars(antigravity.Enabled, b => b.ShowAntigravity, (b, v) => b.ShowAntigravity = v);
             Save();
             if (antigravity.Enabled) AntigravityUsage.Refresh();
             BeginInvoke(ShowAntigravity);
@@ -1484,6 +1560,7 @@ public sealed class SettingsForm : Form
         on.CheckedChanged += (_, _) =>
         {
             bambu.Enabled = on.Checked;
+            SyncTrackerToBars(bambu.Enabled, b => b.ShowBambu, (b, v) => b.ShowBambu = v);
             Save();
             if (bambu.Enabled) BambuUsage.Refresh();
             BeginInvoke(ShowBambu);
@@ -1907,19 +1984,9 @@ public sealed class SettingsForm : Form
         on.CheckedChanged += (_, _) =>
         {
             remote.Enabled = on.Checked;
-            if (remote.Enabled)
-            {
-                bool anyBarHadIt = false;
-                foreach (var b in config.Bars.Values)
-                {
-                    if (b.ShowRemoteChats) { anyBarHadIt = true; break; }
-                }
-                if (!anyBarHadIt)
-                {
-                    foreach (var b in config.Bars.Values) b.ShowRemoteChats = true;
-                }
-            }
+            SyncTrackerToBars(remote.Enabled, b => b.ShowRemoteChats, (b, v) => b.ShowRemoteChats = v);
             Save();
+            if (remote.Enabled) RemoteChatUsage.Refresh();
             BeginInvoke(ShowRemoteChats);
         };
         page.Controls.Add(on);

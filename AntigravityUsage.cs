@@ -183,6 +183,7 @@ public static class AntigravityUsage
 
         if (!listening) return;
         listening = false;
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerChanged;
     }
 
@@ -192,8 +193,11 @@ public static class AntigravityUsage
     {
         if (listening) return;
         listening = true;
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkChanged;
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerChanged;
     }
+
+    private static void OnNetworkChanged(object? sender, EventArgs e) => Refresh();
 
     private static void OnPowerChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
     {
@@ -606,7 +610,8 @@ public static class AntigravityUsage
             int seconds;
             lock (gate) seconds = Math.Clamp(settings?.RefreshSeconds ?? 60, 15, 3600);
 
-            if (current is { Standby: true }) seconds = Math.Min(seconds, 15);
+            if (current is null or { Standby: true } or { Transient: true } or { Limits.Count: 0 })
+                seconds = Math.Min(seconds, 10);
 
             var wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             nudge = wake;

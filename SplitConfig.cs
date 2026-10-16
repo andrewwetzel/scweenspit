@@ -792,6 +792,9 @@ public sealed class SplitConfig
             bar.FloatMargin = Math.Clamp(bar.FloatMargin, 0, 40);
             bar.SideGap = Math.Clamp(bar.SideGap, 0, 40);
             bar.EdgeGap = Math.Clamp(bar.EdgeGap, 0, 40);
+            bar.TrackerScale = bar.TrackerScale <= 0 ? 125 : Math.Clamp(bar.TrackerScale, 80, 300);
+            bar.TrackerMaxRows = bar.TrackerMaxRows <= 0 ? 3 : Math.Clamp(bar.TrackerMaxRows, 1, 6);
+            bar.Pinned ??= new();
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
 
@@ -943,5 +946,206 @@ public sealed class SplitConfig
         var layout = OwnLayout(device);
         layout.Zones = zones.OrderBy(z => z.T).ThenBy(z => z.L).ToList();
         if (save) Save();
+    }
+
+    /// <summary>
+    /// Reconciles configured bars and tracker flags against the currently attached monitors.
+    /// Windows reassigns <c>\\.\DISPLAYn</c> device names across reboots, dock/undock events, and
+    /// sleep/wake cycles (for example, enumerating a single monitor as <c>\\.\DISPLAY2</c> during
+    /// an uptime session and <c>\\.\DISPLAY1</c> after a restart). This ensures that bar and tracker
+    /// selections made under a previous <c>\\.\DISPLAYn</c> name or on a tracker's settings page
+    /// are preserved on the active display after a system restart.
+    /// </summary>
+    public bool ReconcileMonitorsAndTrackers(IReadOnlyList<MonitorGeometry> monitors)
+    {
+        bool changed = false;
+
+        static int TrackerCount(BarSettings b) =>
+            (b.ShowUsage ? 1 : 0) +
+            (b.ShowAntigravity ? 1 : 0) +
+            (b.ShowRemoteChats ? 1 : 0) +
+            (b.ShowBambu ? 1 : 0) +
+            (b.ShowMachine ? 1 : 0);
+
+        if (monitors.Count > 0 && Bars.Count > 0)
+        {
+            var attachedSet = new HashSet<string>(monitors.Select(m => m.Device), StringComparer.OrdinalIgnoreCase);
+            var attachedKeys = Bars.Keys.Where(k => attachedSet.Contains(k)).ToList();
+            var unattachedKeys = Bars.Keys.Where(k => !attachedSet.Contains(k)).ToList();
+
+            // 1. If bars are configured only for unattached \\.\DISPLAYn device names (e.g. \\.\DISPLAY2
+            //    became \\.\DISPLAY1 after a reboot), migrate the most-configured bar onto the primary
+            //    attached display so the taskbar and its trackers do not vanish.
+            if (attachedKeys.Count == 0 && unattachedKeys.Count > 0)
+            {
+                var bestKey = unattachedKeys
+                    .OrderByDescending(k => TrackerCount(Bars[k]))
+                    .ThenByDescending(k => Bars[k].Pinned.Count)
+                    .First();
+                var targetDevice = monitors[0].Device;
+                Bars[targetDevice] = Bars[bestKey];
+                if (monitors.Count == 1)
+                {
+                    foreach (var oldKey in unattachedKeys)
+                        Bars.Remove(oldKey);
+                }
+                else
+                {
+                    Bars.Remove(bestKey);
+                    unattachedKeys.Remove(bestKey);
+                }
+
+                attachedKeys.Add(targetDevice);
+                if (monitors.Count == 1) unattachedKeys.Clear();
+                changed = true;
+                Log.Write($"reconciled bar from {bestKey} to attached display {targetDevice}");
+            }
+
+            // 2. If both an attached entry (e.g. an older \\.\DISPLAY1) and an unattached entry
+            //    (e.g. \\.\DISPLAY2 where the user enabled trackers or pinned apps) exist, carry
+            //    any tracker selections over to the attached bar(s).
+            if (attachedKeys.Count > 0 && unattachedKeys.Count > 0)
+            {
+                var attachedBars = attachedKeys.Select(k => Bars[k]).ToList();
+                var unattachedBars = unattachedKeys.Select(k => Bars[k]).ToList();
+
+                int attachedTrackersBefore = attachedBars.Max(TrackerCount);
+                var richestUnattached = unattachedBars
+                    .OrderByDescending(TrackerCount)
+                    .ThenByDescending(b => b.Pinned.Count)
+                    .First();
+
+                if (unattachedBars.Any(b => b.ShowUsage) && !attachedBars.Any(b => b.ShowUsage))
+                {
+                    foreach (var b in attachedBars) b.ShowUsage = true;
+                    changed = true;
+                }
+                if (unattachedBars.Any(b => b.ShowAntigravity) && !attachedBars.Any(b => b.ShowAntigravity))
+                {
+                    foreach (var b in attachedBars) b.ShowAntigravity = true;
+                    changed = true;
+                }
+                if (unattachedBars.Any(b => b.ShowRemoteChats) && !attachedBars.Any(b => b.ShowRemoteChats))
+                {
+                    foreach (var b in attachedBars) b.ShowRemoteChats = true;
+                    changed = true;
+                }
+                if (unattachedBars.Any(b => b.ShowBambu) && !attachedBars.Any(b => b.ShowBambu))
+                {
+                    foreach (var b in attachedBars) b.ShowBambu = true;
+                    changed = true;
+                }
+                if (unattachedBars.Any(b => b.ShowMachine) && !attachedBars.Any(b => b.ShowMachine))
+                {
+                    foreach (var b in attachedBars) b.ShowMachine = true;
+                    changed = true;
+                }
+
+                // On a single-monitor setup, any unattached \\.\DISPLAYn entry is a stale alias for
+                // the same physical display. Merge pins and tracker layout settings and drop the alias.
+                if (monitors.Count == 1)
+                {
+                    var activeBar = attachedBars[0];
+                    if (attachedTrackersBefore == 0 && TrackerCount(richestUnattached) > 0)
+                    {
+                        activeBar.ExpandTrackers = richestUnattached.ExpandTrackers;
+                        activeBar.TrackerScale = richestUnattached.TrackerScale;
+                        activeBar.TrackerMaxRows = richestUnattached.TrackerMaxRows;
+                    }
+
+                    foreach (var ub in unattachedBars)
+                    {
+                        foreach (var pin in ub.Pinned)
+                        {
+                            if (!activeBar.Pinned.Any(p => string.Equals(p, pin, StringComparison.OrdinalIgnoreCase)))
+                                activeBar.Pinned.Add(pin);
+                        }
+                    }
+
+                    foreach (var staleKey in unattachedKeys)
+                        Bars.Remove(staleKey);
+
+                    changed = true;
+                    Log.Write($"merged stale bar entry({string.Join(", ", unattachedKeys)}) into {attachedKeys[0]}");
+                }
+            }
+
+            // Also migrate per-monitor zone layout if a single monitor's device name changed.
+            if (monitors.Count == 1)
+            {
+                var dev = monitors[0].Device;
+                if (!Monitors.ContainsKey(dev))
+                {
+                    var staleMonitorKey = Monitors.Keys.FirstOrDefault(k => k != Fallback && !attachedSet.Contains(k));
+                    if (staleMonitorKey is not null)
+                    {
+                        Monitors[dev] = Monitors[staleMonitorKey];
+                        Monitors.Remove(staleMonitorKey);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // 3. Synchronize global tracker Enabled switches and per-bar Show* flags so a tracker
+        //    selected on its own page is always shown on the active bar(s), and a tracker selected
+        //    on the Taskbar page always starts its background poller.
+        var activeBars = monitors.Count > 0
+            ? monitors.Where(m => Bars.ContainsKey(m.Device)).Select(m => Bars[m.Device]).ToList()
+            : Bars.Values.ToList();
+        if (activeBars.Count == 0 && Bars.Count > 0)
+            activeBars = Bars.Values.ToList();
+
+        if (activeBars.Count > 0)
+        {
+            if (Claude.Enabled && !activeBars.Any(b => b.ShowUsage))
+            {
+                foreach (var b in activeBars) b.ShowUsage = true;
+                changed = true;
+            }
+            else if (!Claude.Enabled && activeBars.Any(b => b.ShowUsage) &&
+                     (!string.IsNullOrWhiteSpace(Claude.SessionKey)
+                      || !string.IsNullOrWhiteSpace(Claude.RefreshToken)
+                      || ClaudeUsage.HasClaudeCodeCredentials()))
+            {
+                Claude.Enabled = true;
+                changed = true;
+            }
+
+            if (Antigravity.Enabled && !activeBars.Any(b => b.ShowAntigravity))
+            {
+                foreach (var b in activeBars) b.ShowAntigravity = true;
+                changed = true;
+            }
+            else if (!Antigravity.Enabled && activeBars.Any(b => b.ShowAntigravity))
+            {
+                Antigravity.Enabled = true;
+                changed = true;
+            }
+
+            if (RemoteChats.Enabled && !activeBars.Any(b => b.ShowRemoteChats))
+            {
+                foreach (var b in activeBars) b.ShowRemoteChats = true;
+                changed = true;
+            }
+            else if (!RemoteChats.Enabled && activeBars.Any(b => b.ShowRemoteChats))
+            {
+                RemoteChats.Enabled = true;
+                changed = true;
+            }
+
+            if (Bambu.Enabled && !activeBars.Any(b => b.ShowBambu))
+            {
+                foreach (var b in activeBars) b.ShowBambu = true;
+                changed = true;
+            }
+            else if (!Bambu.Enabled && activeBars.Any(b => b.ShowBambu))
+            {
+                Bambu.Enabled = true;
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 }

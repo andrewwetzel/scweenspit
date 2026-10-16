@@ -50,6 +50,23 @@ internal static class Startup
     {
         try
         {
+            if (Updater.LauncherPath() is { } launcher &&
+                File.Exists(Installer.InstalledExe) &&
+                !string.Equals(launcher, Installer.InstalledExe, StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var runningVer = Version.TryParse(System.Diagnostics.FileVersionInfo.GetVersionInfo(launcher).FileVersion, out var rv) ? rv : null;
+                    var installedVer = Version.TryParse(System.Diagnostics.FileVersionInfo.GetVersionInfo(Installer.InstalledExe).FileVersion, out var iv) ? iv : null;
+                    if (runningVer is not null && (installedVer is null || runningVer >= installedVer))
+                    {
+                        File.Copy(launcher, Installer.InstalledExe, overwrite: true);
+                        Log.Write($"synced installed launcher {Installer.InstalledExe} from {launcher}");
+                    }
+                }
+                catch (Exception syncEx) { Log.Write($"installed launcher sync skipped: {syncEx.Message}"); }
+            }
+
             using var k = Registry.CurrentUser.OpenSubKey(Key, writable: true);
             if (k?.GetValue(Name) is not string existing) return;   // never turned on: leave it off
 

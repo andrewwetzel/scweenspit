@@ -311,6 +311,14 @@ internal static partial class Program
 
         if (File.Exists(exe) && ReadStamp(stampFile) == stamp) return true;
 
+        // Never overwrite a newer unpacked application with an older launcher's payload (for example
+        // if an older startup/shortcut copy is invoked after a newer build has already been run).
+        if (File.Exists(exe) && IsExistingNewer(exe))
+        {
+            Note($"keeping newer unpacked copy at {exe}");
+            return true;
+        }
+
         var staging = exe + ".new";
         try
         {
@@ -330,6 +338,19 @@ internal static partial class Program
             try { File.Delete(staging); } catch { }
             return false;
         }
+    }
+
+    private static bool IsExistingNewer(string exe)
+    {
+        try
+        {
+            var myVer = Assembly.GetExecutingAssembly().GetName().Version;
+            var existingStr = FileVersionInfo.GetVersionInfo(exe).FileVersion;
+            if (myVer is not null && Version.TryParse(existingStr, out var existingVer))
+                return existingVer > myVer;
+        }
+        catch { }
+        return false;
     }
 
     private static string? ReadStamp(string path)

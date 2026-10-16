@@ -121,6 +121,17 @@ public static class Updater
             throw;
         }
 
+        if (!string.Equals(target, Installer.InstalledExe, StringComparison.OrdinalIgnoreCase) &&
+            File.Exists(Installer.InstalledExe))
+        {
+            try
+            {
+                File.Copy(target, Installer.InstalledExe, overwrite: true);
+                Log.Write($"update: synced installed launcher at {Installer.InstalledExe}");
+            }
+            catch (Exception ex) { Log.Write($"update: could not sync installed launcher: {ex.Message}"); }
+        }
+
         Log.Write($"update: {Current} -> {update.Version} at {target}");
         return target;
     }

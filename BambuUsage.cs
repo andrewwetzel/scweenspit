@@ -369,6 +369,7 @@ public static class BambuUsage
 
         if (!listeningPower) return;
         listeningPower = false;
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerChanged;
     }
 
@@ -378,7 +379,14 @@ public static class BambuUsage
     {
         if (listeningPower) return;
         listeningPower = true;
+        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkChanged;
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerChanged;
+    }
+
+    private static void OnNetworkChanged(object? sender, EventArgs e)
+    {
+        lock (gate) mqttReconnect?.Cancel();
+        Refresh();
     }
 
     private static void OnPowerChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
@@ -884,6 +892,8 @@ public static class BambuUsage
             {
                 if (settings is not null)
                     seconds = Math.Clamp(settings.RefreshSeconds, 15, 3600);
+                if (!hasCompletedInitialSync || lastError is not null)
+                    seconds = Math.Min(seconds, 10);
             }
 
             var wait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

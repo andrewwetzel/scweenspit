@@ -32,8 +32,14 @@ public sealed class TaskbarWindow : Form
     private int pending = -1;
 
     private readonly MonitorGeometry monitor;
-    private readonly BarSettings settings;
+    private BarSettings settings;
     private readonly ZoneManager zones;
+
+    public void UpdateSettings(BarSettings updated)
+    {
+        settings = updated;
+        Invalidate();
+    }
 
     /// <summary>
     /// A slot on the bar: one application, with however many windows it has open. Grouping by
