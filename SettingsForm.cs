@@ -1045,7 +1045,7 @@ public sealed class SettingsForm : Form
 
             if (!RemoteChatUsage.Enabled)
                 page.Controls.Add(Theme.Caption(
-                    "Drawn to the right of the Claude & Antigravity usage bars; shows live chat counts, " +
+                    "Grouped with the Claude & Antigravity usage bars; shows live chat counts, " +
                     "chats needing interaction, and completed sessions per remote server."));
 
             var bambu = Theme.Toggle("Show Bambu printer status bars", settings.ShowBambu);
@@ -1104,6 +1104,7 @@ public sealed class SettingsForm : Form
                 "columns. Raising the bar's Thickness above 50 px also scales up tracker fonts and bars."));
 
             bool anyCustomWidths = barSettings.RemoteChatsWidth is not null
+                || barSettings.AntigravityChatsWidth is not null
                 || barSettings.UsageWidth is not null
                 || barSettings.AntigravityWidth is not null
                 || barSettings.BambuWidth is not null
@@ -1117,6 +1118,7 @@ public sealed class SettingsForm : Form
                 resetWidths.Click += (_, _) =>
                 {
                     barSettings.RemoteChatsWidth = null;
+                    barSettings.AntigravityChatsWidth = null;
                     barSettings.UsageWidth = null;
                     barSettings.AntigravityWidth = null;
                     barSettings.BambuWidth = null;
@@ -1504,9 +1506,8 @@ public sealed class SettingsForm : Form
         page.Controls.Add(weekly);
 
         page.Controls.Add(Theme.Caption(
-            "Antigravity groups Gemini Pro and Gemini Flash into a single quota pool with a five-hour " +
-            "session limit and a seven-day weekly limit. Both are drawn under an '✦ Antigravity Pro·Flash' " +
-            "header in violet so they are immediately distinct from the Claude usage bars beside them."));
+            "Shows both Antigravity quota pools side-by-side under '✦ Antigravity Pro·Flash': your " +
+            "IDE production pool (IDE 5h / IDE 7d) and your CLI / Remote Control pool (CLI 5h / CLI 7d)."));
 
         var interval = Theme.Number(antigravity.RefreshSeconds, 15, 3600, 15);
         interval.ValueChanged += (_, _) => { antigravity.RefreshSeconds = (int)interval.Value; Save(); };

@@ -193,6 +193,7 @@ public sealed class BarSettings
     /// taskbar. Null uses automatic sizing.
     /// </summary>
     public int? RemoteChatsWidth { get; set; }
+    public int? AntigravityChatsWidth { get; set; }
     public int? UsageWidth { get; set; }
     public int? AntigravityWidth { get; set; }
     public int? BambuWidth { get; set; }
@@ -460,7 +461,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -804,7 +805,13 @@ public sealed class SplitConfig
             bar.EdgeGap = Math.Clamp(bar.EdgeGap, 0, 40);
             bar.TrackerScale = bar.TrackerScale <= 0 ? 125 : Math.Clamp(bar.TrackerScale, 80, 300);
             bar.TrackerMaxRows = bar.TrackerMaxRows <= 0 ? 3 : Math.Clamp(bar.TrackerMaxRows, 1, 6);
+            if (Version < 6)
+            {
+                bar.RemoteChatsWidth = null;
+                bar.AntigravityWidth = null;
+            }
             bar.RemoteChatsWidth = bar.RemoteChatsWidth is > 0 and var rw ? Math.Clamp(rw, 44, 1200) : null;
+            bar.AntigravityChatsWidth = bar.AntigravityChatsWidth is > 0 and var acw ? Math.Clamp(acw, 44, 1200) : null;
             bar.UsageWidth = bar.UsageWidth is > 0 and var uw ? Math.Clamp(uw, 44, 1200) : null;
             bar.AntigravityWidth = bar.AntigravityWidth is > 0 and var aw ? Math.Clamp(aw, 44, 1200) : null;
             bar.BambuWidth = bar.BambuWidth is > 0 and var bw ? Math.Clamp(bw, 44, 1200) : null;

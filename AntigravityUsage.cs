@@ -43,6 +43,10 @@ public static class AntigravityUsage
     private const string OAuthScopes = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email";
 
     private const string CloudCodeBaseUrl = "https://cloudcode-pa.googleapis.com";
+    private const string DailyCloudCodeBaseUrl = "https://daily-cloudcode-pa.googleapis.com";
+    private const string ProdUserAgent = "antigravity";
+    private const string CliUserAgent = "antigravity/cli/1.4.2 (os_type=linux; arch=amd64; aidev_client)";
+    private const string DefaultConsumerProjectId = "aicode-consumers";
     private const string LoadCodeAssistPath = "/v1internal:loadCodeAssist";
     private const string OnboardUserPath = "/v1internal:onboardUser";
     private const string RetrieveUserQuotaSummaryPath = "/v1internal:retrieveUserQuotaSummary";
@@ -515,26 +519,54 @@ public static class AntigravityUsage
                     $"cloud code project: {resolvedProject ?? "(default)"}" +
                     (tierName is not null ? $"  (tier: {tierName})" : ""));
 
-                var summaryReply = QueryCloudCodeQuotaSummary(tokenResult.Value.AccessToken, resolvedProject);
-                report.AppendLine(summaryReply is null
-                    ? "quota summary: no reply from cloudcode-pa.googleapis.com"
-                    : $"quota summary: HTTP {summaryReply.Value.Status}");
+                var prodReply = QueryCloudCodeQuotaSummary(tokenResult.Value.AccessToken, resolvedProject, daily: false);
+                var cliReply = QueryCloudCodeQuotaSummary(tokenResult.Value.AccessToken, resolvedProject, daily: true);
+                report.AppendLine(prodReply is null
+                    ? "ide quota summary (cloudcode-pa): no reply"
+                    : $"ide quota summary (cloudcode-pa): HTTP {prodReply.Value.Status}");
+                report.AppendLine(cliReply is null
+                    ? "cli/remote quota summary (daily-cloudcode-pa): no reply"
+                    : $"cli/remote quota summary (daily-cloudcode-pa): HTTP {cliReply.Value.Status}");
 
-                if (summaryReply is { Status: 200 })
+                bool anyQuota = false;
+                if (prodReply is { Status: 200 })
                 {
-                    var parsed = ParseQuotaSummary(summaryReply.Value.Body, showWeekly: true);
-                    if (parsed.Error is null && parsed.Limits.Count > 0)
+                    var prodParsed = ParseQuotaSummary(prodReply.Value.Body, showWeekly: true, "IDE 5h", "IDE 7d");
+                    if (prodParsed.Error is null && prodParsed.Limits.Count > 0)
                     {
-                        report.AppendLine("gemini (pro & flash): " +
-                            string.Join(", ", parsed.Limits.Select(l =>
+                        anyQuota = true;
+                        report.AppendLine("ide gemini (pro & flash): " +
+                            string.Join(", ", prodParsed.Limits.Select(l =>
                                 ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } rst
                                     ? $"{l.Label} {l.Percent}% ({rst})"
                                     : $"{l.Label} {l.Percent}%")));
-                        return report.ToString().TrimEnd();
                     }
-                    if (parsed.Error is not null)
-                        report.AppendLine($"summary reading: {parsed.Error}");
+                    else if (prodParsed.Error is not null)
+                    {
+                        report.AppendLine($"ide summary reading: {prodParsed.Error}");
+                    }
                 }
+
+                if (cliReply is { Status: 200 })
+                {
+                    var cliParsed = ParseQuotaSummary(cliReply.Value.Body, showWeekly: true, "CLI 5h", "CLI 7d");
+                    if (cliParsed.Error is null && cliParsed.Limits.Count > 0)
+                    {
+                        anyQuota = true;
+                        report.AppendLine("cli/remote gemini (pro & flash): " +
+                            string.Join(", ", cliParsed.Limits.Select(l =>
+                                ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } rst
+                                    ? $"{l.Label} {l.Percent}% ({rst})"
+                                    : $"{l.Label} {l.Percent}%")));
+                    }
+                    else if (cliParsed.Error is not null)
+                    {
+                        report.AppendLine($"cli/remote summary reading: {cliParsed.Error}");
+                    }
+                }
+
+                if (anyQuota)
+                    return report.ToString().TrimEnd();
             }
         }
 
@@ -746,20 +778,55 @@ public static class AntigravityUsage
             }
         }
 
-        var reply = QueryCloudCodeQuotaSummary(accessToken, projectId);
-        if (reply is { Status: 401 })
+        var prodTask = Task.Run(() => QueryCloudCodeQuotaSummary(accessToken, projectId, daily: false));
+        var cliTask = Task.Run(() => QueryCloudCodeQuotaSummary(accessToken, projectId, daily: true));
+        Task.WhenAll(prodTask, cliTask).GetAwaiter().GetResult();
+        var prodReply = prodTask.Result;
+        var cliReply = cliTask.Result;
+
+        if (prodReply is { Status: 401 } || cliReply is { Status: 401 })
         {
             accessToken = GetOrRefreshAccessToken(refreshToken, null, null, forceRefresh: true);
             if (accessToken is not null)
-                reply = QueryCloudCodeQuotaSummary(accessToken, projectId);
+            {
+                var prodRetry = Task.Run(() => QueryCloudCodeQuotaSummary(accessToken, projectId, daily: false));
+                var cliRetry = Task.Run(() => QueryCloudCodeQuotaSummary(accessToken, projectId, daily: true));
+                Task.WhenAll(prodRetry, cliRetry).GetAwaiter().GetResult();
+                prodReply = prodRetry.Result;
+                cliReply = cliRetry.Result;
+            }
         }
 
-        if (reply is { Status: 200 })
+        var prodParsed = prodReply is { Status: 200 }
+            ? ParseQuotaSummary(prodReply.Value.Body, showWeekly, "IDE 5h", "IDE 7d")
+            : null;
+        var cliParsed = cliReply is { Status: 200 }
+            ? ParseQuotaSummary(cliReply.Value.Body, showWeekly, "CLI 5h", "CLI 7d")
+            : null;
+
+        var combinedLimits = new List<UsageLimit>(4);
+        if (prodParsed is { Error: null, Limits.Count: > 0 })
         {
-            var parsed = ParseQuotaSummary(reply.Value.Body, showWeekly);
-            if (parsed.Error is null && parsed.Limits.Count > 0)
-                return parsed;
+            combinedLimits.AddRange(prodParsed.Limits);
         }
+        else if (lastGood is { Limits.Count: > 0 })
+        {
+            combinedLimits.AddRange(lastGood.Limits.Where(l =>
+                l.Label.StartsWith("IDE", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (cliParsed is { Error: null, Limits.Count: > 0 })
+        {
+            combinedLimits.AddRange(cliParsed.Limits);
+        }
+        else if (lastGood is { Limits.Count: > 0 })
+        {
+            combinedLimits.AddRange(lastGood.Limits.Where(l =>
+                l.Label.StartsWith("CLI", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (combinedLimits.Count > 0)
+            return new UsageReading(combinedLimits, null, false);
 
         // Fallback to fetchAvailableModels if retrieveUserQuotaSummary returned no buckets.
         var modelsReply = QueryCloudCodeModels(accessToken!, projectId);
@@ -952,29 +1019,37 @@ public static class AntigravityUsage
         return null;
     }
 
-    private static (int Status, string Body)? QueryCloudCodeQuotaSummary(string accessToken, string? projectId)
+    private static (int Status, string Body)? QueryCloudCodeQuotaSummary(string accessToken, string? projectId, bool daily = false)
     {
-        string body = string.IsNullOrWhiteSpace(projectId)
-            ? "{}"
-            : JsonSerializer.Serialize(new { project = projectId });
-        return PostCloudCode(accessToken, RetrieveUserQuotaSummaryPath, body);
+        string effectiveProject = string.IsNullOrWhiteSpace(projectId) ? DefaultConsumerProjectId : projectId;
+        string body = JsonSerializer.Serialize(new { project = effectiveProject });
+        return PostCloudCode(
+            accessToken,
+            RetrieveUserQuotaSummaryPath,
+            body,
+            daily ? DailyCloudCodeBaseUrl : CloudCodeBaseUrl,
+            daily ? CliUserAgent : ProdUserAgent);
     }
 
     private static (int Status, string Body)? QueryCloudCodeModels(string accessToken, string? projectId)
     {
-        string body = string.IsNullOrWhiteSpace(projectId)
-            ? "{}"
-            : JsonSerializer.Serialize(new { project = projectId });
+        string effectiveProject = string.IsNullOrWhiteSpace(projectId) ? DefaultConsumerProjectId : projectId;
+        string body = JsonSerializer.Serialize(new { project = effectiveProject });
         return PostCloudCode(accessToken, FetchAvailableModelsPath, body);
     }
 
-    private static (int Status, string Body)? PostCloudCode(string accessToken, string path, string jsonBody)
+    private static (int Status, string Body)? PostCloudCode(
+        string accessToken,
+        string path,
+        string jsonBody,
+        string baseUrl = CloudCodeBaseUrl,
+        string userAgent = ProdUserAgent)
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{CloudCodeBaseUrl}{path}");
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}{path}");
             req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {accessToken}");
-            req.Headers.TryAddWithoutValidation("User-Agent", "antigravity");
+            req.Headers.TryAddWithoutValidation("User-Agent", userAgent);
             req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
 
             using var resp = cloudHttp.Send(req, HttpCompletionOption.ResponseContentRead);
@@ -1295,7 +1370,11 @@ public static class AntigravityUsage
     /// Deliberately ignores the third-party Claude/GPT group so the Antigravity strip only ever
     /// shows Gemini Pro &amp; Flash limits.
     /// </summary>
-    private static UsageReading ParseQuotaSummary(string body, bool showWeekly)
+    private static UsageReading ParseQuotaSummary(
+        string body,
+        bool showWeekly,
+        string sessionLabel = "Session",
+        string weeklyLabel = "Weekly")
     {
         try
         {
@@ -1335,12 +1414,12 @@ public static class AntigravityUsage
                     if (bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase)
                         || window.Equals("5h", StringComparison.OrdinalIgnoreCase))
                     {
-                        session = new UsageLimit("Session", usedPercent, resetsAt);
+                        session = new UsageLimit(sessionLabel, usedPercent, resetsAt);
                     }
                     else if (bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase)
                              || window.Equals("weekly", StringComparison.OrdinalIgnoreCase))
                     {
-                        weekly = new UsageLimit("Weekly", usedPercent, resetsAt);
+                        weekly = new UsageLimit(weeklyLabel, usedPercent, resetsAt);
                     }
                 }
             }

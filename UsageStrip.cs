@@ -29,7 +29,7 @@ internal static class UsageStrip
     /// <summary>Room the Antigravity strip needs along the bar.</summary>
     public static int AntigravityExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
     {
-        int count = AntigravityUsage.Current?.Limits.Count is > 0 and var c ? c : 2;
+        int count = AntigravityUsage.Current?.Limits.Count is > 0 and var c ? c : 4;
         return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
@@ -40,13 +40,24 @@ internal static class UsageStrip
         return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
-    /// <summary>Room the remote server chats strip needs along the bar, sized tightly to the live chat count.</summary>
-    public static int RemoteChatsExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
+    /// <summary>Room a remote server chats strip needs along the bar, sized tightly to the live chat count.</summary>
+    public static int RemoteChatsExtent(
+        bool vertical,
+        int maxRowsPerColumn = 3,
+        int barBreadth = 50,
+        int scalePercent = 100,
+        RemoteChatService? serviceFilter = null)
     {
-        var rows = RemoteChatUsage.Current?.Rows ?? [];
+        IReadOnlyList<RemoteServerRow> allRows = RemoteChatUsage.Current?.Rows ?? [];
+        IReadOnlyList<RemoteServerRow> rows = serviceFilter is { } svc
+            ? allRows.Where(r => r.Service == svc).ToList()
+            : allRows;
+
         if (vertical)
         {
-            int count = rows.Count > 0 ? rows.Count : RemoteChatUsage.ConfiguredRowCount;
+            int count = rows.Count > 0
+                ? rows.Count
+                : serviceFilter is { } f ? RemoteChatUsage.ConfiguredRowCountFor(f) : RemoteChatUsage.ConfiguredRowCount;
             return Math.Clamp(Math.Max(2, count) * 24 + 8, 72, 160);
         }
 
@@ -54,7 +65,7 @@ internal static class UsageStrip
         if (rows.Count == 0)
         {
             double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
-            return (int)Math.Round(108 * hScale * uScale);
+            return (int)Math.Round((serviceFilter is null ? 108 : 88) * hScale * uScale);
         }
 
         int virtualH = Math.Max(24, barBreadth);
@@ -66,6 +77,7 @@ internal static class UsageStrip
             hoveredChatId: null,
             stripHovered: false,
             hitPoint: null,
+            serviceFilter,
             out _,
             out int intrinsicWidth);
 
@@ -276,20 +288,28 @@ internal static class UsageStrip
     private static readonly Color CapsuleBorder = Color.FromArgb(54, 62, 76);
     private static readonly Color SectionDividerColour = Color.FromArgb(124, 138, 164);
 
-    public static void PaintRemoteChats(Graphics g, Rectangle area, RemoteChatsReading? reading,
-                                        int maxRowsPerColumn = 3, string? hoveredChatId = null,
-                                        bool stripHovered = false)
+    public static void PaintRemoteChats(
+        Graphics g,
+        Rectangle area,
+        RemoteChatsReading? reading,
+        int maxRowsPerColumn = 3,
+        string? hoveredChatId = null,
+        bool stripHovered = false,
+        RemoteChatService? serviceFilter = null)
     {
-        var rows = reading?.Rows ?? [];
-        if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading); return; }
+        IReadOnlyList<RemoteServerRow> allRows = reading?.Rows ?? [];
+        IReadOnlyList<RemoteServerRow> rows = serviceFilter is { } svc
+            ? allRows.Where(r => r.Service == svc).ToList()
+            : allRows;
+        if (rows.Count == 0) { PaintRemoteChatsState(g, area, reading, serviceFilter); return; }
 
-        float glow = RemoteChatUsage.AttentionGlowIntensity;
+        float glow = RemoteChatUsage.GetAttentionGlowIntensity(serviceFilter);
         if (glow > 0.01f)
             PaintRemoteChatsAttentionGlow(g, area, glow);
 
         RenderOrHitTestRemoteChats(g, area, rows, maxRowsPerColumn, hoveredChatId,
                                    stripHovered || hoveredChatId is not null,
-                                   hitPoint: null, out _, out _);
+                                   hitPoint: null, serviceFilter, out _, out _);
     }
 
     private static void PaintRemoteChatsAttentionGlow(Graphics g, Rectangle area, float glow)
@@ -334,14 +354,21 @@ internal static class UsageStrip
     }
 
     /// <summary>Returns the individual chat circle under <paramref name="pt"/>, or null if none.</summary>
-    public static RemoteChatItem? HitTestRemoteChat(Rectangle area, RemoteChatsReading? reading,
-                                                    Point pt, int maxRowsPerColumn = 3)
+    public static RemoteChatItem? HitTestRemoteChat(
+        Rectangle area,
+        RemoteChatsReading? reading,
+        Point pt,
+        int maxRowsPerColumn = 3,
+        RemoteChatService? serviceFilter = null)
     {
-        var rows = reading?.Rows ?? [];
+        IReadOnlyList<RemoteServerRow> allRows = reading?.Rows ?? [];
+        IReadOnlyList<RemoteServerRow> rows = serviceFilter is { } svc
+            ? allRows.Where(r => r.Service == svc).ToList()
+            : allRows;
         if (rows.Count == 0 || !area.Contains(pt)) return null;
 
         RenderOrHitTestRemoteChats(g: null, area, rows, maxRowsPerColumn, hoveredChatId: null,
-                                   stripHovered: false, hitPoint: pt, out var hit, out _);
+                                   stripHovered: false, hitPoint: pt, serviceFilter, out var hit, out _);
         return hit;
     }
 
@@ -353,6 +380,7 @@ internal static class UsageStrip
         string? hoveredChatId,
         bool stripHovered,
         Point? hitPoint,
+        RemoteChatService? serviceFilter,
         out RemoteChatItem? hitChat,
         out int intrinsicWidth)
     {
@@ -452,7 +480,7 @@ internal static class UsageStrip
         }
 
         int totalColsW = colWidths.Sum() + Math.Max(0, cols - 1) * colGap;
-        int minHeaderW = showHeader ? (int)Math.Ceiling(166 * scale) : 60;
+        int minHeaderW = showHeader ? (int)Math.Ceiling((serviceFilter is null ? 166 : 88) * scale) : 60;
         int contentW = Math.Max(totalColsW, minHeaderW);
         intrinsicWidth = contentW + outerPad * 2;
 
@@ -485,19 +513,41 @@ internal static class UsageStrip
             if (g is not null)
             {
                 string headerTag = totalWaiting > 0
-                    ? $"{totalWaiting} help · {totalChats}"
+                    ? $"{totalWaiting}!"
                     : totalRunning > 0
-                        ? $"{totalRunning} run · {totalChats}"
+                        ? $"{totalRunning} run"
                         : $"{totalChats} live";
-                Color hdrCol = totalWaiting > 0 ? Color.FromArgb(255, 210, 115) : RemoteChatsTitleColour;
+                if (serviceFilter is null)
+                {
+                    headerTag = totalWaiting > 0
+                        ? $"{totalWaiting} help · {totalChats}"
+                        : totalRunning > 0
+                            ? $"{totalRunning} run · {totalChats}"
+                            : $"{totalChats} live";
+                }
+
+                Color baseHdrCol = serviceFilter switch
+                {
+                    RemoteChatService.Claude => ClaudeTitleColour,
+                    RemoteChatService.Antigravity => AntigravityTitleColour,
+                    _ => RemoteChatsTitleColour,
+                };
+                Color hdrCol = totalWaiting > 0 ? Color.FromArgb(255, 210, 115) : baseHdrCol;
+                string hdrTitle = serviceFilter switch
+                {
+                    RemoteChatService.Claude => "Chats",
+                    RemoteChatService.Antigravity => "Chats",
+                    _ => "Remote Chats",
+                };
+                bool sparkleGlyph = serviceFilter == RemoteChatService.Antigravity;
                 var hdrRow = new Rectangle(area.X + outerPad, top, availInnerW, rowHeight);
-                if (stripHovered && availInnerW >= 120)
+                if (stripHovered && availInnerW >= 72)
                 {
                     PaintRemoteKeyHeaderRow(g, hdrRow, subFont, scale);
                 }
                 else
                 {
-                    PaintRemoteHeaderRow(g, hdrRow, "Remote Chats", headerTag, hdrCol, boldNameFont, nameFont, mutedBrush, scale);
+                    PaintRemoteHeaderRow(g, hdrRow, hdrTitle, headerTag, hdrCol, boldNameFont, nameFont, mutedBrush, scale, sparkleGlyph);
                 }
             }
             meterStartRow = 1;
@@ -861,6 +911,7 @@ internal static class UsageStrip
         var previous = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
+        bool compactKey = row.Width < (int)Math.Round(132 * scale);
         float dia = Math.Clamp(row.Height * 0.48f, 6f, 10f);
         float cy = row.Y + row.Height / 2f;
         float x = row.X + 1f;
@@ -894,47 +945,71 @@ internal static class UsageStrip
                 g.FillEllipse(pipBrush, dotRect.X + (dotRect.Width - pip) / 2f,
                               dotRect.Y + (dotRect.Height - pip) / 2f, pip, pip);
             }
-            x += dia + 3f * scale;
+            x += dia + (compactKey ? 2f : 3f) * scale;
 
             float tw = g.MeasureString(label, keyFont).Width;
             g.DrawString(label, keyFont, textBrush, new RectangleF(x, row.Y, tw + 4f, row.Height), fmt);
-            x += tw + 3f * scale;
+            x += tw + (compactKey ? 2f : 3f) * scale;
 
             if (withSepAfter)
             {
                 float sepX = x + 1f;
                 g.DrawLine(sepPen, sepX, row.Y + 3f, sepX, row.Bottom - 3f);
-                x += 5f * scale;
+                x += (compactKey ? 4f : 5f) * scale;
             }
         }
 
-        DrawItem(waitFill, waitRim, "! help", waitText, withPip: true, withSepAfter: true);
-        DrawItem(runFill, runRim, "r run", runText, withPip: false, withSepAfter: true);
-        DrawItem(doneFill, doneRim, "✓ done", doneText, withPip: false, withSepAfter: false);
+        DrawItem(waitFill, waitRim, compactKey ? "! " : "! help", waitText, withPip: true, withSepAfter: true);
+        DrawItem(runFill, runRim, compactKey ? "r" : "r run", runText, withPip: false, withSepAfter: true);
+        DrawItem(doneFill, doneRim, compactKey ? "✓" : "✓ done", doneText, withPip: false, withSepAfter: false);
 
         g.SmoothingMode = previous;
     }
 
     private static void PaintRemoteHeaderRow(Graphics g, Rectangle row, string title, string? tag,
                                              Color titleColour, Font titleFont, Font tagFont,
-                                             Brush tagBrush, float scale)
+                                             Brush tagBrush, float scale, bool sparkleGlyph = false)
     {
         var previous = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         using var titleBrush = new SolidBrush(titleColour);
-        float r = Math.Clamp(3.5f * scale, 3.2f, 6.2f);
-        float cx = row.X + r + 0.5f;
-        float cy = row.Y + row.Height / 2f;
-        var pts = new PointF[]
+        int textX;
+        if (sparkleGlyph)
         {
-            new(cx, cy - r),
-            new(cx + r, cy),
-            new(cx, cy + r),
-            new(cx - r, cy),
-        };
-        g.FillPolygon(titleBrush, pts);
-        int textX = row.X + (int)Math.Ceiling(r * 2 + 3 * scale);
+            float r = Math.Clamp(4.0f * scale, 3.6f, 7.0f);
+            float inner = r * 0.34f;
+            float cx = row.X + r + 0.5f;
+            float cy = row.Y + row.Height / 2f;
+            var pts = new PointF[]
+            {
+                new(cx, cy - r),
+                new(cx + inner, cy - inner),
+                new(cx + r, cy),
+                new(cx + inner, cy + inner),
+                new(cx, cy + r),
+                new(cx - inner, cy + inner),
+                new(cx - r, cy),
+                new(cx - inner, cy - inner),
+            };
+            g.FillPolygon(titleBrush, pts);
+            textX = row.X + (int)Math.Ceiling(r * 2 + 3 * scale);
+        }
+        else
+        {
+            float r = Math.Clamp(3.5f * scale, 3.2f, 6.2f);
+            float cx = row.X + r + 0.5f;
+            float cy = row.Y + row.Height / 2f;
+            var pts = new PointF[]
+            {
+                new(cx, cy - r),
+                new(cx + r, cy),
+                new(cx, cy + r),
+                new(cx - r, cy),
+            };
+            g.FillPolygon(titleBrush, pts);
+            textX = row.X + (int)Math.Ceiling(r * 2 + 3 * scale);
+        }
 
         g.SmoothingMode = previous;
 
@@ -1061,7 +1136,7 @@ internal static class UsageStrip
                                                 barThick));
     }
 
-    private static void PaintRemoteChatsState(Graphics g, Rectangle area, RemoteChatsReading? reading)
+    private static void PaintRemoteChatsState(Graphics g, Rectangle area, RemoteChatsReading? reading, RemoteChatService? serviceFilter = null)
     {
         float fontPt = Math.Clamp(area.Height * 0.16f, 7.5f, 12f);
         int barThick = Math.Clamp(area.Height / 8, MeterStrip.BarThickness, 12);
@@ -1073,13 +1148,20 @@ internal static class UsageStrip
             FormatFlags = StringFormatFlags.NoWrap,
         };
 
+        Color baseCol = serviceFilter switch
+        {
+            RemoteChatService.Claude => ClaudeTitleColour,
+            RemoteChatService.Antigravity => AntigravityTitleColour,
+            _ => RemoteChatsTitleColour,
+        };
+
         (string text, Color colour) = !RemoteChatUsage.Enabled
-            ? ("Chats · set up", RemoteChatsTitleColour)
+            ? ("Chats · set up", baseCol)
             : reading is { NeedsAuth: true }
-                ? ("Chats · sign in", RemoteChatsTitleColour)
+                ? ("Chats · sign in", baseCol)
                 : reading is { Error: not null, Settled: true }
                     ? ("Chats · error", MeterStrip.High)
-                    : ("Chats ···", RemoteChatsTitleColour);
+                    : ("Chats ···", baseCol);
 
         int width = Math.Max(16, area.Width - 16);
         var label = new Rectangle(area.X, area.Y, area.Width, area.Height - barThick - 6);
@@ -1115,7 +1197,7 @@ internal static class UsageStrip
         return text.ToString();
     }
 
-    /// <summary>The whole Antigravity reading in words (Gemini Pro &amp; Flash session and weekly limits).</summary>
+    /// <summary>The whole Antigravity reading in words (both IDE and CLI/Remote Gemini Pro &amp; Flash session and weekly limits).</summary>
     public static string AntigravityTip(UsageReading? reading)
     {
         if (!AntigravityUsage.Enabled)
@@ -1131,12 +1213,20 @@ internal static class UsageStrip
 
         var text = new StringBuilder(reading.Standby
             ? "Antigravity — Gemini Pro & Flash (standby — last reading)"
-            : "Antigravity — Gemini Pro & Flash");
+            : "Antigravity — Gemini Pro & Flash (IDE + CLI/Remote)");
 
         foreach (var limit in reading.Limits)
         {
             text.AppendLine();
-            text.Append($"{limit.Label}: {limit.Percent}%");
+            string friendlyLabel = limit.Label switch
+            {
+                "IDE 5h" => "IDE Session (5h)",
+                "IDE 7d" => "IDE Weekly (7d)",
+                "CLI 5h" => "CLI / Remote Session (5h)",
+                "CLI 7d" => "CLI / Remote Weekly (7d)",
+                _ => limit.Label,
+            };
+            text.Append($"{friendlyLabel}: {limit.Percent}%");
 
             var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
             if (countdown.Length > 0) text.Append($"  ({countdown})");
@@ -1194,23 +1284,35 @@ internal static class UsageStrip
         return text.ToString();
     }
 
-    /// <summary>Full tooltip breakdown of remote server chats across Claude Code and Antigravity.</summary>
-    public static string RemoteChatsTip(RemoteChatsReading? reading)
+    /// <summary>Full tooltip breakdown of remote server chats (optionally filtered to Claude or Antigravity).</summary>
+    public static string RemoteChatsTip(RemoteChatsReading? reading, RemoteChatService? serviceFilter = null)
     {
-        if (!RemoteChatUsage.Enabled)
-            return "Remote server chats — switched off (Settings ▸ Remote chats)";
-        if (reading is null)
-            return "Remote server chats — starting up";
-        if (reading.NeedsAuth)
-            return $"Remote server chats — {reading.Error ?? "sign in under Claude usage or Antigravity usage"}";
-        if (reading.Rows.Count == 0 && reading.Error is not null)
-            return $"Remote server chats — {reading.Error}";
-        if (reading.Rows.Count == 0)
-            return "Remote server chats — no enabled servers found yet";
+        string prefix = serviceFilter switch
+        {
+            RemoteChatService.Claude => "Claude remote chats",
+            RemoteChatService.Antigravity => "Antigravity remote chats",
+            _ => "Remote server chats",
+        };
 
-        int waiting = reading.Rows.Sum(r => r.WaitingCount);
-        int running = reading.Rows.Sum(r => r.RunningCount);
-        int done = reading.Rows.Sum(r => r.DoneCount);
+        if (!RemoteChatUsage.Enabled)
+            return $"{prefix} — switched off (Settings ▸ Remote chats)";
+        if (reading is null)
+            return $"{prefix} — starting up";
+        if (reading.NeedsAuth)
+            return $"{prefix} — {reading.Error ?? "sign in under Claude usage or Antigravity usage"}";
+
+        IReadOnlyList<RemoteServerRow> rows = serviceFilter is { } svc
+            ? reading.Rows.Where(r => r.Service == svc).ToList()
+            : reading.Rows;
+
+        if (rows.Count == 0 && reading.Error is not null)
+            return $"{prefix} — {reading.Error}";
+        if (rows.Count == 0)
+            return $"{prefix} — no enabled servers found yet";
+
+        int waiting = rows.Sum(r => r.WaitingCount);
+        int running = rows.Sum(r => r.RunningCount);
+        int done = rows.Sum(r => r.DoneCount);
 
         var summary = new List<string>();
         if (waiting > 0) summary.Add($"{waiting} need input");
@@ -1218,10 +1320,16 @@ internal static class UsageStrip
         if (done > 0) summary.Add($"{done} done");
         if (summary.Count == 0) summary.Add("all idle");
 
-        var text = new StringBuilder($"Remote Chats — {string.Join(", ", summary)} (click for menu)");
+        string headerTitle = serviceFilter switch
+        {
+            RemoteChatService.Claude => "Claude Remote Chats",
+            RemoteChatService.Antigravity => "Antigravity Remote Chats",
+            _ => "Remote Chats",
+        };
+        var text = new StringBuilder($"{headerTitle} — {string.Join(", ", summary)} (click for menu)");
         text.AppendLine();
         text.Append(RemoteChatLegendLine);
-        foreach (var row in reading.Rows)
+        foreach (var row in rows)
         {
             text.AppendLine();
             string svcName = row.Service == RemoteChatService.Antigravity ? "Antigravity" : "Claude";

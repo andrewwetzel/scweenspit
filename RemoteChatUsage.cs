@@ -169,43 +169,47 @@ public static class RemoteChatUsage
     private static bool hasCompletedInitialSync;
     private const int AttentionGlowDurationMs = 2600;
     private static int? lastSettledWaitingCount;
+    private static int? lastClaudeWaitingCount;
+    private static int? lastAgWaitingCount;
     private static long attentionGlowStartTick;
+    private static long claudeGlowStartTick;
+    private static long agGlowStartTick;
 
     /// <summary>Raised whenever <see cref="Current"/> changes so bars can repaint immediately.</summary>
     public static event Action? Changed;
+
+    private static float GlowIntensityFromTick(long start)
+    {
+        if (start == 0) return 0f;
+        long elapsed = Environment.TickCount64 - start;
+        if (elapsed < 0 || elapsed >= AttentionGlowDurationMs) return 0f;
+
+        // Two smooth warm amber pulses over ~2.6 seconds, fading cleanly to 0.
+        double t = elapsed / (double)AttentionGlowDurationMs;
+        double pulse = 0.5 - 0.5 * Math.Cos(t * Math.PI * 4.0);
+        double envelope = 1.0 - t * 0.35;
+        return (float)Math.Clamp(pulse * envelope, 0.0, 1.0);
+    }
 
     /// <summary>
     /// Normalized [0..1] glow intensity when the tracker has just transitioned from 0 chats
     /// needing help to at least 1 chat needing help, or 0 when not glowing.
     /// </summary>
-    public static float AttentionGlowIntensity
-    {
-        get
-        {
-            long start = Interlocked.Read(ref attentionGlowStartTick);
-            if (start == 0) return 0f;
-            long elapsed = Environment.TickCount64 - start;
-            if (elapsed < 0 || elapsed >= AttentionGlowDurationMs) return 0f;
+    public static float AttentionGlowIntensity => GetAttentionGlowIntensity(null);
 
-            // Two smooth warm amber pulses over ~2.6 seconds, fading cleanly to 0.
-            double t = elapsed / (double)AttentionGlowDurationMs;
-            double pulse = 0.5 - 0.5 * Math.Cos(t * Math.PI * 4.0);
-            double envelope = 1.0 - t * 0.35;
-            return (float)Math.Clamp(pulse * envelope, 0.0, 1.0);
-        }
-    }
+    public static float GetAttentionGlowIntensity(RemoteChatService? service) => service switch
+    {
+        RemoteChatService.Claude => GlowIntensityFromTick(Interlocked.Read(ref claudeGlowStartTick)),
+        RemoteChatService.Antigravity => GlowIntensityFromTick(Interlocked.Read(ref agGlowStartTick)),
+        _ => Math.Max(
+            GlowIntensityFromTick(Interlocked.Read(ref attentionGlowStartTick)),
+            Math.Max(
+                GlowIntensityFromTick(Interlocked.Read(ref claudeGlowStartTick)),
+                GlowIntensityFromTick(Interlocked.Read(ref agGlowStartTick)))),
+    };
 
     /// <summary>True while the brief attention glow animation is active.</summary>
-    public static bool IsAttentionGlowing
-    {
-        get
-        {
-            long start = Interlocked.Read(ref attentionGlowStartTick);
-            if (start == 0) return false;
-            long elapsed = Environment.TickCount64 - start;
-            return elapsed >= 0 && elapsed < AttentionGlowDurationMs;
-        }
-    }
+    public static bool IsAttentionGlowing => AttentionGlowIntensity > 0f;
 
     /// <summary>The latest reading across all enabled server × service rows.</summary>
     public static RemoteChatsReading? Current => current;
@@ -226,6 +230,37 @@ public static class RemoteChatUsage
         }
     }
 
+    public static int ConfiguredRowCountFor(RemoteChatService service)
+    {
+        lock (gate)
+        {
+            if (settings is null) return 0;
+            bool wantAg = service == RemoteChatService.Antigravity;
+            return settings.Rows.Count(r =>
+                r.Enabled &&
+                string.Equals(r.Service, "Antigravity", StringComparison.OrdinalIgnoreCase) == wantAg);
+        }
+    }
+
+    public static bool ShouldShowServiceStrip(RemoteChatService service)
+    {
+        lock (gate)
+        {
+            if (settings is null || !settings.Enabled || settings.Rows.Count == 0)
+                return true;
+
+            bool wantAg = service == RemoteChatService.Antigravity;
+            bool anyForService = settings.Rows.Any(r =>
+                string.Equals(r.Service, "Antigravity", StringComparison.OrdinalIgnoreCase) == wantAg);
+            if (!anyForService)
+                return true;
+
+            return settings.Rows.Any(r =>
+                r.Enabled &&
+                string.Equals(r.Service, "Antigravity", StringComparison.OrdinalIgnoreCase) == wantAg);
+        }
+    }
+
     /// <summary>Starts, stops, or updates the remote chat poller.</summary>
     public static void Configure(RemoteChatsSettings config, Action? save = null)
     {
@@ -242,7 +277,11 @@ public static class RemoteChatUsage
                 current = null;
                 hasCompletedInitialSync = false;
                 lastSettledWaitingCount = null;
+                lastClaudeWaitingCount = null;
+                lastAgWaitingCount = null;
                 Interlocked.Exchange(ref attentionGlowStartTick, 0);
+                Interlocked.Exchange(ref claudeGlowStartTick, 0);
+                Interlocked.Exchange(ref agGlowStartTick, 0);
                 StopAllAntigravityStreams();
                 return;
             }
@@ -654,15 +693,30 @@ public static class RemoteChatUsage
             Transient: !hasCompletedInitialSync && rows.Count == 0 && lastError is null);
 
         int totalWaiting = rows.Sum(r => r.WaitingCount);
+        int claudeWaiting = rows.Where(r => r.Service == RemoteChatService.Claude).Sum(r => r.WaitingCount);
+        int agWaiting = rows.Where(r => r.Service == RemoteChatService.Antigravity).Sum(r => r.WaitingCount);
         bool glowTriggered = false;
         if (hasCompletedInitialSync)
         {
+            long nowTick = Environment.TickCount64;
             if (lastSettledWaitingCount is 0 && totalWaiting > 0)
             {
-                Interlocked.Exchange(ref attentionGlowStartTick, Environment.TickCount64);
+                Interlocked.Exchange(ref attentionGlowStartTick, nowTick);
+                glowTriggered = true;
+            }
+            if (lastClaudeWaitingCount is 0 && claudeWaiting > 0)
+            {
+                Interlocked.Exchange(ref claudeGlowStartTick, nowTick);
+                glowTriggered = true;
+            }
+            if (lastAgWaitingCount is 0 && agWaiting > 0)
+            {
+                Interlocked.Exchange(ref agGlowStartTick, nowTick);
                 glowTriggered = true;
             }
             lastSettledWaitingCount = totalWaiting;
+            lastClaudeWaitingCount = claudeWaiting;
+            lastAgWaitingCount = agWaiting;
         }
 
         current = next;
