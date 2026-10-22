@@ -168,6 +168,7 @@ public static class RemoteChatUsage
     private static bool lastNeedsAuth;
     private static bool hasCompletedInitialSync;
     private const int AttentionGlowDurationMs = 2600;
+    private static readonly TimeSpan PostTurnWaitingWindow = TimeSpan.FromMinutes(5);
     private static int? lastSettledWaitingCount;
     private static int? lastClaudeWaitingCount;
     private static int? lastAgWaitingCount;
@@ -1140,7 +1141,8 @@ public static class RemoteChatUsage
                 bool isActive = !isArchived && (
                     string.Equals(status, "active", StringComparison.OrdinalIgnoreCase) ||
                     (string.IsNullOrEmpty(status) && !string.IsNullOrEmpty(sessionStatus)));
-                bool isConnected = string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase);
+                bool isConnected = string.IsNullOrEmpty(conn) ||
+                    string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase);
 
                 string? taskSummary = null;
                 string? needsAction = null;
@@ -1156,6 +1158,19 @@ public static class RemoteChatUsage
                                        ?? Text(rad, "description")
                                        ?? Text(rad, "tool_name");
                 }
+                else if (s.TryGetProperty("requires_action_details_list", out var radList)
+                      && radList.ValueKind == JsonValueKind.Array
+                      && radList.GetArrayLength() > 0)
+                {
+                    hasPendingActionObj = true;
+                    var firstRad = radList[0];
+                    if (firstRad.ValueKind == JsonValueKind.Object)
+                    {
+                        pendingActionDetail = Text(firstRad, "action_description")
+                                           ?? Text(firstRad, "description")
+                                           ?? Text(firstRad, "tool_name");
+                    }
+                }
 
                 if (s.TryGetProperty("external_metadata", out var ext) && ext.ValueKind == JsonValueKind.Object)
                 {
@@ -1166,6 +1181,19 @@ public static class RemoteChatUsage
                         pendingActionDetail ??= Text(pa, "action_description")
                                              ?? Text(pa, "description")
                                              ?? Text(pa, "tool_name");
+                    }
+                    else if (ext.TryGetProperty("pending_actions", out var pas)
+                          && pas.ValueKind == JsonValueKind.Array
+                          && pas.GetArrayLength() > 0)
+                    {
+                        hasPendingActionObj = true;
+                        var firstPa = pas[0];
+                        if (firstPa.ValueKind == JsonValueKind.Object)
+                        {
+                            pendingActionDetail ??= Text(firstPa, "action_description")
+                                                 ?? Text(firstPa, "description")
+                                                 ?? Text(firstPa, "tool_name");
+                        }
                     }
                     if (ext.TryGetProperty("post_turn_summary", out var pts) && pts.ValueKind == JsonValueKind.Object)
                     {
@@ -1182,41 +1210,53 @@ public static class RemoteChatUsage
                     statusDetail ??= Text(topPts, "status_detail") ?? Text(topPts, "recent_action");
                 }
 
-                // 1. Mid-turn permission / tool / question block: worker is explicitly waiting on user action.
-                bool isBlockedMidTurn = isActive && (
-                    string.Equals(worker, "requires_action", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(sessionStatus, "requires_action", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(bucketKind, "requires_action", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(bucketKind, "blocked", StringComparison.OrdinalIgnoreCase) ||
-                    hasPendingActionObj);
-
-                // 2. Actively executing a turn: takes priority over `post_turn_summary` from the previous
-                //    turn so a resolved chat turns blue immediately when the worker resumes running,
-                //    rather than staying yellow until the new turn finishes and overwrites `post_turn_summary`.
-                bool isWorkerRunning = !isBlockedMidTurn && isActive && (
-                    string.Equals(worker, "running", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(worker, "starting", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(sessionStatus, "running", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(sessionStatus, "starting", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(bucketKind, "working", StringComparison.OrdinalIgnoreCase));
-
-                // 3. Post-turn waiting for input: turn finished (worker idle) and asked the user a question.
-                bool isWaitingPostTurn = !isBlockedMidTurn && !isWorkerRunning && isActive && (
-                    string.Equals(statusCategory, "need_input", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(statusCategory, "needs_input", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(statusCategory, "blocked", StringComparison.OrdinalIgnoreCase) ||
-                    !string.IsNullOrWhiteSpace(needsAction));
-
-                bool isWaiting = isBlockedMidTurn || isWaitingPostTurn;
-                bool isRunning = isWorkerRunning;
-
                 var updated = ParseIso(Text(s, "last_event_at"))
                            ?? ParseIso(Text(s, "updated_at"))
                            ?? ParseIso(Text(s, "created_at"))
                            ?? DateTimeOffset.MinValue;
 
-                bool isDone = !isWaiting && !isRunning && isActive &&
-                              (isConnected || updated >= doneCutoff);
+                var postTurnWaitingCutoff = DateTimeOffset.UtcNow - PostTurnWaitingWindow;
+
+                bool isWorkerExplicitlyIdle = string.Equals(worker, "idle", StringComparison.OrdinalIgnoreCase);
+                bool isWorkerExplicitlyRunning =
+                    string.Equals(worker, "running", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(worker, "starting", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "running", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "starting", StringComparison.OrdinalIgnoreCase);
+
+                // 1. Mid-turn permission / tool / question block: worker is explicitly paused waiting on user action.
+                //    Do NOT include `bucketKind == "blocked"` here because Claude's backend also sets
+                //    `status_bucket = "blocked"` on idle completed turns when `post_turn_summary` is `need_input`.
+                bool isBlockedMidTurn = isActive && isConnected && updated >= doneCutoff && !isWorkerExplicitlyRunning && (
+                    string.Equals(worker, "requires_action", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(sessionStatus, "requires_action", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(bucketKind, "requires_action", StringComparison.OrdinalIgnoreCase) ||
+                    (!isWorkerExplicitlyIdle && hasPendingActionObj));
+
+                // 2. Actively executing a turn: takes priority over `post_turn_summary` from the previous
+                //    turn so a resolved chat turns blue immediately when the worker resumes running,
+                //    rather than staying yellow until the new turn finishes and overwrites `post_turn_summary`.
+                bool isWorkerRunning = !isBlockedMidTurn && isActive && isConnected && (
+                    isWorkerExplicitlyRunning ||
+                    (!isWorkerExplicitlyIdle &&
+                     !string.Equals(worker, "WORKER_STATUS_UNSPECIFIED", StringComparison.OrdinalIgnoreCase) &&
+                     string.Equals(bucketKind, "working", StringComparison.OrdinalIgnoreCase)));
+
+                // 3. Post-turn waiting for input: turn finished (worker idle) and asked the user a question.
+                //    Only flag as needing help (`!`) briefly right after the turn finishes; once it has been
+                //    sitting idle past `PostTurnWaitingWindow` (or marked read), settle it to Done (`✓`).
+                bool isWaitingPostTurn = !isBlockedMidTurn && !isWorkerRunning && isActive && isConnected &&
+                    unread && updated >= postTurnWaitingCutoff && (
+                    string.Equals(statusCategory, "need_input", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusCategory, "needs_input", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(statusCategory, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(bucketKind, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                    !string.IsNullOrWhiteSpace(needsAction));
+
+                bool isWaiting = isBlockedMidTurn || isWaitingPostTurn;
+                bool isRunning = isWorkerRunning;
+
+                bool isDone = !isWaiting && !isRunning && isActive && updated >= doneCutoff;
 
                 if (!isWaiting && !isRunning && !isDone) continue;
 
@@ -1980,8 +2020,9 @@ public static class RemoteChatUsage
     {
         if (t.Killed || t.Archived) return null;
 
-        bool isWaiting = t.WaitingSteps > 0 ||
-            t.Status.Contains("WAITING", StringComparison.OrdinalIgnoreCase);
+        bool isWaiting = !t.Interrupted && t.LastModified >= doneCutoff && (
+            t.WaitingSteps > 0 ||
+            t.Status.Contains("WAITING", StringComparison.OrdinalIgnoreCase));
 
         bool isRunning = !isWaiting && (
             string.Equals(t.Status, "CASCADE_RUN_STATUS_RUNNING", StringComparison.OrdinalIgnoreCase) ||
