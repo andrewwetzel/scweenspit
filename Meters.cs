@@ -9,7 +9,7 @@ internal readonly record struct Meter(string Label, int Percent, string Detail,
                                       string? Subtext = null, Color? BarColour = null,
                                       string? FigureText = null, Color? SubtextColour = null,
                                       int? SecondPercent = null, string? SecondFigureText = null,
-                                      Color? SecondBarColour = null);
+                                      Color? SecondBarColour = null, string? SecondLabel = null);
 
 /// <summary>
 /// A stack of thin labelled bars inside the status cluster.
@@ -332,7 +332,20 @@ internal static class MeterStrip
                         int remX = row.X + nameW + trackGap;
                         int remW = Math.Max(16, row.Right - remX);
                         int pairGap = Math.Clamp((int)Math.Round(6 * scale), 4, 10);
-                        int slotW = Math.Max(8, (remW - pairGap) / 2);
+
+                        int secondLblW = 0;
+                        if (!string.IsNullOrEmpty(meter.SecondLabel))
+                        {
+                            float lw2 = g.MeasureString(meter.SecondLabel, meter.BoldLabel ? boldNameFont : nameFont).Width;
+                            int candW = (int)Math.Ceiling(lw2) + 2;
+                            if (remW >= candW + figW * 2 + pairGap + trackGap + 32)
+                                secondLblW = candW;
+                        }
+
+                        int slotsAvailW = secondLblW > 0
+                            ? remW - pairGap - secondLblW - trackGap
+                            : remW - pairGap;
+                        int slotW = Math.Max(8, slotsAvailW / 2);
                         int pairFigW = Math.Min(figW, Math.Max(16, slotW * 60 / 100));
 
                         int x1 = remX;
@@ -340,6 +353,21 @@ internal static class MeterStrip
                         var track1 = new Rectangle(x1, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig1.X - x1 - 2), barThick);
 
                         int x2 = x1 + slotW + pairGap;
+                        if (secondLblW > 0)
+                        {
+                            var name2Rect = new Rectangle(x2, row.Y, secondLblW, rowHeight);
+                            if (meter.LabelColour is { } customLbl2)
+                            {
+                                using var lblBrush2 = new SolidBrush(customLbl2);
+                                g.DrawString(meter.SecondLabel, meter.BoldLabel ? boldNameFont : nameFont, lblBrush2, name2Rect, centred);
+                            }
+                            else
+                            {
+                                g.DrawString(meter.SecondLabel, meter.BoldLabel ? boldNameFont : nameFont, defaultLblBrush, name2Rect, centred);
+                            }
+                            x2 += secondLblW + trackGap;
+                        }
+
                         var fig2 = new Rectangle(row.Right - pairFigW, row.Y, pairFigW, rowHeight);
                         var track2 = new Rectangle(x2, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig2.X - x2 - 2), barThick);
 

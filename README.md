@@ -710,7 +710,7 @@ window will fight, and the loser retries.
     "OrgId": null,
     "RefreshSeconds": 180,
     "ShowWeekly": true,
-    "ShowModel": true
+    "ShowModel": false
   },
   "Monitors": {
     "*": {

@@ -279,7 +279,7 @@ public sealed class ClaudeSettings
     public bool ShowWeekly { get; set; } = true;
 
     /// <summary>Show the weekly per-model limit, when the account has one.</summary>
-    public bool ShowModel { get; set; } = true;
+    public bool ShowModel { get; set; }
 }
 
 /// <summary>
@@ -495,7 +495,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -855,6 +855,10 @@ public sealed class SplitConfig
                 bar.AntigravityWidth = null;
                 bar.BambuWidth = null;
             }
+            if (Version < 8)
+            {
+                bar.UsageWidth = null;
+            }
             bar.RemoteChatsWidth = bar.RemoteChatsWidth is > 0 and var rw ? Math.Clamp(rw, 44, 1200) : null;
             bar.AntigravityChatsWidth = bar.AntigravityChatsWidth is > 0 and var acw ? Math.Clamp(acw, 44, 1200) : null;
             bar.UsageWidth = bar.UsageWidth is > 0 and var uw ? Math.Clamp(uw, 44, 1200) : null;
@@ -872,6 +876,8 @@ public sealed class SplitConfig
 
         // Below half a minute this stops being a status readout and starts being a scraper.
         Claude ??= new ClaudeSettings();
+        if (priorVersion < 8)
+            Claude.ShowModel = false;
         Claude.RefreshSeconds = Math.Clamp(Claude.RefreshSeconds, 30, 3600);
 
         Antigravity ??= new AntigravitySettings();

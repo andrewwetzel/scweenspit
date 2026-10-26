@@ -19,11 +19,11 @@ internal static class UsageStrip
     private static readonly Color BambuTitleColour = Color.FromArgb(120, 232, 160);
     private static readonly Color RemoteChatsTitleColour = Color.FromArgb(145, 215, 255);
 
-    /// <summary>Room the Claude strip needs along the bar.</summary>
+    /// <summary>Room the Claude strip needs along the bar (1 column: paired 5h/7d row plus any optional model row).</summary>
     public static int Extent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
     {
-        int count = ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2;
-        return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+        int rowCount = GetClaudeRowCount(ClaudeUsage.Current?.Limits);
+        return MeterStrip.UsageExtent(vertical, rowCount, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
     /// <summary>Room the Antigravity strip needs along the bar (1 column: IDE 5h/7d row + CLI 5h/7d row).</summary>
@@ -31,6 +31,18 @@ internal static class UsageStrip
     {
         int rowCount = GetAntigravityRowCount(AntigravityUsage.Current?.Limits);
         return MeterStrip.UsageExtent(vertical, rowCount, maxRowsPerColumn, barBreadth, scalePercent);
+    }
+
+    private static int GetClaudeRowCount(IReadOnlyList<UsageLimit>? limits)
+    {
+        if (limits is null || limits.Count == 0) return 1;
+        bool hasSessionOrWeekly = limits.Any(l =>
+            l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ||
+            l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase));
+        int extra = limits.Count(l =>
+            !l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) &&
+            !l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase));
+        return Math.Max(1, (hasSessionOrWeekly ? 1 : 0) + extra);
     }
 
     private static int GetAntigravityRowCount(IReadOnlyList<UsageLimit>? limits)
@@ -127,51 +139,18 @@ internal static class UsageStrip
                 PaintRemoteChatsAttentionGlow(g, area, glow);
         }
 
-        bool vertical = area.Height > area.Width;
-        int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
-        int cols = MeterStrip.ColumnsFor(vertical, limits.Count, maxRows);
-        int rowsPerCol = (int)Math.Ceiling(limits.Count / (double)cols);
-        bool useHeaderRow = !vertical && (rowsPerCol + 1 <= maxRows) && (area.Height - 2) / (rowsPerCol + 1) >= 11;
-
-        var meters = new List<Meter>(limits.Count);
-        for (int i = 0; i < limits.Count; i++)
-        {
-            var l = limits[i];
-            string displayLabel = vertical
-                ? (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "Cl 5h"
-                 : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "Cl 7d"
-                 : l.Label)
-                : useHeaderRow
-                    ? (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "5h"
-                     : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "7d"
-                     : l.Label)
-                    : (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "Claude 5h"
-                     : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "Claude 7d"
-                     : l.Label);
-
-            bool highlightFirst = !vertical && !useHeaderRow && i == 0;
-            string detail = ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left
-                ? $"{l.Label}: {l.Percent}%  ({left})"
-                : $"{l.Label}: {l.Percent}%";
-
-            meters.Add(new Meter(
-                displayLabel,
-                l.Percent,
-                detail,
-                LabelColour: highlightFirst ? ClaudeTitleColour : null,
-                BoldLabel: highlightFirst,
-                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
-        }
+        var meters = BuildClaudeMeters(limits);
 
         var stripChats = showRemoteChats && RemoteChatUsage.Enabled
             ? RemoteChatUsage.GetStripChatsForService(RemoteChatService.Claude)
             : [];
         bool hasWaiting = stripChats.Any(c => c.State == RemoteChatState.Waiting);
+        string hdrTitle = GetClaudeHeaderTitle(area.Width, stripChats.Count);
 
         MeterStrip.Paint(
             g, area, meters,
             lowColour: MeterStrip.Low,
-            headerTitle: useHeaderRow ? "Claude" : null,
+            headerTitle: hdrTitle,
             headerTag: null,
             headerColour: hasWaiting ? Color.FromArgb(255, 210, 115) : ClaudeTitleColour,
             sparkleGlyph: false,
@@ -179,6 +158,53 @@ internal static class UsageStrip
             paintHeaderRight: stripChats.Count > 0
                 ? (hg, rightBox, hdrScale) => PaintOrHitTestHeaderCapsule(hg, rightBox, stripChats, hoveredChatId, null, hdrScale, out _)
                 : null);
+    }
+
+    private static string GetClaudeHeaderTitle(int stripWidth, int chatCount) =>
+        (chatCount >= 4 && stripWidth < 165) || (chatCount > 0 && stripWidth < 130) ? "Cl" : "Claude";
+
+    private static List<Meter> BuildClaudeMeters(IReadOnlyList<UsageLimit> limits)
+    {
+        var session = limits.FirstOrDefault(l => l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase));
+        var weekly = limits.FirstOrDefault(l => l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase));
+        var extras = limits.Where(l =>
+            !l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) &&
+            !l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        var meters = new List<Meter>(2);
+        if (session is not null || weekly is not null)
+        {
+            var p1 = session ?? weekly!;
+            var p2 = session is not null ? weekly : null;
+            string p1Tag = session is not null ? "5h" : "7d";
+            string detail = p2 is not null
+                ? $"Session (5h): {p1.Percent}% · Weekly (7d): {p2.Percent}%"
+                : $"{p1.Label}: {p1.Percent}%";
+
+            meters.Add(new Meter(
+                p1Tag,
+                p1.Percent,
+                detail,
+                FigureText: $"{p1.Percent}%",
+                SecondPercent: p2?.Percent,
+                SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null,
+                SecondLabel: p2 is not null ? "7d" : null));
+        }
+
+        foreach (var l in extras)
+        {
+            string detail = ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left
+                ? $"{l.Label}: {l.Percent}%  ({left})"
+                : $"{l.Label}: {l.Percent}%";
+
+            meters.Add(new Meter(
+                l.Label,
+                l.Percent,
+                detail,
+                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
+        }
+
+        return meters;
     }
 
     public static void PaintAntigravity(
@@ -538,7 +564,7 @@ internal static class UsageStrip
         if (!area.Contains(pt)) return false;
         int meterCount = service == RemoteChatService.Antigravity
             ? GetAntigravityRowCount(AntigravityUsage.Current?.Limits)
-            : (ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2);
+            : GetClaudeRowCount(ClaudeUsage.Current?.Limits);
         return MeterStrip.GetHeaderRow(area, meterCount, maxRowsPerColumn, out _) is { } hdr && hdr.Contains(pt);
     }
 
@@ -558,7 +584,7 @@ internal static class UsageStrip
 
         int meterCount = service == RemoteChatService.Antigravity
             ? GetAntigravityRowCount(AntigravityUsage.Current?.Limits)
-            : (ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2);
+            : GetClaudeRowCount(ClaudeUsage.Current?.Limits);
 
         if (MeterStrip.GetHeaderRow(area, meterCount, maxRowsPerColumn, out float scale) is not { } hdrRow)
             return null;
@@ -571,7 +597,9 @@ internal static class UsageStrip
         using var boldNameFont = Theme.Face(namePt, FontStyle.Bold);
 
         bool sparkleGlyph = service == RemoteChatService.Antigravity;
-        string title = sparkleGlyph ? GetAntigravityHeaderTitle(area.Width, stripChats.Count) : "Claude";
+        string title = sparkleGlyph
+            ? GetAntigravityHeaderTitle(area.Width, stripChats.Count)
+            : GetClaudeHeaderTitle(area.Width, stripChats.Count);
         int glyphW = sparkleGlyph
             ? (int)Math.Ceiling(Math.Clamp(4.2f * scale, 3.8f, 7.5f) * 2 + 3 * scale)
             : (int)Math.Ceiling(Math.Clamp(3.5f * scale, 3.2f, 6.2f) * 2 + 3 * scale);
@@ -1493,7 +1521,13 @@ internal static class UsageStrip
         foreach (var limit in reading.Limits)
         {
             text.AppendLine();
-            text.Append($"{limit.Label}: {limit.Percent}%");
+            string friendlyLabel = limit.Label switch
+            {
+                "Session" => "Session (5h)",
+                "Weekly" => "Weekly (7d)",
+                _ => limit.Label,
+            };
+            text.Append($"{friendlyLabel}: {limit.Percent}%");
 
             var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
             if (countdown.Length > 0) text.Append($"  ({countdown})");
