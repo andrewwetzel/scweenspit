@@ -157,6 +157,9 @@ public sealed class TaskbarWindow : Form
     /// <summary>Raised when a strip on the bar wants the settings window opened to a specific page.</summary>
     public event Action<string>? SettingsRequested;
 
+    /// <summary>Raised when the orchestrator strip is clicked while something needs you, with where it was clicked.</summary>
+    public event Action<Point>? NeedsRequested;
+
     /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
     public event Action? PinsChanged;
 
@@ -456,12 +459,16 @@ public sealed class TaskbarWindow : Form
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
+    /// <summary>Whether this bar draws the orchestrator strip whenever there is something to put in it.</summary>
+    public bool ShowsOrchestra => (settings.ShowOrchestra ?? monitor.IsPrimary) && OrchestraUsage.Enabled;
+
     /// <summary>
-    /// Shown only while an orchestrator feed has answered and has an active run in flight (0px when idle).
-    /// Unset means the primary display's bar only.
+    /// Shown only while an orchestrator feed has answered and has an active run in flight, or is
+    /// listing something that needs a person (0px otherwise). Unset means the primary display's bar only.
     /// </summary>
+
     private bool OrchestraVisible => (settings.ShowOrchestra ?? monitor.IsPrimary)
-                                     && OrchestraUsage.Current is { } o && o.Feeds.Any(f => f.Answered && f.Active);
+                                     && OrchestraUsage.Current is { AnythingToShow: true };
 
     private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Orchestra, int Bambu, int Machine) DefaultTrackerExtents()
     {
@@ -1638,6 +1645,12 @@ public sealed class TaskbarWindow : Form
                 break;
 
             case TrackerSection.Orchestra:
+                if (e.Button == MouseButtons.Left && NeedsRequested is not null
+                    && OrchestraUsage.Current is { Needs.Count: > 0 })
+                {
+                    NeedsRequested(Cursor.Position);
+                    break;
+                }
                 OpenSettingsOrMenu("Orchestrator");
                 break;
 

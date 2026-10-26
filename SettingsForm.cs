@@ -2365,6 +2365,41 @@ public sealed class SettingsForm : Form
         };
         page.Controls.Add(showTimer);
 
+        var indicator = Theme.Choice(NeedsIndicator.Choices, orchestra.NeedsIndicator);
+        var decision = Theme.Caption("");
+        void ShowDecision() => decision.Text =
+            "When the orchestrator is waiting on you for something — an approval, a merge, a sign-in — " +
+            "the strip gets a Needs row and this shows the count until it is dealt with. Taskbar is a " +
+            "badged button that flashes when something arrives; Floating is a pill you can drag anywhere. " +
+            "Automatic floats on a laptop-sized screen, or when the taskbar is hidden or compact." +
+            (NeedsIndicator.LastDecision is { Length: > 0 } why ? $" Right now: {why}." : "");
+        indicator.SelectedIndexChanged += (_, _) =>
+        {
+            orchestra.NeedsIndicator = (string)indicator.SelectedItem!;
+            Save();
+            ShowDecision();
+        };
+        Row(page, "Show what needs you", indicator);
+        ShowDecision();
+        page.Controls.Add(decision);
+
+        var toast = Theme.Toggle("Notify me when something new needs me", orchestra.NeedsToast);
+        toast.CheckedChanged += (_, _) => { orchestra.NeedsToast = toast.Checked; Save(); };
+        page.Controls.Add(toast);
+
+        if (orchestra.NeedsPillX is not null)
+        {
+            var corner = Theme.Action("Put the floating pill back by the clock");
+            corner.AutoSize = true;
+            corner.Click += (_, _) =>
+            {
+                orchestra.NeedsPillX = orchestra.NeedsPillY = null;
+                Save();
+                corner.Enabled = false;
+            };
+            page.Controls.Add(corner);
+        }
+
         page.Controls.Add(Theme.Caption(
             "The strip appears on the bar only once a feed answers, so a machine that cannot reach " +
             "the orchestrator shows nothing. A feed that has never answered is asked every 30 seconds; " +

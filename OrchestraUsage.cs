@@ -18,6 +18,50 @@ public sealed record OrchestraRun(
     IReadOnlyList<OrchestraToolCount> Children);
 
 /// <summary>
+/// Something the orchestrator cannot do for itself and is waiting on a person for: a passkey
+/// approval, an MR to merge by hand, a sign-in, a manual step, or a question in its own session.
+/// Listed until the orchestrator has checked the work and closes it, even after Done is pressed.
+/// </summary>
+public sealed record OrchestraNeed(
+    string Id,
+    string Kind,
+    string Title,
+    string? Detail,
+    string? Url,
+    string? Command,
+    string? Repo,
+    string? Run,
+    string? Task,
+    DateTimeOffset? CreatedAt,
+    bool Blocking,
+    DateTimeOffset? DoneAt)
+{
+    /// <summary>"monopoly/kick26", or whichever half the feed gave, or nothing.</summary>
+    public string Where => (Repo, Run) switch
+    {
+        ({ Length: > 0 } repo, { Length: > 0 } run) => $"{repo}/{run}",
+        ({ Length: > 0 } repo, _) => repo,
+        (_, { Length: > 0 } run) => run,
+        _ => "",
+    };
+}
+
+/// <summary>A need, with the feed it came from: Done is posted back to that feed's server.</summary>
+public sealed record OrchestraNeedItem(OrchestraFeed Feed, OrchestraNeed Need)
+{
+    /// <summary>The feed's own mark, or ours from the moment Done was pressed until the feed agrees.</summary>
+    public bool Done => Need.DoneAt is not null || OrchestraUsage.IsMarkedDone(Feed.Url, Need.Id);
+
+    /// <summary>How long it has been waiting, on the same clock as the orchestrator's timer.</summary>
+    public TimeSpan? Age(long nowTick)
+    {
+        if (Need.CreatedAt is not { } created) return null;
+        var age = Feed.GeneratedAt - created + TimeSpan.FromMilliseconds(Math.Max(0, nowTick - Feed.ReceivedTick));
+        return age < TimeSpan.Zero ? TimeSpan.Zero : age;
+    }
+}
+
+/// <summary>
 /// The last thing one feed said, and whether it is still saying it. A feed that stops answering
 /// keeps its last good reading, so the strip can dim rather than vanish under the pointer.
 /// </summary>
@@ -32,6 +76,7 @@ public sealed record OrchestraFeed(
     IReadOnlyList<OrchestraToolCount> Children,
     IReadOnlyList<(string Tool, int Cap)> Caps,
     IReadOnlyList<OrchestraRun> Runs,
+    IReadOnlyList<OrchestraNeed> Needs,
     string? Error,
     long LastAnswerTick)
 {
@@ -73,6 +118,23 @@ public sealed record OrchestraReading(IReadOnlyList<OrchestraFeed> Feeds)
 {
     /// <summary>The feeds worth drawing: ones that have answered at least once since startup.</summary>
     public IReadOnlyList<OrchestraFeed> Shown => Feeds.Where(f => f.Answered).ToList();
+
+    /// <summary>
+    /// Every need across the feeds: blocking ones first, then oldest first within each, which is
+    /// the order the feeds list them in.
+    /// </summary>
+    public IReadOnlyList<OrchestraNeedItem> Needs =>
+        Shown.SelectMany(f => f.Needs.Select(n => new OrchestraNeedItem(f, n)))
+             .OrderBy(i => i.Need.Blocking ? 0 : 1)
+             .ToList();
+
+    /// <summary>Needs still waiting on a person: listed, and Done not yet pressed.</summary>
+    public int Outstanding => Needs.Count(i => !i.Done);
+
+    public int OutstandingBlocking => Needs.Count(i => !i.Done && i.Need.Blocking);
+
+    /// <summary>Whether the strip has anything to show: a run in flight, or something waiting on a person.</summary>
+    public bool AnythingToShow => Feeds.Any(f => f.Answered && (f.Active || f.Needs.Count > 0));
 }
 
 /// <summary>
@@ -111,8 +173,20 @@ public static class OrchestraUsage
     private static List<string> configuredUrls = [];
     private static long glowStartTick;
 
+    /// <summary>Needs already announced, by feed and id, so a toast is raised once per need, not per poll.</summary>
+    private static readonly HashSet<string> announced = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Needs Done was pressed on here, until the feed says so itself or drops them.</summary>
+    private static readonly HashSet<string> markedDone = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Raised whenever <see cref="Current"/> changes so bars can repaint immediately.</summary>
     public static event Action? Changed;
+
+    /// <summary>
+    /// Raised, off the UI thread, with needs seen for the first time since startup — each one
+    /// once, however many polls go on listing it.
+    /// </summary>
+    public static event Action<IReadOnlyList<OrchestraNeedItem>>? NeedsArrived;
 
     /// <summary>The latest reading across every configured feed, or null while switched off.</summary>
     public static OrchestraReading? Current => current;
@@ -143,6 +217,7 @@ public static class OrchestraUsage
                 configuredUrls = [];
                 byUrl.Clear();
                 nextAttemptTick.Clear();
+                markedDone.Clear();
                 current = null;
                 Interlocked.Exchange(ref glowStartTick, 0);
                 FireChanged();
@@ -312,6 +387,17 @@ public static class OrchestraUsage
                 // Glow only on a change seen live, not on the first answer after startup.
                 if (previous is { Answered: true, Waiting: 0 } && parsed.Waiting > 0)
                     Interlocked.Exchange(ref glowStartTick, tick);
+
+                var fresh = parsed.Needs.Where(n => n.DoneAt is null && announced.Add(Key(url, n.Id))).ToList();
+                if (fresh.Count > 0)
+                {
+                    if (previous is { Answered: true }) Interlocked.Exchange(ref glowStartTick, tick);
+                    FireNeedsArrived(fresh.Select(n => new OrchestraNeedItem(parsed, n)).ToList());
+                }
+
+                // Done pressed here is forgotten once the feed carries it, or has closed the need.
+                markedDone.RemoveWhere(k => k.StartsWith(url + "\n", StringComparison.OrdinalIgnoreCase)
+                                            && !parsed.Needs.Any(n => n.DoneAt is null && Key(url, n.Id).Equals(k, StringComparison.OrdinalIgnoreCase)));
                 byUrl[url] = parsed;
             }
             else
@@ -329,9 +415,9 @@ public static class OrchestraUsage
 
     private static OrchestraFeed Unanswered(string url, string? error) => new(
         url, HostOf(url), Answered: false, Active: false, StartedAt: null, GeneratedAt: DateTimeOffset.MinValue,
-        ReceivedTick: 0, Children: [], Caps: [], Runs: [], Error: error, LastAnswerTick: 0);
+        ReceivedTick: 0, Children: [], Caps: [], Runs: [], Needs: [], Error: error, LastAnswerTick: 0);
 
-    private static void RebuildLocked()
+    private static void RebuildLocked(bool force = false)
     {
         var previous = current;
         var feeds = settings is null
@@ -339,7 +425,7 @@ public static class OrchestraUsage
             : Urls(settings).Select(u => byUrl.TryGetValue(u, out var f) ? f : Unanswered(u, null)).ToList();
         current = new OrchestraReading(feeds);
 
-        if (!Same(previous, current)) FireChanged();
+        if (force || !Same(previous, current)) FireChanged();
     }
 
     /// <summary>
@@ -356,7 +442,8 @@ public static class OrchestraUsage
             var y = b.Feeds[i];
             if (x.Url != y.Url || x.Server != y.Server || x.Answered != y.Answered || x.Active != y.Active
                 || x.StartedAt != y.StartedAt || x.Error != y.Error
-                || !x.Children.SequenceEqual(y.Children) || x.Runs.Count != y.Runs.Count)
+                || !x.Children.SequenceEqual(y.Children) || x.Runs.Count != y.Runs.Count
+                || !x.Needs.SequenceEqual(y.Needs))
                 return false;
             for (int r = 0; r < x.Runs.Count; r++)
                 if (x.Runs[r].Name != y.Runs[r].Name || x.Runs[r].StartedAt != y.Runs[r].StartedAt
@@ -364,6 +451,76 @@ public static class OrchestraUsage
                     return false;
         }
         return true;
+    }
+
+    private static void FireNeedsArrived(IReadOnlyList<OrchestraNeedItem> items)
+    {
+        var handler = NeedsArrived;
+        if (handler is null) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { handler(items); } catch { }
+        });
+    }
+
+    private static string Key(string url, string id) => url + "\n" + id;
+
+    internal static bool IsMarkedDone(string url, string id)
+    {
+        lock (gate) return markedDone.Contains(Key(url, id));
+    }
+
+    /// <summary>
+    /// Where Done for a need is posted: `needs/&lt;id&gt;/done` beside the feed, so a feed at
+    /// http://host:8787/orchestra.json takes it at http://host:8787/needs/&lt;id&gt;/done.
+    /// </summary>
+    public static Uri? DoneUrl(string feedUrl, string id) =>
+        Uri.TryCreate(feedUrl, UriKind.Absolute, out var feed)
+            ? new Uri(feed, $"needs/{Uri.EscapeDataString(id)}/done")
+            : null;
+
+    /// <summary>
+    /// Tells the orchestrator a need has been dealt with. Shown as done straight away; the feed
+    /// keeps listing it until the orchestrator has checked and closes it. Returns null on success,
+    /// or what went wrong.
+    /// </summary>
+    public static async Task<string?> MarkDoneAsync(OrchestraNeedItem item)
+    {
+        if (DoneUrl(item.Feed.Url, item.Need.Id) is not { } url) return "the feed URL is not absolute";
+
+        string? error = null;
+        try
+        {
+            using var content = new ByteArrayContent([]);
+            using var response = await http.PostAsync(url, content);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                error = "the orchestrator no longer lists it";
+            else if (!response.IsSuccessStatusCode)
+                error = $"HTTP {(int)response.StatusCode}";
+        }
+        catch (TaskCanceledException)
+        {
+            error = "timed out";
+        }
+        catch (HttpRequestException ex)
+        {
+            error = ex.InnerException?.Message ?? ex.Message;
+        }
+
+        if (error is not null)
+        {
+            Log.Write($"orchestra need {item.Need.Id} done failed: {error}");
+            Refresh();
+            return error;
+        }
+
+        lock (gate)
+        {
+            markedDone.Add(Key(item.Feed.Url, item.Need.Id));
+            RebuildLocked(force: true);
+        }
+        Refresh();
+        return null;
     }
 
     private static void FireChanged()
@@ -431,6 +588,28 @@ public static class OrchestraUsage
                 ? act.GetBoolean()
                 : started is not null;
 
+            var needs = new List<OrchestraNeed>();
+            if (root.TryGetProperty("needs", out var needsEl) && needsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var n in needsEl.EnumerateArray())
+                {
+                    if (n.ValueKind != JsonValueKind.Object || Text(n, "id") is not { Length: > 0 } id) continue;
+                    needs.Add(new OrchestraNeed(
+                        id,
+                        Text(n, "kind") is { Length: > 0 } kind ? kind : "manual",
+                        Text(n, "title") is { Length: > 0 } title ? title : "Something needs you",
+                        NonEmpty(Text(n, "detail")),
+                        NonEmpty(Text(n, "url")),
+                        NonEmpty(Text(n, "command")),
+                        NonEmpty(Text(n, "repo")),
+                        NonEmpty(Text(n, "run")),
+                        NonEmpty(Text(n, "task")),
+                        Time(n, "created_at"),
+                        n.TryGetProperty("blocking", out var b) && b.ValueKind == JsonValueKind.True,
+                        Time(n, "done_at")));
+                }
+            }
+
             var caps = new List<(string, int)>();
             if (root.TryGetProperty("caps", out var capsEl) && capsEl.ValueKind == JsonValueKind.Object)
                 foreach (var c in capsEl.EnumerateObject())
@@ -438,7 +617,7 @@ public static class OrchestraUsage
                         caps.Add((c.Name, cap));
 
             return new OrchestraFeed(url, server, Answered: true, active, active ? started : null, generated,
-                                     receivedTick, children, caps, runs, Error: null, LastAnswerTick: receivedTick);
+                                     receivedTick, children, caps, runs, needs, Error: null, LastAnswerTick: receivedTick);
         }
         catch (JsonException ex)
         {
@@ -497,9 +676,31 @@ public static class OrchestraUsage
         _ => tool,
     };
 
+    /// <summary>What a person calls a kind of need. An unknown kind is shown as the feed spells it.</summary>
+    public static string NeedKindLabel(string kind) => kind.ToLowerInvariant() switch
+    {
+        "approve" => "Approve",
+        "merge" => "Merge",
+        "login" => "Sign in",
+        "manual" => "By hand",
+        "answer" => "Answer",
+        _ => kind.Length > 0 ? char.ToUpperInvariant(kind[0]) + kind[1..] : "Needed",
+    };
+
+    /// <summary>"4m", "2h 05m", "3d 4h": how long a need has been waiting, for a muted label.</summary>
+    public static string FormatAge(TimeSpan t)
+    {
+        if (t.TotalDays >= 1) return $"{(int)t.TotalDays}d {t.Hours}h";
+        if (t.TotalHours >= 1) return $"{(int)t.TotalHours}h {t.Minutes:00}m";
+        if (t.TotalMinutes >= 1) return $"{(int)t.TotalMinutes}m";
+        return "just now";
+    }
+
     private static int Int(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n)
             ? Math.Max(0, n) : 0;
+
+    private static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     private static string? Text(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;

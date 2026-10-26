@@ -621,7 +621,7 @@ The feed is `GET` → `application/json`:
 }
 ```
 
-- `active: false` (no unfinished run) draws a dimmed `idle`. `orchestrator.started_at` may be null
+- `active: false` (no unfinished run) hides the strip, unless `needs` lists something. `orchestrator.started_at` may be null
   then; when it is missing on an active feed, the earliest run's start is used.
 - The elapsed time is `generated_at − started_at` on the server's clock plus the time since the
   answer arrived on ours, so the two machines' clocks need not agree.
@@ -632,6 +632,47 @@ The feed is `GET` → `application/json`:
   tooltip.
 - Unknown fields are ignored and missing counts are zero: changes within schema 1 must be additive.
   A feed reporting any other `schema` is refused rather than misread.
+
+#### When the orchestrator needs you
+
+Some things the orchestrator cannot do for itself: a passkey approval in the Release Console, an MR
+to merge by hand, signing in again, a manual step, a question waiting in its own Claude session. The
+feed lists them under `needs`, and ScweenSpit makes sure you see them:
+
+- **The strip** gets a Needs row beneath its chunks — `! 2 need you`, amber, or red when any of them
+  is blocking a run — and stays on the bar while anything is listed, even with no run in flight. It
+  pulses when something new arrives. Clicking the strip then opens the list; right-click still opens
+  the settings.
+- **The list** has one row per need, blocking ones first: what kind it is, the title, `repo/run` and
+  how long it has been waiting, then **Open** (the page it names), **Copy** (the command it names) and
+  **Done**. Done tells the orchestrator, which checks the work and closes it; until then the row says
+  *Done, waiting for the orchestrator to confirm*.
+- **An indicator** while anything is outstanding, gone when nothing is. On a screen with room, a
+  button in the Windows taskbar badged with the count, which flashes when something new arrives and
+  opens the list when clicked. On a laptop-sized screen — a work area under 1600×900 at 100 % scale —
+  or where the Windows taskbar is hidden, auto-hiding or compact, the taskbar is left alone and a
+  small pill floats over everything instead; click it for the list, drag it anywhere and it stays
+  there. A ScweenSpit bar drawing the strip counts as room. Re-decided whenever the displays, their
+  scale or the settings change. **Settings ▸ Orchestrator ▸ Show what needs you** forces Taskbar,
+  Floating or Off.
+- **A notification** for each new need, once — by id, not by poll — warning-styled when it is
+  blocking. Clicking it opens the list. Off under the same settings page.
+
+```json
+"needs": [
+  { "id": "1a2b3c4d", "kind": "approve", "title": "Approve merging MR !520 into release/v3.0.0",
+    "detail": "merge-mr request in the Release Console", "url": "https://deploy.lionpower.app",
+    "command": null, "repo": "monopoly", "run": "kick26", "task": null,
+    "created_at": "2026-10-26T13:50:00Z", "blocking": true, "done_at": null }
+]
+```
+
+- `kind` is `approve`, `merge`, `login`, `manual` or `answer`; any other is shown as the feed spells
+  it. `url` and `command` are optional, and only an http(s) `url` gets an Open button.
+- `done_at` set means Done was pressed; the need stays listed until the orchestrator closes it.
+- Done is `POST needs/<id>/done` beside the feed (`http://100.126.10.4:8787/needs/<id>/done` for
+  the default one), empty body: 204 on success, 404 for an id the orchestrator no longer has.
+- A feed with no `needs` key has nothing waiting.
 
 ### Why "fill over the taskbar" sometimes does nothing
 

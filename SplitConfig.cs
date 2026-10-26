@@ -474,6 +474,21 @@ public sealed class OrchestraSettings
 
     /// <summary>Show the elapsed running time next to each repo on the bar.</summary>
     public bool ShowTimer { get; set; }
+
+    /// <summary>
+    /// Where the "needs you" indicator goes while something is waiting on a person: Automatic,
+    /// Taskbar (a badged button in the Windows taskbar), Floating (a pill over everything), or Off.
+    /// Automatic floats on a laptop-sized screen or where the taskbar is hidden or compact.
+    /// </summary>
+    public string NeedsIndicator { get; set; } = "Automatic";
+
+    /// <summary>A Windows notification when something new needs you, once per need.</summary>
+    public bool NeedsToast { get; set; } = true;
+
+    /// <summary>Where the floating pill was last dropped, in screen pixels; null for the corner above the clock.</summary>
+    public int? NeedsPillX { get; set; }
+
+    public int? NeedsPillY { get; set; }
 }
 
 public sealed class MonitorLayout
@@ -909,6 +924,8 @@ public sealed class SplitConfig
 
         Orchestra ??= new OrchestraSettings();
         Orchestra.RefreshSeconds = Math.Clamp(Orchestra.RefreshSeconds, 2, 300);
+        Orchestra.NeedsIndicator = ScweenSpit.NeedsIndicator.Choices.FirstOrDefault(
+            c => c.Equals(Orchestra.NeedsIndicator?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? ScweenSpit.NeedsIndicator.Choices[0];
         Orchestra.Feeds = (Orchestra.Feeds ?? new()).Where(f => !string.IsNullOrWhiteSpace(f))
                                                     .Select(f => f.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 

@@ -17,6 +17,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly WinEventHookService hook;
     private readonly ZoneOverlay overlay = new();
     private readonly BarManager bars = new();
+    private readonly NeedsIndicator needs;
+
+    /// <summary>Whether the balloon showing now is about a need, so clicking it opens the list.</summary>
+    private bool needsBalloon;
 
     // Sampling the foreground window when the menu item is clicked always returns our own window:
     // NotifyIcon calls SetForegroundWindow on its hidden window before showing the menu. So track
@@ -128,6 +132,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         bars.SettingsRequested += OpenSettings;
 
+        needs = new NeedsIndicator(config, () => bars.AnyShowsOrchestra, config.Save, page => OpenSettings(page),
+                                   action => { try { marshaller.BeginInvoke(action); } catch { } });
+        bars.NeedsRequested += at => needs.OpenPanel(at);
+        tray.BalloonTipClicked += (_, _) => { if (needsBalloon) needs.OpenPanel(null); };
+        tray.BalloonTipClosed += (_, _) => needsBalloon = false;
+        OrchestraUsage.NeedsArrived += OnNeedsArrived;
+
         foregroundWatch.Tick += (_, _) =>
         {
             TrackForeground();
@@ -178,6 +189,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplyAnimationPreference();
         ApplyUsageTracking();
         bars.Apply(config, zones);
+        needs.Update();
         reflow.Start();
         // Follows the menu however it was opened — the keyboard's Windows key as much as our own
         // button, since Windows puts it in the same wrong place either way.
@@ -496,6 +508,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         ApplyUsageTracking();
         bars.Apply(config, zones);
         bars.Reposition();
+        needs.Update();
 
         // A bar that just grew is now drawn over whatever was already there.
         reflow.Stop();
@@ -933,8 +946,43 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void Notify(string message) =>
+    private void Notify(string message)
+    {
+        needsBalloon = false;
         tray.ShowBalloonTip(3000, "ScweenSpit", message, ToolTipIcon.Info);
+    }
+
+    /// <summary>
+    /// Something the orchestrator is now waiting on you for. Raised once per need, off the UI thread;
+    /// several arriving together are one notification, not a stack of them.
+    /// </summary>
+    private void OnNeedsArrived(IReadOnlyList<OrchestraNeedItem> arrived)
+    {
+        try
+        {
+            marshaller.BeginInvoke(() =>
+            {
+                needs.Announce();
+                if (!config.Orchestra.NeedsToast || arrived.Count == 0) return;
+
+                bool blocking = arrived.Any(i => i.Need.Blocking);
+                var first = arrived.FirstOrDefault(i => i.Need.Blocking) ?? arrived[0];
+                string title = arrived.Count == 1
+                    ? $"{(blocking ? "Blocking — " : "")}{OrchestraUsage.NeedKindLabel(first.Need.Kind)}"
+                    : $"{arrived.Count} things need you{(blocking ? " (blocking)" : "")}";
+                string text = first.Need.Title
+                    + (first.Need.Where is { Length: > 0 } where ? $"\n{where}" : "")
+                    + (arrived.Count > 1 ? $"\n…and {arrived.Count - 1} more" : "")
+                    + "\nClick to see what needs you.";
+
+                needsBalloon = true;
+                tray.ShowBalloonTip(10_000, title.Length > 63 ? title[..63] : title,
+                                    text.Length > 255 ? text[..255] : text,
+                                    blocking ? ToolTipIcon.Warning : ToolTipIcon.Info);
+            });
+        }
+        catch (Exception ex) { Log.Write($"need notification could not be marshalled: {ex.Message}"); }
+    }
 
     // ---- hotkeys -----------------------------------------------------------
 
@@ -1027,7 +1075,9 @@ public sealed class TrayApplicationContext : ApplicationContext
             AntigravityUsage.Stop();
             RemoteChatUsage.Stop();
             BambuUsage.Stop();
+            OrchestraUsage.NeedsArrived -= OnNeedsArrived;
             OrchestraUsage.Stop();
+            needs.Dispose();
             StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();
