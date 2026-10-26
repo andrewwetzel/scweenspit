@@ -135,10 +135,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         bars.SettingsRequested += OpenSettings;
 
-        needs = new NeedsIndicator(config, () => bars.AnyShowsOrchestra, config.Save, page => OpenSettings(page),
+        needs = new NeedsIndicator(config, () => bars.AnyShowsOrchestra, page => OpenSettings(page),
                                    action => { try { marshaller.BeginInvoke(action); } catch { } });
         bars.NeedsRequested += (at, list) => { if (list) needs.OpenPanel(at); else needs.Activate(at); };
-        bars.NeedCardClicked += (item, at, right) => needs.ActOn(item, at, right);
         tray.BalloonTipClicked += (_, _) =>
         {
             if (!needsBalloon) return;

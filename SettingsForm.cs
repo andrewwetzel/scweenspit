@@ -2368,10 +2368,10 @@ public sealed class SettingsForm : Form
         var indicator = Theme.Choice(NeedsIndicator.Choices, orchestra.NeedsIndicator);
         var decision = Theme.Caption("");
         void ShowDecision() => decision.Text =
-            "When the orchestrator is waiting on you for something — an approval, a merge, a sign-in — " +
-            "the strip gets a Needs row and this shows the count until it is dealt with. Taskbar is a " +
-            "badged button that flashes when something arrives; Floating is a pill you can drag anywhere. " +
-            "Automatic floats on a laptop-sized screen, or when the taskbar is hidden or compact." +
+            "When the orchestrator is waiting on you for something — an approval, a merge, a sign-in, " +
+            "a question — each one gets a small card above the taskbar by the clock, newest on the left, " +
+            "until it is dealt with. Click a card for its buttons. Automatic adds a badged taskbar button " +
+            "that flashes when something arrives, where the screen has room for it." +
             (NeedsIndicator.LastDecision is { Length: > 0 } why ? $" Right now: {why}." : "");
         indicator.SelectedIndexChanged += (_, _) =>
         {
@@ -2392,22 +2392,9 @@ public sealed class SettingsForm : Form
         preview.Click += (_, _) =>
         {
             OrchestraUsage.Preview(TimeSpan.FromMinutes(2));
-            Say("Showing a made-up approval for 2 minutes — look at the taskbar, or for the floating pill");
+            Say("Showing two made-up needs for 2 minutes — look above the taskbar by the clock");
         };
         page.Controls.Add(preview);
-
-        if (orchestra.NeedsPillX is not null)
-        {
-            var corner = Theme.Action("Put the floating pill back by the clock");
-            corner.AutoSize = true;
-            corner.Click += (_, _) =>
-            {
-                orchestra.NeedsPillX = orchestra.NeedsPillY = null;
-                Save();
-                corner.Enabled = false;
-            };
-            page.Controls.Add(corner);
-        }
 
         page.Controls.Add(Theme.Caption(
             "The strip appears on the bar only once a feed answers, so a machine that cannot reach " +

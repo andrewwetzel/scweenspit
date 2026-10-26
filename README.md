@@ -639,16 +639,16 @@ Some things the orchestrator cannot do for itself: a passkey approval in the Rel
 to merge by hand, signing in again, a manual step, a question waiting in its own Claude session. The
 feed lists them under `needs`, and ScweenSpit makes sure you see them:
 
-- **The strip** gets a small card per need, to the left of its repo chunks — what kind, how long it
-  has waited, and the title, edged in amber or in red when it is blocking a run. Each new one lines up
-  on the left of the last, so the row reads from what just arrived to what has waited longest; past
-  six, or once the strip runs out of room, the rest are a `+N` card — cards never spill over what
-  sits beside the strip, which makes room for them even at a width dragged by hand. Hovering a card
-  shows the rest of it, clicking it opens a small popup with just that need and its buttons, and
-  right-clicking opens the whole list. The strip stays on the bar while anything is listed, even with no run in flight, and pulses
-  when something new arrives. A vertical bar has no room for cards and shows the count instead.
+- **A card per need**, floating above the taskbar by the clock: what kind, how long it has waited and
+  where, then the title and the detail, edged in amber, or red when it is blocking a run. Each new one
+  lines up on the left of the last and glows for a moment. A card is as wide as its words want; when
+  there are more than fit in about two-thirds of the screen's width, the widest are trimmed first,
+  then the oldest fold into a `+N` card. Clicking a card opens a small popup with just that need and
+  its buttons; right-clicking, or `+N`, opens the whole list. The cards never take the focus.
+- **The strip** on a ScweenSpit bar gets a Needs row beneath its chunks — `! 2 need you`, red when
+  anything is blocking — and stays on the bar while anything is listed, even with no run in flight.
 - **One click to the page.** With exactly one need outstanding and a page to open for it, clicking
-  the strip, the pill or the taskbar button goes straight there — for an approval, that request's
+  the strip or the taskbar button goes straight there — for an approval, that request's
   own page in the Release Console, `https://deploy.lionpower.app/#approval/<id>`. The next click
   opens the list instead. A notification about a single approval opens its page too. The URL is
   read from the latest poll at the moment of the click, never from when the row was drawn: an
@@ -657,16 +657,14 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
   how long it has been waiting, then **Open** (the page it names) — **Approve →** for an approval,
   whose whole row opens the page too — **Copy** (the command it names) and **Done**. Done tells the orchestrator, which checks the work and closes it; until then the row says
   *Done, waiting for the orchestrator to confirm*.
-- **An indicator** while anything is outstanding, gone when nothing is. On a screen with room, a
-  button in the Windows taskbar badged with the count, which flashes when something new arrives and
-  opens the list when clicked. On a laptop-sized screen — a work area under 1600×900 at 100 % scale —
-  or where the Windows taskbar is hidden, auto-hiding or compact, the taskbar is left alone and a
-  small pill floats over everything instead; click it for the list, drag it anywhere and it stays
-  there. A ScweenSpit bar drawing the strip counts as room. Re-decided whenever the displays, their
-  scale or the settings change. **Settings ▸ Orchestrator ▸ Show what needs you** forces Taskbar,
-  Floating or Off.
+- **A taskbar button** too, where the screen has room: badged with the count, flashing when something
+  new arrives, opening the list when clicked. On a laptop-sized screen — a work area under 1600×900
+  at 100 % scale — or where the Windows taskbar is hidden, auto-hiding or compact, the cards are left
+  to do it alone. Re-decided whenever the displays, their scale or the settings change. **Settings ▸
+  Orchestrator ▸ Show what needs you** can choose Cards, Taskbar or Off instead.
 - **A preview.** **Settings ▸ Orchestrator ▸ Preview** shows a made-up blocking approval and a
-  made-up question with choices for two minutes, through the strip, the indicator and the notification, so you can see it all without the
+  made-up question with choices for two minutes, through the cards, the strip, the taskbar button and
+  the notification, so you can see it all without the
   orchestrator needing anything. Done on it is sent nowhere. The same page lists what ScweenSpit
   believes is waiting and which indicator it chose, and why.
 - **A notification** for each new need, once — by id, not by poll — warning-styled when it is

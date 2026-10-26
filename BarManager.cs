@@ -57,9 +57,6 @@ public sealed class BarManager : IDisposable
     /// <summary>Raised when a bar's orchestrator strip is clicked while something needs you.</summary>
     public event Action<System.Drawing.Point, bool>? NeedsRequested;
 
-    /// <summary>Raised when a need's card on a bar is clicked: the need, where, and whether it was a right-click.</summary>
-    public event Action<OrchestraNeedItem, System.Drawing.Point, bool>? NeedCardClicked;
-
     /// <summary>
     /// Whether some bar on screen is drawing the orchestrator strip where it can — the place the
     /// Needs row shows up without anything else being added to the screen.
@@ -115,7 +112,6 @@ public sealed class BarManager : IDisposable
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
                 bar.SettingsRequested += page => SettingsRequested?.Invoke(page);
                 bar.NeedsRequested += (p, list) => NeedsRequested?.Invoke(p, list);
-                bar.NeedCardClicked += (item, p, right) => NeedCardClicked?.Invoke(item, p, right);
                 bar.PinsChanged += () => PinsChanged?.Invoke();
 
                 // Give it its rectangle before the handle exists, so it is created on the display it

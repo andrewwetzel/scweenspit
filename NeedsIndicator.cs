@@ -6,20 +6,19 @@ using System.Windows.Forms;
 namespace ScweenSpit;
 
 /// <summary>
-/// Keeps what the orchestrator is waiting on a person for in sight while ScweenSpit runs: a button
-/// in the Windows taskbar, badged with the count and flashed when something new arrives, or on a
-/// screen too small to give the taskbar anything more to carry, a small pill that floats over
-/// everything. Either opens <see cref="NeedsPanel"/>, the list itself. The bar's orchestrator strip
-/// carries its own Needs row besides, wherever it is drawn.
+/// Keeps what the orchestrator is waiting on a person for in sight while ScweenSpit runs. Each need
+/// is a small card of its own, floating above the taskbar by the clock: the newest lines up on the
+/// left of the last, each as wide as it needs to say what it is, all of them narrower when there are
+/// more. Where the screen has room, a button in the Windows taskbar carries the count as well, and
+/// flashes when something new arrives. A card opens a popup for its need; the button and a
+/// right-click open <see cref="NeedsPanel"/>, the whole list.
 ///
 /// Gone whenever nothing is outstanding: an indicator that is always there stops being looked at.
 /// </summary>
 public sealed class NeedsIndicator : IDisposable
 {
-    public enum Mode { Off, Taskbar, Floating }
-
     /// <summary>The choices Settings offers, in the order it offers them.</summary>
-    public static readonly string[] Choices = ["Automatic", "Taskbar", "Floating", "Off"];
+    public static readonly string[] Choices = ["Automatic", "Cards", "Taskbar", "Off"];
 
     /// <summary>
     /// Below this, in pixels at 100 % scale, a display is laptop-sized: the work area of a 1080p
@@ -30,29 +29,39 @@ public sealed class NeedsIndicator : IDisposable
     /// <summary>A taskbar thinner than this at 100 % scale has small buttons, too small to badge legibly.</summary>
     private const int CompactTaskbar = 40;
 
+    /// <summary>Card sizes at 100 % scale: never narrower than enough for a few words, never wider than a glance.</summary>
+    private const int CardMin = 150, CardMax = 440, CardHeight = 70, CardGap = 8, CardMargin = 12, MoreWidth = 56;
+
+    /// <summary>How much of the screen's width the cards may take, so they never become a wall.</summary>
+    private const double CardShare = 0.65;
+
     private readonly SplitConfig config;
     private readonly Func<bool> barShowsOrchestra;
-    private readonly Action save;
     private readonly Action<string> openSettings;
     private readonly Action<Action> post;
 
     // Rare, and only while something is waiting: auto-hide can be switched on without any event
-    // reaching us, and that is enough to change the answer.
+    // reaching us, and that is enough to change the answer. It also moves the cards' ages on.
     private readonly System.Windows.Forms.Timer recheck = new() { Interval = 10_000 };
 
     private NeedsPanel? panel;
-    private NeedsPill? pill;
-    private Mode mode = Mode.Off;
+    private bool taskbar;
+    private readonly Dictionary<string, NeedCard> cards = new(StringComparer.Ordinal);
+    private NeedCard? moreCard;
+    private double cardScale;
+
+    /// <summary>Needs given a card before, so only ones that really are new announce themselves.</summary>
+    private readonly HashSet<string> carded = new(StringComparer.Ordinal);
+    private bool firstUpdate = true;
 
     /// <summary>What the last decision was and why, for the settings page.</summary>
     public static string LastDecision { get; private set; } = "";
 
-    public NeedsIndicator(SplitConfig config, Func<bool> barShowsOrchestra, Action save,
+    public NeedsIndicator(SplitConfig config, Func<bool> barShowsOrchestra,
                           Action<string> openSettings, Action<Action> post)
     {
         this.config = config;
         this.barShowsOrchestra = barShowsOrchestra;
-        this.save = save;
         this.openSettings = openSettings;
         this.post = post;
 
@@ -75,35 +84,25 @@ public sealed class NeedsIndicator : IDisposable
         int open = reading?.Outstanding ?? 0;
         bool blocking = (reading?.OutstandingBlocking ?? 0) > 0;
 
-        var (wanted, why) = Decide();
+        var (wantCards, wantTaskbar, why) = Decide();
         LastDecision = why;
-        if (wanted != mode)
+        if (wantTaskbar != taskbar)
         {
-            Log.Write($"needs indicator: {mode} → {wanted} ({why})");
-            mode = wanted;
-            pill?.Dispose();
-            pill = null;
+            Log.Write($"needs indicator: taskbar {taskbar} → {wantTaskbar} ({why})");
+            taskbar = wantTaskbar;
             // A panel open on screen is left alone; it goes when it is next put away.
             if (panel is { } p && !p.IsOpen) { p.Dispose(); panel = null; }
         }
 
         recheck.Enabled = open > 0;
 
-        if (mode == Mode.Taskbar && open > 0)
+        if (taskbar && open > 0)
             PanelFor(inTaskbar: true).Park(open, blocking);
         else
             panel?.Retire();
 
-        if (mode == Mode.Floating && open > 0)
-        {
-            pill ??= NewPill();
-            pill.Set(open, blocking);
-            pill.PlaceAt(config.Orchestra.NeedsPillX, config.Orchestra.NeedsPillY);
-        }
-        else
-        {
-            pill?.Hide();
-        }
+        LayOutCards(wantCards ? reading?.Needs.Where(i => i.Waiting).ToList() ?? [] : []);
+        firstUpdate = false;
 
         panel?.Refill();
     }
@@ -111,18 +110,19 @@ public sealed class NeedsIndicator : IDisposable
     /// <summary>Opens the list near <paramref name="near"/>, or in the corner by the clock.</summary>
     public void OpenPanel(Point? near)
     {
-        PanelFor(inTaskbar: mode == Mode.Taskbar).Open(near);
+        PanelFor(inTaskbar: taskbar).Open(near);
     }
 
     /// <summary>
-    /// Needs whose page has already been opened by a click on the indicator. The first click goes
-    /// straight to the page; the next one opens the list, where Done and everything else lives.
+    /// Needs whose page has already been opened by a click on the taskbar button. The first click
+    /// goes straight to the page; the next one opens the list, where Done and everything else lives.
     /// </summary>
     private readonly HashSet<string> shortcutTaken = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// A click on the pill, the taskbar button or the strip: with exactly one need outstanding and a
-    /// page to open for it — and nothing to do for it in the list itself — that page; otherwise the list. Returns true when it opened the page.
+    /// A click on the taskbar button or the strip: with exactly one need outstanding and a page to
+    /// open for it — and nothing to do for it in the list itself — that page; otherwise the list.
+    /// Returns true when it opened the page.
     /// </summary>
     public bool Activate(Point? near)
     {
@@ -138,20 +138,10 @@ public sealed class NeedsIndicator : IDisposable
         return false;
     }
 
-    /// <summary>
-    /// A need's own card was clicked: a small popup with just that need and what can be done
-    /// about it. A right-click opens the whole list.
-    /// </summary>
-    public void ActOn(OrchestraNeedItem item, Point near, bool list)
-    {
-        PanelFor(inTaskbar: mode == Mode.Taskbar).Open(near, list ? null : NeedActions.Key(item));
-    }
-
-    /// <summary>Something new arrived: draw the eye to wherever the indicator is.</summary>
+    /// <summary>Something new arrived: draw the eye to the taskbar button. New cards glow on their own.</summary>
     public void Announce()
     {
-        if (mode == Mode.Taskbar) panel?.Flash();
-        if (mode == Mode.Floating) pill?.Pulse();
+        if (taskbar) panel?.Flash();
     }
 
     private NeedsPanel PanelFor(bool inTaskbar)
@@ -174,50 +164,162 @@ public sealed class NeedsIndicator : IDisposable
         return panel;
     }
 
-    private NeedsPill NewPill()
+    // ---- cards ------------------------------------------------------------------
+
+    /// <summary>
+    /// One card per need, newest on the left, right-aligned against the clock end of the main
+    /// display's work area — so above the taskbar, or above a ScweenSpit bar. Each is as wide as its
+    /// words want; when they do not all fit, the widest are trimmed first, then the oldest fold into
+    /// a "+N" card.
+    /// </summary>
+    private void LayOutCards(List<OrchestraNeedItem> waiting)
     {
-        var made = new NeedsPill();
-        made.Clicked += () => Activate(Cursor.Position);
-        made.ListRequested += () => OpenPanel(Cursor.Position);
-        made.Moved += at =>
+        var items = waiting.OrderByDescending(i => i.Need.CreatedAt ?? DateTimeOffset.MinValue).ToList();
+        var screen = Screen.PrimaryScreen ?? Screen.AllScreens.FirstOrDefault();
+        if (screen is null || items.Count == 0)
         {
-            config.Orchestra.NeedsPillX = at.X;
-            config.Orchestra.NeedsPillY = at.Y;
-            save();
-        };
-        return made;
+            foreach (var card in cards.Values) card.Dispose();
+            cards.Clear();
+            moreCard?.Dispose();
+            moreCard = null;
+            if (screen is not null) carded.IntersectWith(waiting.Select(NeedActions.Key));
+            return;
+        }
+
+        double scale = ScaleOf(screen);
+        if (scale != cardScale)
+        {
+            // Sized for the old scale throughout; cheaper to make again than to resize every part.
+            foreach (var card in cards.Values) card.Dispose();
+            cards.Clear();
+            moreCard?.Dispose();
+            moreCard = null;
+            cardScale = scale;
+        }
+        int S(int px) => (int)Math.Round(px * scale);
+
+        var keys = items.Select(NeedActions.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var gone in cards.Keys.Where(k => !keys.Contains(k)).ToList())
+        {
+            cards[gone].Dispose();
+            cards.Remove(gone);
+        }
+        carded.IntersectWith(keys);
+
+        foreach (var item in items)
+        {
+            string key = NeedActions.Key(item);
+            if (!cards.TryGetValue(key, out var card))
+            {
+                card = cards[key] = new NeedCard(scale);
+                card.Clicked += OnCardClicked;
+                if (carded.Add(key) && !firstUpdate) card.Pulse();
+            }
+            card.Set(item);
+        }
+
+        // Widths: everything natural if it fits; else trim the widest down to a common cap; else
+        // show as many as fit at the narrowest and fold the oldest into "+N".
+        var work = screen.WorkingArea;
+        int gap = S(CardGap), margin = S(CardMargin), min = S(CardMin), max = S(CardMax);
+        int room = (int)(work.Width * CardShare);
+        var natural = items.Select(i => Math.Clamp(cards[NeedActions.Key(i)].NaturalWidth(), min, max)).ToList();
+
+        int shown = items.Count;
+        int Total(int count, int cap, bool more) =>
+            natural.Take(count).Sum(w => Math.Min(w, cap)) + gap * Math.Max(0, count - 1) + (more ? S(MoreWidth) + gap : 0);
+
+        int capWidth = max;
+        if (Total(shown, max, false) > room)
+        {
+            int lo = min, hi = max;
+            while (lo < hi)
+            {
+                int mid = (lo + hi + 1) / 2;
+                if (Total(shown, mid, false) <= room) lo = mid; else hi = mid - 1;
+            }
+            capWidth = lo;
+            while (shown > 1 && Total(shown, capWidth, shown < items.Count) > room) shown--;
+        }
+        bool folded = shown < items.Count;
+
+        int height = S(CardHeight);
+        int y = work.Bottom - margin - height;
+        int x = work.Right - margin - Total(shown, capWidth, folded);
+        for (int i = 0; i < items.Count; i++)
+        {
+            var card = cards[NeedActions.Key(items[i])];
+            if (i >= shown)
+            {
+                card.Hide();
+                continue;
+            }
+            int w = Math.Min(natural[i], capWidth);
+            card.Bounds = new Rectangle(x, y, w, height);
+            if (!card.Visible) card.Show();
+            x += w + gap;
+        }
+
+        if (folded)
+        {
+            if (moreCard is null)
+            {
+                moreCard = new NeedCard(scale);
+                moreCard.Clicked += OnCardClicked;
+            }
+            moreCard.SetMore(items.Count - shown);
+            moreCard.Bounds = new Rectangle(x, y, S(MoreWidth), height);
+            if (!moreCard.Visible) moreCard.Show();
+        }
+        else
+        {
+            moreCard?.Dispose();
+            moreCard = null;
+        }
+
+        foreach (var card in cards.Values) card.Invalidate();
+    }
+
+    /// <summary>A card: a popup for its need just above it; a right-click, or "+N", the whole list.</summary>
+    private void OnCardClicked(NeedCard card, bool right)
+    {
+        var above = new Point(card.Left + card.Width / 2, card.Top);
+        if (card.Item is not { } item || right)
+            PanelFor(inTaskbar: taskbar).Open(above);
+        else
+            PanelFor(inTaskbar: taskbar).Open(above, NeedActions.Key(item));
     }
 
     /// <summary>Where the indicator should be, and a sentence saying why.</summary>
-    private (Mode Mode, string Why) Decide()
+    private (bool Cards, bool Taskbar, string Why) Decide()
     {
         switch (config.Orchestra.NeedsIndicator)
         {
-            case "Off": return (Mode.Off, "switched off");
-            case "Taskbar": return (Mode.Taskbar, "set to the taskbar");
-            case "Floating": return (Mode.Floating, "set to float");
+            case "Off": return (false, false, "switched off");
+            case "Taskbar": return (false, true, "taskbar button only");
+            case "Cards": return (true, false, "cards only");
         }
 
-        if (!OrchestraUsage.Enabled) return (Mode.Off, "orchestrator feeds are switched off");
+        if (!OrchestraUsage.Enabled) return (false, false, "orchestrator feeds are switched off");
 
         var screen = Screen.PrimaryScreen;
-        if (screen is null) return (Mode.Floating, "no primary display");
+        if (screen is null) return (true, false, "cards: no primary display");
         double scale = ScaleOf(screen);
         int w = (int)Math.Round(screen.WorkingArea.Width / scale), h = (int)Math.Round(screen.WorkingArea.Height / scale);
         if (w < SmallWidth || h < SmallHeight)
-            return (Mode.Floating, $"floating: the main display is laptop-sized ({w}×{h} at {scale * 100:0} %)");
+            return (true, false, $"cards only: the main display is laptop-sized ({w}×{h} at {scale * 100:0} %)");
 
         if (barShowsOrchestra())
-            return (Mode.Taskbar, "taskbar: a ScweenSpit bar is showing the orchestrator strip");
+            return (true, true, "cards, and a taskbar button: a ScweenSpit bar is showing the orchestrator strip");
 
         if (!SystemRestore.Visible())
-            return (Mode.Floating, "floating: the Windows taskbar is hidden");
+            return (true, false, "cards only: the Windows taskbar is hidden");
         if (Taskbar.AutoHide)
-            return (Mode.Floating, "floating: the Windows taskbar hides itself");
+            return (true, false, "cards only: the Windows taskbar hides itself");
         if (TaskbarThickness(scale) is { } thick && thick < CompactTaskbar)
-            return (Mode.Floating, $"floating: the Windows taskbar is compact ({thick} px)");
+            return (true, false, $"cards only: the Windows taskbar is compact ({thick} px)");
 
-        return (Mode.Taskbar, $"taskbar: the main display has room ({w}×{h} at {scale * 100:0} %)");
+        return (true, true, $"cards, and a taskbar button: the main display has room ({w}×{h} at {scale * 100:0} %)");
     }
 
     /// <summary>The shell taskbar's thickness at 100 % scale, or null when there is none to measure.</summary>
@@ -253,7 +355,8 @@ public sealed class NeedsIndicator : IDisposable
         OrchestraUsage.Changed -= OnChanged;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         recheck.Dispose();
-        pill?.Dispose();
+        foreach (var card in cards.Values) card.Dispose();
+        moreCard?.Dispose();
         panel?.Dispose();
     }
 }
@@ -1036,34 +1139,29 @@ internal sealed class NeedsPanel : Form
 }
 
 /// <summary>
-/// The floating indicator: "! 2 need you", always on top, never taking focus. Click it for the list;
-/// drag it out of the way and it stays where it was put.
+/// One need, floating above the taskbar: what kind and how long and where, then its title and the
+/// detail, edged in amber, or red when it is blocking. Never takes the focus. Also the "+N" card
+/// for needs that did not fit.
 /// </summary>
-internal sealed class NeedsPill : Form
+internal sealed class NeedCard : Form
 {
-    private const int DragThreshold = 4;
-
-    private readonly ToolTip tip = new() { InitialDelay = 300 };
+    private readonly double scale;
+    private readonly ToolTip tip = new() { InitialDelay = 400 };
     private readonly System.Windows.Forms.Timer pulse = new() { Interval = 33 };
+    private readonly Font kindFont, titleFont, detailFont;
     private long pulseStart;
-    private string text = "";
-    private bool blocking;
-    private Point? pressAt;
-    private Point grabOffset;
-    private bool dragging;
-    private (int? X, int? Y) placedFrom = (int.MinValue, int.MinValue);
+    private bool hot;
+    private string tipText = "";
 
-    /// <summary>Clicked without being dragged.</summary>
-    public event Action? Clicked;
+    public OrchestraNeedItem? Item { get; private set; }
+    private int more;
 
-    /// <summary>Right-clicked: the list, whatever there is to go straight to.</summary>
-    public event Action? ListRequested;
+    /// <summary>Clicked, and whether with the right button.</summary>
+    public event Action<NeedCard, bool>? Clicked;
 
-    /// <summary>Dropped somewhere new, with its top-left corner in screen pixels.</summary>
-    public event Action<Point>? Moved;
-
-    public NeedsPill()
+    public NeedCard(double scale)
     {
+        this.scale = scale;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -1072,14 +1170,15 @@ internal sealed class NeedsPill : Form
         DoubleBuffered = true;
         BackColor = Theme.Panel;
         Cursor = Cursors.Hand;
-        tip.SetToolTip(this, "Click for what needs you (straight to its page when there is just one); right-click for the list; drag to move");
+        kindFont = Px(11, FontStyle.Bold);
+        titleFont = Px(14, FontStyle.Bold);
+        detailFont = Px(12);
 
         pulse.Tick += (_, _) =>
         {
             if (Environment.TickCount64 - pulseStart > 6000) pulse.Stop();
             Invalidate();
         };
-        DpiChanged += (_, _) => Fit();
     }
 
     protected override CreateParams CreateParams
@@ -1094,151 +1193,129 @@ internal sealed class NeedsPill : Form
 
     protected override bool ShowWithoutActivation => true;
 
-    private int S(int px) => (int)Math.Round(px * DeviceDpi / 96.0);
+    private int S(int px) => (int)Math.Round(px * scale);
 
-    public void Set(int open, bool anyBlocking)
+    private Font Px(float px, FontStyle style = FontStyle.Regular) =>
+        new("Segoe UI", (float)(px * scale), style, GraphicsUnit.Pixel);
+
+    public void Set(OrchestraNeedItem item)
     {
-        string wanted = $"{open} need{(open == 1 ? "s" : "")} you";
-        if (wanted != text || anyBlocking != blocking)
-        {
-            text = wanted;
-            blocking = anyBlocking;
-            Fit();
-            Invalidate();
-        }
-        if (!Visible) Show();
+        Item = item;
+        more = 0;
+        var need = item.Need;
+        string text = $"{OrchestraUsage.NeedKindLabel(need.Kind)}{(need.Blocking ? " — blocking" : "")}: {need.Title}"
+                      + (need.Where is { Length: > 0 } where ? $"\n{where}" : "")
+                      + (need.Detail is { } detail ? $"\n{detail}" : "")
+                      + "\n\nClick for what you can do about it; right-click for everything waiting.";
+        if (text != tipText) tip.SetToolTip(this, tipText = text);
     }
 
-    /// <summary>Puts it where it was left, or in the corner above the clock — on screen either way.</summary>
-    public void PlaceAt(int? x, int? y)
+    public void SetMore(int count)
     {
-        if (dragging || placedFrom == (x, y)) return;
-        placedFrom = (x, y);
-
-        Rectangle work;
-        Point at;
-        if (x is { } px && y is { } py && Screen.AllScreens.Any(s => s.WorkingArea.Contains(new Point(px + Width / 2, py + Height / 2))))
-        {
-            at = new Point(px, py);
-            work = Screen.FromPoint(at).WorkingArea;
-        }
-        else
-        {
-            work = (Screen.PrimaryScreen ?? Screen.AllScreens[0]).WorkingArea;
-            at = new Point(work.Right - Width - S(16), work.Bottom - Height - S(16));
-        }
-
-        Location = new Point(Math.Clamp(at.X, work.Left, Math.Max(work.Left, work.Right - Width)),
-                             Math.Clamp(at.Y, work.Top, Math.Max(work.Top, work.Bottom - Height)));
+        Item = null;
+        more = count;
+        string text = $"{count} more waiting — click for the whole list.";
+        if (text != tipText) tip.SetToolTip(this, tipText = text);
+        Invalidate();
     }
 
-    /// <summary>Glows for a few seconds: something new has arrived.</summary>
+    /// <summary>Glows for a few seconds: it has just arrived.</summary>
     public void Pulse()
     {
         pulseStart = Environment.TickCount64;
         pulse.Start();
-        Invalidate();
     }
 
-    private void Fit()
+    private string KindLine(OrchestraNeedItem item)
     {
-        using var font = PillFont();
-        int textWidth = TextRenderer.MeasureText(text, font).Width;
-        Size = new Size(S(12) + S(14) + S(6) + textWidth + S(10), S(30));
-        var region = Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, Height, Height);
-        if (region != IntPtr.Zero && IsHandleCreated) Native.SetWindowRgn(Handle, region, true);
-        placedFrom = (int.MinValue, int.MinValue);   // re-clamp at the new size
+        var parts = new List<string> { OrchestraUsage.NeedKindLabel(item.Need.Kind).ToUpperInvariant() };
+        if (item.Need.Blocking) parts.Add("BLOCKING");
+        if (item.Age(Environment.TickCount64) is { } age) parts.Add(age.TotalMinutes < 1 ? "now" : OrchestraUsage.FormatAge(age));
+        if (item.Need.Where is { Length: > 0 } where) parts.Add(where);
+        return string.Join(" · ", parts);
+    }
+
+    private static string DetailLine(OrchestraNeedItem item) => item.Need.Detail ?? item.Need.Command ?? "";
+
+    /// <summary>Wide enough for every line in full.</summary>
+    public int NaturalWidth()
+    {
+        if (Item is not { } item) return S(56);
+        const TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+        int widest = Math.Max(TextRenderer.MeasureText(KindLine(item), kindFont, Size.Empty, flags).Width,
+                     Math.Max(TextRenderer.MeasureText(item.Need.Title, titleFont, Size.Empty, flags).Width,
+                              TextRenderer.MeasureText(DetailLine(item), detailFont, Size.Empty, flags).Width));
+        return widest + S(26);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (!IsHandleCreated) return;
+        var region = Native.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, S(12), S(12));
+        if (region != IntPtr.Zero) Native.SetWindowRgn(Handle, region, true);
     }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        Fit();
+        OnResize(e);
     }
-
-    private Font PillFont() => new("Segoe UI", (float)(13 * DeviceDpi / 96.0), FontStyle.Bold, GraphicsUnit.Pixel);
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        var colour = blocking ? OrchestraStrip.BlockingColour : OrchestraStrip.NeedColour;
+        var accent = Item is not { } item ? Theme.Muted
+                   : item.Need.Blocking ? OrchestraStrip.BlockingColour : OrchestraStrip.NeedColour;
 
         float glow = pulse.Enabled ? (float)(0.5 + 0.5 * Math.Sin((Environment.TickCount64 - pulseStart) / 160.0)) : 0f;
-        using (var back = new SolidBrush(glow > 0 ? Blend(Theme.Panel, colour, 0.12f + 0.25f * glow) : Theme.Panel))
-            g.FillRectangle(back, ClientRectangle);
-        using (var rim = new Pen(colour, S(2)))
-            g.DrawPath(rim, Capsule(new RectangleF(S(1), S(1), Width - S(2) - 1, Height - S(2) - 1)));
+        var back = hot ? Color.FromArgb(46, 51, 62) : Theme.Panel;
+        if (glow > 0) back = Blend(back, accent, 0.1f + 0.22f * glow);
+        using (var fill = new SolidBrush(back)) g.FillRectangle(fill, ClientRectangle);
+        using (var rim = new Pen(Color.FromArgb(Item is null ? 90 : 200, accent), Math.Max(1f, S(1))))
+            g.DrawRectangle(rim, 0, 0, Width - 1, Height - 1);
 
-        int mark = S(14);
-        OrchestraStrip.PaintNeedsMark(g, new RectangleF(S(10), (Height - mark) / 2f, mark, mark), colour);
+        if (Item is not { } need)
+        {
+            using var font = Px(15, FontStyle.Bold);
+            TextRenderer.DrawText(g, $"+{more}", font, ClientRectangle, Theme.Text,
+                                  TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            return;
+        }
 
-        using var font = PillFont();
-        TextRenderer.DrawText(g, text, font, new Rectangle(S(10) + mark + S(6), 0, Width, Height), Theme.Text,
-                              TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding);
-    }
+        using (var bar = new SolidBrush(accent)) g.FillRectangle(bar, S(1), S(6), S(4), Height - S(12));
 
-    private static GraphicsPath Capsule(RectangleF r)
-    {
-        var path = new GraphicsPath();
-        float d = r.Height;
-        path.AddArc(r.X, r.Y, d, d, 90, 180);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 180);
-        path.CloseFigure();
-        return path;
+        const TextFormatFlags line = TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding
+                                     | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix;
+        int left = S(13), width = Width - left - S(10);
+        int third = (Height - S(10)) / 3, top = S(5);
+        TextRenderer.DrawText(g, KindLine(need), kindFont, new Rectangle(left, top, width, third), accent, line);
+        TextRenderer.DrawText(g, need.Need.Title, titleFont, new Rectangle(left, top + third, width, third + S(2)), Theme.Text, line);
+        TextRenderer.DrawText(g, DetailLine(need), detailFont, new Rectangle(left, top + 2 * third + S(1), width, third), Theme.Muted, line);
     }
 
     private static Color Blend(Color a, Color b, float t) => Color.FromArgb(
         (int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
 
-    protected override void OnMouseDown(MouseEventArgs e)
+    protected override void OnMouseEnter(EventArgs e)
     {
-        base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left) return;
-        pressAt = Cursor.Position;
-        grabOffset = new Point(Cursor.Position.X - Left, Cursor.Position.Y - Top);
-        dragging = false;
-        Capture = true;
+        base.OnMouseEnter(e);
+        hot = true;
+        Invalidate();
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnMouseLeave(EventArgs e)
     {
-        base.OnMouseMove(e);
-        if (pressAt is not { } start) return;
-        var now = Cursor.Position;
-        if (!dragging && Math.Abs(now.X - start.X) + Math.Abs(now.Y - start.Y) < DragThreshold) return;
-        dragging = true;
-        Cursor = Cursors.SizeAll;
-        Location = new Point(now.X - grabOffset.X, now.Y - grabOffset.Y);
+        base.OnMouseLeave(e);
+        hot = false;
+        Invalidate();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e.Button == MouseButtons.Right && pressAt is null)
-        {
-            ListRequested?.Invoke();
-            return;
-        }
-        if (pressAt is null) return;
-        pressAt = null;
-        Capture = false;
-        Cursor = Cursors.Hand;
-
-        if (dragging)
-        {
-            dragging = false;
-            // Kept on the display it was dropped on, whole.
-            var work = Screen.FromPoint(new Point(Left + Width / 2, Top + Height / 2)).WorkingArea;
-            Location = new Point(Math.Clamp(Left, work.Left, Math.Max(work.Left, work.Right - Width)),
-                                 Math.Clamp(Top, work.Top, Math.Max(work.Top, work.Bottom - Height)));
-            placedFrom = (Left, Top);
-            Moved?.Invoke(Location);
-        }
-        else if (e.Button == MouseButtons.Left)
-        {
-            Clicked?.Invoke();
-        }
+        if (e.Button is MouseButtons.Left or MouseButtons.Right) Clicked?.Invoke(this, e.Button == MouseButtons.Right);
     }
 
     protected override void Dispose(bool disposing)
@@ -1247,6 +1324,9 @@ internal sealed class NeedsPill : Form
         {
             pulse.Dispose();
             tip.Dispose();
+            kindFont.Dispose();
+            titleFont.Dispose();
+            detailFont.Dispose();
         }
         base.Dispose(disposing);
     }

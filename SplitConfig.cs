@@ -476,19 +476,15 @@ public sealed class OrchestraSettings
     public bool ShowTimer { get; set; }
 
     /// <summary>
-    /// Where the "needs you" indicator goes while something is waiting on a person: Automatic,
-    /// Taskbar (a badged button in the Windows taskbar), Floating (a pill over everything), or Off.
-    /// Automatic floats on a laptop-sized screen or where the taskbar is hidden or compact.
+    /// How what needs you is shown while something is waiting on a person: Automatic (a card per
+    /// need above the taskbar, plus a badged taskbar button where the screen has room), Cards,
+    /// Taskbar (the button alone), or Off.
     /// </summary>
     public string NeedsIndicator { get; set; } = "Automatic";
 
     /// <summary>A Windows notification when something new needs you, once per need.</summary>
     public bool NeedsToast { get; set; } = true;
 
-    /// <summary>Where the floating pill was last dropped, in screen pixels; null for the corner above the clock.</summary>
-    public int? NeedsPillX { get; set; }
-
-    public int? NeedsPillY { get; set; }
 }
 
 public sealed class MonitorLayout
@@ -924,8 +920,11 @@ public sealed class SplitConfig
 
         Orchestra ??= new OrchestraSettings();
         Orchestra.RefreshSeconds = Math.Clamp(Orchestra.RefreshSeconds, 2, 300);
+        // "Floating" was the pill the cards replaced.
+        var indicator = Orchestra.NeedsIndicator?.Trim();
+        if (string.Equals(indicator, "Floating", StringComparison.OrdinalIgnoreCase)) indicator = "Cards";
         Orchestra.NeedsIndicator = ScweenSpit.NeedsIndicator.Choices.FirstOrDefault(
-            c => c.Equals(Orchestra.NeedsIndicator?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? ScweenSpit.NeedsIndicator.Choices[0];
+            c => c.Equals(indicator, StringComparison.OrdinalIgnoreCase)) ?? ScweenSpit.NeedsIndicator.Choices[0];
         Orchestra.Feeds = (Orchestra.Feeds ?? new()).Where(f => !string.IsNullOrWhiteSpace(f))
                                                     .Select(f => f.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
