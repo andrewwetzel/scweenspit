@@ -564,6 +564,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         AntigravityUsage.Configure(config.Antigravity, SaveFromPoller);
         RemoteChatUsage.Configure(config.RemoteChats, SaveFromPoller);
         BambuUsage.Configure(config.Bambu, SaveFromPoller);
+        OrchestraUsage.Configure(config.Orchestra);
     }
 
     private void ApplySnapSuppression()
@@ -1026,6 +1027,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             AntigravityUsage.Stop();
             RemoteChatUsage.Stop();
             BambuUsage.Stop();
+            OrchestraUsage.Stop();
             StartMenu.Unwatch();     // before the bars go, since it asks them where to put things
             bars.Dispose();          // releases the appbar reservations
             hook.Dispose();

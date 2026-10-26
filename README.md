@@ -574,6 +574,53 @@ that was working quietly stops.
 This is adapted from [claude-usage-widget](https://github.com/niccolo-sabato/claude-usage-widget) by
 Niccolò Sabato, under the MIT licence — see [Third-party code](#third-party-code).
 
+### Orchestrator status in the bar
+
+An orchestrator that runs child sessions on a server can publish a tiny read-only feed, and the bar
+shows it as one strip per orchestrator: **how long it has been running, and how many children of
+each kind it has** — `◆ Orch 3:12:05  ● Claude 3  ● agy 1`. The timer ticks on the bar's own clock
+between polls. A child kind with something waiting on you gets an amber ring and count, and the
+strip pulses the same way the remote chat strip does when that count goes from none to some.
+Hovering lists every run with its repo, base branch and per-kind breakdown; clicking opens
+**Settings ▸ Orchestrator**.
+
+Feeds are listed under **Orchestrator**, one URL per line; the default is
+`http://100.126.10.4:8787/orchestra.json` (lp-server-vm on the tailnet). Nothing is drawn until a
+feed has answered, so a machine that cannot reach the tailnet shows nothing — a silent feed is
+asked every 30 seconds, an answering one every 5. A feed that stops answering keeps its last
+figures, dimmed, after 30 seconds. Which bars show it is per-display under **Taskbar**; until you
+choose, only the primary display's bar does.
+
+The feed is `GET` → `application/json`:
+
+```json
+{
+  "schema": 1,
+  "server": "lp-server-vm",
+  "generated_at": "2026-10-26T10:30:00Z",
+  "active": true,
+  "orchestrator": { "started_at": "2026-10-26T00:51:23Z" },
+  "children": {
+    "claude": { "running": 2, "waiting": 1, "idle": 0 },
+    "agy":    { "running": 1, "waiting": 0, "idle": 0 }
+  },
+  "caps": { "claude": 5, "agy": 3, "all": 4 },
+  "runs": [
+    { "run": "split3", "repo": "monopoly", "base": "release/v3.0.0", "started_at": "2026-10-26T00:51:23Z",
+      "children": { "claude": { "running": 2, "waiting": 0, "idle": 1 }, "agy": { "running": 1, "waiting": 0, "idle": 0 } } }
+  ]
+}
+```
+
+- `active: false` (no unfinished run) draws a dimmed `idle`. `orchestrator.started_at` may be null
+  then; when it is missing on an active feed, the earliest run's start is used.
+- The elapsed time is `generated_at − started_at` on the server's clock plus the time since the
+  answer arrived on ours, so the two machines' clocks need not agree.
+- `children` keys are open-ended. `claude`, `agy` and `agy-ide` are drawn first, in that order,
+  with their own colours; any other key is drawn after them under its own name.
+- Unknown fields are ignored and missing counts are zero: changes within schema 1 must be additive.
+  A feed reporting any other `schema` is refused rather than misread.
+
 ### Why "fill over the taskbar" sometimes does nothing
 
 That setting grows a zone into the space the taskbar reserves. If nothing is reserving space — the

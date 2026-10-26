@@ -179,7 +179,7 @@ public static class RemoteChatUsage
     /// <summary>Raised whenever <see cref="Current"/> changes so bars can repaint immediately.</summary>
     public static event Action? Changed;
 
-    private static float GlowIntensityFromTick(long start)
+    internal static float GlowIntensityFromTick(long start)
     {
         if (start == 0) return 0f;
         long elapsed = Environment.TickCount64 - start;

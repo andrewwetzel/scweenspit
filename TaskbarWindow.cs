@@ -91,7 +91,7 @@ public sealed class TaskbarWindow : Form
     // Plasma task manager does, rather than always raising the same one.
     private readonly Dictionary<string, int> cycle = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Bitmap> fileIcons = new(StringComparer.OrdinalIgnoreCase);
-    private enum TrackerSection { Usage, ClaudeChats, Antigravity, AntigravityChats, Bambu, Machine }
+    private enum TrackerSection { Usage, ClaudeChats, Antigravity, AntigravityChats, Orchestra, Bambu, Machine }
     private const int DividerGrabRadius = 5;
     private const int MinTrackerExtent = 48;
     private const int MaxTrackerExtent = 1200;
@@ -103,6 +103,7 @@ public sealed class TaskbarWindow : Form
     private bool hoveredAntigravity;
     private bool hoveredAntigravityChats;
     private string? hoveredRemoteChatId;
+    private bool hoveredOrchestra;
     private bool hoveredBambu;
     private bool hoveredMachine;
     private TrackerSection? hoveredDivider;
@@ -186,18 +187,40 @@ public sealed class TaskbarWindow : Form
 
         remoteGlowTimer.Tick += (_, _) =>
         {
-            if (IsDisposed || !RemoteChatsVisible)
+            if (IsDisposed || !(RemoteChatsVisible || OrchestraVisible))
             {
                 remoteGlowTimer.Stop();
                 return;
             }
             if (ClaudeChatsVisible) Invalidate(ClaudeChatsArea);
             if (AntigravityChatsVisible) Invalidate(AntigravityChatsArea);
-            if (!RemoteChatUsage.IsAttentionGlowing)
+            if (OrchestraVisible) Invalidate(OrchestraArea);
+            if (!RemoteChatUsage.IsAttentionGlowing && !OrchestraUsage.IsAttentionGlowing)
                 remoteGlowTimer.Stop();
         };
 
         RemoteChatUsage.Changed += OnRemoteChatsChanged;
+        OrchestraUsage.Changed += OnOrchestraChanged;
+    }
+
+    /// <summary>
+    /// A feed answering for the first time changes the layout, not just the strip: the strip only
+    /// exists once one has. So the whole bar repaints, not just the strip's area.
+    /// </summary>
+    private void OnOrchestraChanged()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (IsDisposed) return;
+                if (OrchestraVisible && OrchestraUsage.IsAttentionGlowing && !remoteGlowTimer.Enabled)
+                    remoteGlowTimer.Start();
+                Invalidate();
+            });
+        }
+        catch { }
     }
 
     private void OnRemoteChatsChanged()
@@ -419,7 +442,14 @@ public sealed class TaskbarWindow : Form
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
-    private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Bambu, int Machine) DefaultTrackerExtents()
+    /// <summary>
+    /// Only once a feed has answered: a machine that cannot reach the orchestrator should not carry
+    /// an empty strip saying so. Unset means the primary display's bar only.
+    /// </summary>
+    private bool OrchestraVisible => (settings.ShowOrchestra ?? monitor.IsPrimary)
+                                     && OrchestraUsage.Current is { } o && o.Feeds.Any(f => f.Answered);
+
+    private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Orchestra, int Bambu, int Machine) DefaultTrackerExtents()
     {
         int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
         int scale = Math.Clamp(settings.TrackerScale, 80, 300);
@@ -428,10 +458,11 @@ public sealed class TaskbarWindow : Form
         int cc = ClaudeChatsVisible ? UsageStrip.RemoteChatsExtent(Vertical, maxRows, Breadth, scale, RemoteChatService.Claude) : 0;
         int a = AntigravityVisible ? UsageStrip.AntigravityExtent(Vertical, maxRows, Breadth, scale) : 0;
         int ac = AntigravityChatsVisible ? UsageStrip.RemoteChatsExtent(Vertical, maxRows, Breadth, scale, RemoteChatService.Antigravity) : 0;
+        int o = OrchestraVisible ? OrchestraStrip.Extent(Vertical, maxRows, Breadth, scale) : 0;
         int b = BambuVisible ? UsageStrip.BambuExtent(Vertical, maxRows, Breadth, scale) : 0;
         int m = MachineVisible ? MeterStrip.Extent(Vertical, Math.Max(3, machine.Count), maxRows, Breadth, scale) : 0;
 
-        int baseTotal = u + cc + a + ac + b + m;
+        int baseTotal = u + cc + a + ac + o + b + m;
         if (!Vertical && baseTotal > 0 && Width > 0)
         {
             int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
@@ -443,7 +474,7 @@ public sealed class TaskbarWindow : Form
                 int barBase = u + a + b + m;
                 if (barBase > 0)
                 {
-                    double factor = Math.Min(1.65, Math.Max(1.0, (available - cc - ac) / (double)barBase));
+                    double factor = Math.Min(1.65, Math.Max(1.0, (available - cc - ac - o) / (double)barBase));
                     u = (int)Math.Round(u * factor);
                     a = (int)Math.Round(a * factor);
                     b = (int)Math.Round(b * factor);
@@ -457,17 +488,18 @@ public sealed class TaskbarWindow : Form
                 cc = (int)Math.Round(cc * factor);
                 a = (int)Math.Round(a * factor);
                 ac = (int)Math.Round(ac * factor);
+                o = (int)Math.Round(o * factor);
                 b = (int)Math.Round(b * factor);
                 m = (int)Math.Round(m * factor);
             }
         }
 
-        return (u, cc, a, ac, b, m);
+        return (u, cc, a, ac, o, b, m);
     }
 
-    private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Bambu, int Machine) TrackerExtents()
+    private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Orchestra, int Bambu, int Machine) TrackerExtents()
     {
-        var (u, cc, a, ac, b, m) = DefaultTrackerExtents();
+        var (u, cc, a, ac, o, b, m) = DefaultTrackerExtents();
 
         if (UsageVisible && settings.UsageWidth is > 0 and var uw)
             u = Math.Clamp(uw, MinTrackerExtent, MaxTrackerExtent);
@@ -477,6 +509,8 @@ public sealed class TaskbarWindow : Form
             a = Math.Clamp(aw, MinTrackerExtent, MaxTrackerExtent);
         if (AntigravityChatsVisible && settings.AntigravityChatsWidth is > 0 and var acw)
             ac = Math.Clamp(acw, MinTrackerExtent, MaxTrackerExtent);
+        if (OrchestraVisible && settings.OrchestraWidth is > 0 and var ow)
+            o = Math.Clamp(ow, MinTrackerExtent, MaxTrackerExtent);
         if (BambuVisible && settings.BambuWidth is > 0 and var bw)
             b = Math.Clamp(bw, MinTrackerExtent, MaxTrackerExtent);
         if (MachineVisible && settings.MachineWidth is > 0 and var mw)
@@ -488,7 +522,7 @@ public sealed class TaskbarWindow : Form
             int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
             int minLeft = (Leading + 1) * Slot;
             int maxCluster = Math.Max(MinTrackerExtent, barLength - trayAndClock - minLeft);
-            int total = u + cc + a + ac + b + m;
+            int total = u + cc + a + ac + o + b + m;
             if (total > maxCluster && total > 0)
             {
                 double shrink = maxCluster / (double)total;
@@ -496,12 +530,13 @@ public sealed class TaskbarWindow : Form
                 cc = (int)Math.Round(cc * shrink);
                 a = (int)Math.Round(a * shrink);
                 ac = (int)Math.Round(ac * shrink);
+                o = (int)Math.Round(o * shrink);
                 b = (int)Math.Round(b * shrink);
                 m = (int)Math.Round(m * shrink);
             }
         }
 
-        return (u, cc, a, ac, b, m);
+        return (u, cc, a, ac, o, b, m);
     }
 
     private int ExtentForTracker(TrackerSection section) => section switch
@@ -510,6 +545,7 @@ public sealed class TaskbarWindow : Form
         TrackerSection.ClaudeChats => ClaudeChatsExtent,
         TrackerSection.Antigravity => AntigravityExtent,
         TrackerSection.AntigravityChats => AntigravityChatsExtent,
+        TrackerSection.Orchestra => OrchestraExtent,
         TrackerSection.Bambu => BambuExtent,
         _ => MachineExtent,
     };
@@ -520,6 +556,7 @@ public sealed class TaskbarWindow : Form
         TrackerSection.ClaudeChats => ClaudeChatsArea,
         TrackerSection.Antigravity => AntigravityArea,
         TrackerSection.AntigravityChats => AntigravityChatsArea,
+        TrackerSection.Orchestra => OrchestraArea,
         TrackerSection.Bambu => BambuArea,
         _ => MachineArea,
     };
@@ -530,6 +567,7 @@ public sealed class TaskbarWindow : Form
         TrackerSection.ClaudeChats => "Claude remote chats",
         TrackerSection.Antigravity => "Antigravity usage",
         TrackerSection.AntigravityChats => "Antigravity remote chats",
+        TrackerSection.Orchestra => "Orchestrator",
         TrackerSection.Bambu => "Bambu printers",
         _ => "Computer usage",
     };
@@ -540,6 +578,7 @@ public sealed class TaskbarWindow : Form
         TrackerSection.ClaudeChats => settings.RemoteChatsWidth,
         TrackerSection.Antigravity => settings.AntigravityWidth,
         TrackerSection.AntigravityChats => settings.AntigravityChatsWidth,
+        TrackerSection.Orchestra => settings.OrchestraWidth,
         TrackerSection.Bambu => settings.BambuWidth,
         _ => settings.MachineWidth,
     };
@@ -553,6 +592,7 @@ public sealed class TaskbarWindow : Form
             case TrackerSection.ClaudeChats: settings.RemoteChatsWidth = clamped; break;
             case TrackerSection.Antigravity: settings.AntigravityWidth = clamped; break;
             case TrackerSection.AntigravityChats: settings.AntigravityChatsWidth = clamped; break;
+            case TrackerSection.Orchestra: settings.OrchestraWidth = clamped; break;
             case TrackerSection.Bambu: settings.BambuWidth = clamped; break;
             case TrackerSection.Machine: settings.MachineWidth = clamped; break;
         }
@@ -564,6 +604,7 @@ public sealed class TaskbarWindow : Form
         settings.RemoteChatsWidth = null;
         settings.AntigravityWidth = null;
         settings.AntigravityChatsWidth = null;
+        settings.OrchestraWidth = null;
         settings.BambuWidth = null;
         settings.MachineWidth = null;
     }
@@ -573,17 +614,18 @@ public sealed class TaskbarWindow : Form
         int barLength = Vertical ? Height : Width;
         if (barLength <= 0) return MaxTrackerExtent;
 
-        var (u, cc, a, ac, b, m) = TrackerExtents();
+        var (u, cc, a, ac, o, b, m) = TrackerExtents();
         int current = section switch
         {
             TrackerSection.Usage => u,
             TrackerSection.ClaudeChats => cc,
             TrackerSection.Antigravity => a,
             TrackerSection.AntigravityChats => ac,
+            TrackerSection.Orchestra => o,
             TrackerSection.Bambu => b,
             _ => m,
         };
-        int others = (u + cc + a + ac + b + m) - current;
+        int others = (u + cc + a + ac + o + b + m) - current;
         int trayAndClock = TrayItems().Count * StatusIconSize + ClockExtent;
         int minLeft = (Leading + 1) * Slot;
         return Math.Clamp(barLength - trayAndClock - minLeft - others, MinTrackerExtent, MaxTrackerExtent);
@@ -591,11 +633,12 @@ public sealed class TaskbarWindow : Form
 
     private List<TrackerSection> VisibleTrackers()
     {
-        var list = new List<TrackerSection>(6);
+        var list = new List<TrackerSection>(7);
         if (UsageVisible) list.Add(TrackerSection.Usage);
         if (ClaudeChatsVisible) list.Add(TrackerSection.ClaudeChats);
         if (AntigravityVisible) list.Add(TrackerSection.Antigravity);
         if (AntigravityChatsVisible) list.Add(TrackerSection.AntigravityChats);
+        if (OrchestraVisible) list.Add(TrackerSection.Orchestra);
         if (BambuVisible) list.Add(TrackerSection.Bambu);
         if (MachineVisible) list.Add(TrackerSection.Machine);
         return list;
@@ -629,6 +672,7 @@ public sealed class TaskbarWindow : Form
     private int ClaudeChatsExtent => TrackerExtents().ClaudeChats;
     private int AntigravityExtent => TrackerExtents().Antigravity;
     private int AntigravityChatsExtent => TrackerExtents().AntigravityChats;
+    private int OrchestraExtent => TrackerExtents().Orchestra;
     private int BambuExtent => TrackerExtents().Bambu;
     private int MachineExtent => TrackerExtents().Machine;
 
@@ -637,8 +681,8 @@ public sealed class TaskbarWindow : Form
     {
         get
         {
-            var (u, cc, a, ac, b, m) = TrackerExtents();
-            return u + cc + a + ac + b + m + TrayItems().Count * StatusIconSize + ClockExtent;
+            var (u, cc, a, ac, o, b, m) = TrackerExtents();
+            return u + cc + a + ac + o + b + m + TrayItems().Count * StatusIconSize + ClockExtent;
         }
     }
 
@@ -647,13 +691,14 @@ public sealed class TaskbarWindow : Form
     /// <summary>
     /// AI usage and remote chat strips are grouped by AI:
     ///   [◆ Claude Usage │ ◆ Claude Chats]  ║  [✦ Antigravity Usage │ ✦ Antigravity Chats]
-    /// followed by Bambu printers and Computer usage.
+    /// followed by the orchestrator, Bambu printers and Computer usage.
     /// </summary>
     private int UsageStart => StatusStart;
     private int ClaudeChatsStart => UsageStart + UsageExtent;
     private int AntigravityStart => ClaudeChatsStart + ClaudeChatsExtent;
     private int AntigravityChatsStart => AntigravityStart + AntigravityExtent;
-    private int BambuStart => AntigravityChatsStart + AntigravityChatsExtent;
+    private int OrchestraStart => AntigravityChatsStart + AntigravityChatsExtent;
+    private int BambuStart => OrchestraStart + OrchestraExtent;
     private int MachineStart => BambuStart + BambuExtent;
     private int TrayStart => MachineStart + MachineExtent;
 
@@ -672,6 +717,10 @@ public sealed class TaskbarWindow : Form
     private Rectangle AntigravityChatsArea => Vertical
         ? new Rectangle(0, AntigravityChatsStart, Width, AntigravityChatsExtent)
         : new Rectangle(AntigravityChatsStart, 0, AntigravityChatsExtent, Height);
+
+    private Rectangle OrchestraArea => Vertical
+        ? new Rectangle(0, OrchestraStart, Width, OrchestraExtent)
+        : new Rectangle(OrchestraStart, 0, OrchestraExtent, Height);
 
     private Rectangle BambuArea => Vertical
         ? new Rectangle(0, BambuStart, Width, BambuExtent)
@@ -954,7 +1003,7 @@ public sealed class TaskbarWindow : Form
         {
             if (hoveredDivider != div || hovered != -1 || hoveredStatus != -1 || hoveredUsage
                 || hoveredClaudeChats || hoveredAntigravity || hoveredAntigravityChats
-                || hoveredRemoteChatId is not null || hoveredBambu || hoveredMachine || hoveredStart)
+                || hoveredRemoteChatId is not null || hoveredOrchestra || hoveredBambu || hoveredMachine || hoveredStart)
             {
                 hoveredDivider = div;
                 hovered = -1;
@@ -964,6 +1013,7 @@ public sealed class TaskbarWindow : Form
                 hoveredAntigravity = false;
                 hoveredAntigravityChats = false;
                 hoveredRemoteChatId = null;
+                hoveredOrchestra = false;
                 hoveredBambu = false;
                 hoveredMachine = false;
                 hoveredStart = false;
@@ -987,13 +1037,14 @@ public sealed class TaskbarWindow : Form
                 ? UsageStrip.HitTestRemoteChat(AntigravityChatsArea, RemoteChatUsage.Current, e.Location, maxRows, RemoteChatService.Antigravity)
                 : null;
         string? remoteChatCircleId = remoteChatCircle?.Id;
+        bool orchestra = OrchestraVisible && OrchestraArea.Contains(e.Location);
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
         if (hoveredDivider is null && under == hovered && tray == hoveredStatus && usage == hoveredUsage
             && claudeChats == hoveredClaudeChats && antigravity == hoveredAntigravity && agChats == hoveredAntigravityChats
             && remoteChatCircleId == hoveredRemoteChatId
-            && bambu == hoveredBambu && load == hoveredMachine && start == hoveredStart) return;
+            && orchestra == hoveredOrchestra && bambu == hoveredBambu && load == hoveredMachine && start == hoveredStart) return;
 
         hoveredDivider = null;
         hovered = under;
@@ -1003,10 +1054,11 @@ public sealed class TaskbarWindow : Form
         hoveredAntigravity = antigravity;
         hoveredAntigravityChats = agChats;
         hoveredRemoteChatId = remoteChatCircleId;
+        hoveredOrchestra = orchestra;
         hoveredBambu = bambu;
         hoveredMachine = load;
         hoveredStart = start;
-        Cursor = under >= 0 || tray >= 0 || usage || claudeChats || antigravity || agChats || bambu || load || start
+        Cursor = under >= 0 || tray >= 0 || usage || claudeChats || antigravity || agChats || orchestra || bambu || load || start
             ? Cursors.Hand : Cursors.Default;
 
         // An icons-only bar is unreadable without these. The strip needs one whatever the bar looks
@@ -1016,6 +1068,7 @@ public sealed class TaskbarWindow : Form
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
                             : bambu ? UsageStrip.BambuTip(BambuUsage.Current)
+                            : orchestra ? OrchestraStrip.Tip(OrchestraUsage.Current)
                             : remoteChatCircle is not null ? UsageStrip.RemoteChatItemTip(remoteChatCircle)
                             : claudeChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current, RemoteChatService.Claude)
                             : agChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current, RemoteChatService.Antigravity)
@@ -1107,6 +1160,7 @@ public sealed class TaskbarWindow : Form
         hoveredAntigravity = false;
         hoveredAntigravityChats = false;
         hoveredRemoteChatId = null;
+        hoveredOrchestra = false;
         hoveredBambu = false;
         hoveredMachine = false;
         hoveredDivider = null;
@@ -1162,6 +1216,7 @@ public sealed class TaskbarWindow : Form
             || settings.AntigravityChatsWidth is not null
             || settings.UsageWidth is not null
             || settings.AntigravityWidth is not null
+            || settings.OrchestraWidth is not null
             || settings.BambuWidth is not null
             || settings.MachineWidth is not null;
 
@@ -1244,6 +1299,15 @@ public sealed class TaskbarWindow : Form
         if (AntigravityChatsVisible && AntigravityChatsArea.Contains(e.Location))
         {
             HandleRemoteChatsClick(e, AntigravityChatsArea, RemoteChatService.Antigravity);
+            return;
+        }
+
+        if (OrchestraVisible && OrchestraArea.Contains(e.Location))
+        {
+            if (SettingsRequested is not null)
+                SettingsRequested.Invoke("Orchestrator");
+            else
+                MenuRequested?.Invoke(Cursor.Position);
             return;
         }
 
@@ -1755,6 +1819,14 @@ public sealed class TaskbarWindow : Form
         if (AntigravityVisible || AntigravityChatsVisible)
             DrawAiGroupAccent(AntigravityStart, AntigravityExtent + AntigravityChatsExtent, agGroupAccent);
 
+        if (OrchestraVisible)
+        {
+            var strip = OrchestraArea;
+            if (hoveredOrchestra) g.FillRectangle(hot, strip);
+            OrchestraStrip.Paint(g, strip, OrchestraUsage.Current, maxRows);
+            DrawStripSeparator(strip, TrackerSection.Orchestra);
+        }
+
         if (BambuVisible)
         {
             var strip = BambuArea;
@@ -1829,6 +1901,7 @@ public sealed class TaskbarWindow : Form
         if (disposing)
         {
             RemoteChatUsage.Changed -= OnRemoteChatsChanged;
+            OrchestraUsage.Changed -= OnOrchestraChanged;
             remoteGlowTimer.Dispose();
             refresh.Dispose();
             hoverDelay.Dispose();

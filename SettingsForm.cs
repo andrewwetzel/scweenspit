@@ -75,6 +75,7 @@ public sealed class SettingsForm : Form
         AddNav("Claude usage", ShowClaude);
         AddNav("Antigravity usage", ShowAntigravity);
         AddNav("Remote chats", ShowRemoteChats);
+        AddNav("Orchestrator", ShowOrchestra);
         AddNav("Bambu printers", ShowBambu);
         AddNav("Exclusions", ShowExclusions);
         AddNav("Displays", ShowDisplays);
@@ -1048,6 +1049,23 @@ public sealed class SettingsForm : Form
                     "Grouped with the Claude & Antigravity usage bars; shows live chat counts, " +
                     "chats needing interaction, and completed sessions per remote server."));
 
+            var orchestra = Theme.Toggle("Show orchestrator status (once a feed answers)",
+                                         settings.ShowOrchestra ?? geo.IsPrimary);
+            orchestra.CheckedChanged += (_, _) =>
+            {
+                settings.ShowOrchestra = orchestra.Checked;
+                if (orchestra.Checked && !config.Orchestra.Enabled)
+                {
+                    config.Orchestra.Enabled = true;
+                    OrchestraUsage.Configure(config.Orchestra);
+                }
+                Save();
+            };
+            page.Controls.Add(orchestra);
+            page.Controls.Add(Theme.Caption(
+                "How long the orchestrator has been running and how many child sessions of each kind it " +
+                "has. Nothing is drawn until one of the feeds under Orchestrator answers."));
+
             var bambu = Theme.Toggle("Show Bambu printer status bars", settings.ShowBambu);
             bambu.CheckedChanged += (_, _) =>
             {
@@ -1108,7 +1126,8 @@ public sealed class SettingsForm : Form
                 || barSettings.UsageWidth is not null
                 || barSettings.AntigravityWidth is not null
                 || barSettings.BambuWidth is not null
-                || barSettings.MachineWidth is not null;
+                || barSettings.MachineWidth is not null
+                || barSettings.OrchestraWidth is not null;
 
             if (anyCustomWidths)
             {
@@ -1123,6 +1142,7 @@ public sealed class SettingsForm : Form
                     barSettings.AntigravityWidth = null;
                     barSettings.BambuWidth = null;
                     barSettings.MachineWidth = null;
+                    barSettings.OrchestraWidth = null;
                     Save();
                     BeginInvoke(ShowTaskbar);
                 };
@@ -2295,6 +2315,108 @@ public sealed class SettingsForm : Form
 
         page.Controls.Add(Theme.Caption(
             "Turn the strip on per display under Taskbar ▸ Show remote server chat status."));
+    }
+
+    private void ShowOrchestra()
+    {
+        var page = Page("Orchestrator",
+            "Live status from an orchestrator's read-only orchestra.json feed: how long it has been " +
+            "running, and how many Claude Code and Antigravity child sessions it has, by state.");
+
+        var orchestra = config.Orchestra;
+
+        var on = Theme.Toggle("Watch orchestrator feeds", orchestra.Enabled);
+        on.CheckedChanged += (_, _) =>
+        {
+            orchestra.Enabled = on.Checked;
+            Save();
+            OrchestraUsage.Configure(orchestra);
+            BeginInvoke(ShowOrchestra);
+        };
+        page.Controls.Add(on);
+
+        if (!orchestra.Enabled)
+        {
+            page.Controls.Add(Theme.Caption("While this is off, ScweenSpit does not ask any feed."));
+            return;
+        }
+
+        page.Controls.Add(Theme.Caption(
+            "The strip appears on the bar only once a feed answers, so a machine that cannot reach " +
+            "the orchestrator shows nothing. A feed that has never answered is asked every 30 seconds; " +
+            "one that stops answering is dimmed after 30 seconds rather than removed."));
+
+        var feeds = new TextBox
+        {
+            Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true,
+            Width = 460, Height = 72, BackColor = Theme.Raised, ForeColor = Theme.Text,
+            Font = new Font(FontFamily.GenericMonospace, 9f), BorderStyle = BorderStyle.FixedSingle,
+            Text = string.Join(Environment.NewLine, orchestra.Feeds),
+        };
+        Row(page, "Feed URLs, one per line (one per orchestrator, in bar order)", feeds);
+
+        var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 4, 0, 4) };
+
+        var apply = Theme.Action("Save feeds", primary: true);
+        apply.AutoSize = true;
+        apply.Click += (_, _) =>
+        {
+            var lines = feeds.Lines.Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+            var bad = lines.FirstOrDefault(l => !OrchestraUsage.IsFeedUrl(l));
+            if (bad is not null)
+            {
+                Say($"Not an http(s) URL: {bad}", problem: true);
+                return;
+            }
+            orchestra.Feeds = lines.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            Save();
+            OrchestraUsage.Configure(orchestra);
+            Say(lines.Count == 0 ? "No feeds — nothing will be asked" : "Feeds saved; asking them now");
+        };
+        buttons.Controls.Add(apply);
+
+        var reset = Theme.Action("Use the default feed");
+        reset.AutoSize = true;
+        reset.Click += (_, _) => feeds.Text = OrchestraSettings.DefaultFeed;
+        buttons.Controls.Add(reset);
+
+        var check = Theme.Action("Check now");
+        check.AutoSize = true;
+        check.Click += (_, _) => { OrchestraUsage.Refresh(); Say("Asking every feed now"); };
+        buttons.Controls.Add(check);
+
+        page.Controls.Add(buttons);
+
+        var interval = Theme.Number(orchestra.RefreshSeconds, 2, 300, 1);
+        interval.ValueChanged += (_, _) => { orchestra.RefreshSeconds = (int)interval.Value; Save(); };
+        Row(page, "Seconds between checks (while a feed answers)", interval);
+
+        var state = new Label
+        {
+            AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Face(9f),
+            MaximumSize = new Size(460, 0), Margin = new Padding(0, 12, 0, 8),
+        };
+        page.Controls.Add(state);
+
+        void Report()
+        {
+            var feedsNow = OrchestraUsage.Current?.Feeds ?? [];
+            long now = Environment.TickCount64;
+            state.Text = feedsNow.Count == 0
+                ? "No feeds configured."
+                : string.Join(Environment.NewLine + Environment.NewLine,
+                              feedsNow.Select(f => $"{f.Url}{Environment.NewLine}{OrchestraStrip.Describe(f, now)}"));
+        }
+        Report();
+
+        var watch = new System.Windows.Forms.Timer { Interval = 1000 };
+        watch.Tick += (_, _) => Report();
+        watch.Start();
+        page.Disposed += (_, _) => { watch.Stop(); watch.Dispose(); };
+
+        page.Controls.Add(Theme.Caption(
+            "Choose which displays draw it under Taskbar ▸ Show orchestrator status. The feed contract " +
+            "is in the README, under \"Orchestrator status in the bar\"."));
     }
 
     private void MoveTaskbar(TaskbarEdge edge)

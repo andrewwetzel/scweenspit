@@ -312,7 +312,7 @@ internal static class UsageStrip
                                    hitPoint: null, serviceFilter, out _, out _);
     }
 
-    private static void PaintRemoteChatsAttentionGlow(Graphics g, Rectangle area, float glow)
+    internal static void PaintRemoteChatsAttentionGlow(Graphics g, Rectangle area, float glow)
     {
         var box = new Rectangle(area.X + 2, area.Y + 2, Math.Max(8, area.Width - 4), Math.Max(8, area.Height - 4));
         var prev = g.SmoothingMode;
@@ -335,7 +335,7 @@ internal static class UsageStrip
         g.SmoothingMode = prev;
     }
 
-    private static GraphicsPath RoundedRectPath(Rectangle box, int radius)
+    internal static GraphicsPath RoundedRectPath(Rectangle box, int radius)
     {
         var path = new GraphicsPath();
         int r = Math.Min(radius, Math.Min(box.Width, box.Height) / 2);

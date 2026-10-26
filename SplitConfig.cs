@@ -170,6 +170,14 @@ public sealed class BarSettings
     public bool ShowRemoteChats { get; set; }
 
     /// <summary>
+    /// Show the orchestrator strip — how long it has been running and how many child sessions of
+    /// each kind — once one of the feeds under <see cref="OrchestraSettings"/> answers. Null means
+    /// "not chosen": the primary display's bar shows it and the others do not, so a machine with
+    /// several bars does not get the same strip on every one of them.
+    /// </summary>
+    public bool? ShowOrchestra { get; set; }
+
+    /// <summary>
     /// Automatically stretch the enabled status/usage tracker strips into unused horizontal space on
     /// a wide bar so their progress tracks and figures are larger and easier to read at a glance.
     /// </summary>
@@ -198,6 +206,7 @@ public sealed class BarSettings
     public int? AntigravityWidth { get; set; }
     public int? BambuWidth { get; set; }
     public int? MachineWidth { get; set; }
+    public int? OrchestraWidth { get; set; }
 
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
@@ -439,6 +448,25 @@ public sealed class RemoteChatsSettings
     public List<RemoteServerRowConfig> Rows { get; set; } = new();
 }
 
+/// <summary>
+/// The orchestrator strip: read-only `orchestra.json` feeds published by an orchestrator on the
+/// tailnet. On by default because it costs nothing until a feed answers — a machine that cannot
+/// reach one asks every half minute and draws nothing.
+/// </summary>
+public sealed class OrchestraSettings
+{
+    public const string DefaultFeed = "http://100.126.10.4:8787/orchestra.json";
+
+    /// <summary>Master switch. Off means no feed is ever asked.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Feed URLs, one per orchestrator, in the order they appear on the bar.</summary>
+    public List<string> Feeds { get; set; } = new() { DefaultFeed };
+
+    /// <summary>Seconds between polls of a feed that is answering.</summary>
+    public int RefreshSeconds { get; set; } = 5;
+}
+
 public sealed class MonitorLayout
 {
     public List<FracRect> Zones { get; set; } = new();
@@ -606,6 +634,11 @@ public sealed class SplitConfig
     /// the machine; which bars draw it is per-bar.
     /// </summary>
     public RemoteChatsSettings RemoteChats { get; set; } = new();
+
+    /// <summary>
+    /// The orchestrator strip. Polled once for the machine; which bars draw it is per-bar.
+    /// </summary>
+    public OrchestraSettings Orchestra { get; set; } = new();
 
     public const string Fallback = "*";
 
@@ -816,6 +849,7 @@ public sealed class SplitConfig
             bar.AntigravityWidth = bar.AntigravityWidth is > 0 and var aw ? Math.Clamp(aw, 44, 1200) : null;
             bar.BambuWidth = bar.BambuWidth is > 0 and var bw ? Math.Clamp(bw, 44, 1200) : null;
             bar.MachineWidth = bar.MachineWidth is > 0 and var mw ? Math.Clamp(mw, 44, 1200) : null;
+            bar.OrchestraWidth = bar.OrchestraWidth is > 0 and var ow ? Math.Clamp(ow, 44, 1200) : null;
             bar.Pinned ??= new();
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }
@@ -846,6 +880,11 @@ public sealed class SplitConfig
         RemoteChats.DoneWindowHours = Math.Clamp(RemoteChats.DoneWindowHours, 1, 168);
         RemoteChats.Rows ??= new();
         RemoteChats.Rows.RemoveAll(r => r is null || string.IsNullOrWhiteSpace(r.Id));
+
+        Orchestra ??= new OrchestraSettings();
+        Orchestra.RefreshSeconds = Math.Clamp(Orchestra.RefreshSeconds, 2, 300);
+        Orchestra.Feeds = (Orchestra.Feeds ?? new()).Where(f => !string.IsNullOrWhiteSpace(f))
+                                                    .Select(f => f.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         foreach (var layout in Monitors.Values)
         {
