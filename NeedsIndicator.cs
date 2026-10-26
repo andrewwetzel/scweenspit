@@ -114,6 +114,30 @@ public sealed class NeedsIndicator : IDisposable
         PanelFor(inTaskbar: mode == Mode.Taskbar).Open(near);
     }
 
+    /// <summary>
+    /// Needs whose page has already been opened by a click on the indicator. The first click goes
+    /// straight to the page; the next one opens the list, where Done and everything else lives.
+    /// </summary>
+    private readonly HashSet<string> shortcutTaken = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A click on the pill, the taskbar button or the strip: with exactly one need outstanding and a
+    /// page to open for it, that page; otherwise the list. Returns true when it opened the page.
+    /// </summary>
+    public bool Activate(Point? near)
+    {
+        var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
+        shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
+        if (open.Count == 1 && NeedActions.Url(open[0].Need) is not null && shortcutTaken.Add(NeedActions.Key(open[0])))
+        {
+            NeedActions.OpenLatest(open[0]);
+            return true;
+        }
+
+        OpenPanel(near);
+        return false;
+    }
+
     /// <summary>Something new arrived: draw the eye to wherever the indicator is.</summary>
     public void Announce()
     {
@@ -128,13 +152,24 @@ public sealed class NeedsIndicator : IDisposable
         panel?.Dispose();
         panel = new NeedsPanel(inTaskbar);
         panel.SettingsRequested += () => openSettings("Orchestrator");
+        // Clicking the taskbar button: the page itself when there is exactly one, else the list.
+        panel.Restoring += () =>
+        {
+            var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
+            shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
+            if (open.Count != 1 || NeedActions.Url(open[0].Need) is null || !shortcutTaken.Add(NeedActions.Key(open[0])))
+                return false;
+            NeedActions.OpenLatest(open[0]);
+            return true;
+        };
         return panel;
     }
 
     private NeedsPill NewPill()
     {
         var made = new NeedsPill();
-        made.Clicked += () => OpenPanel(Cursor.Position);
+        made.Clicked += () => Activate(Cursor.Position);
+        made.ListRequested += () => OpenPanel(Cursor.Position);
         made.Moved += at =>
         {
             config.Orchestra.NeedsPillX = at.X;
@@ -214,6 +249,40 @@ public sealed class NeedsIndicator : IDisposable
     }
 }
 
+/// <summary>What clicking a need does: open its page, always as the feed gives it now.</summary>
+internal static class NeedActions
+{
+    public static string Key(OrchestraNeedItem i) => i.Feed.Url + "\n" + i.Need.Id;
+
+    public static bool IsApproval(OrchestraNeed need) => need.Kind.Equals("approve", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The need's page, if it has one worth opening: an absolute http(s) URL, fragment and all.</summary>
+    public static Uri? Url(OrchestraNeed need) =>
+        need.Url is { } url && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"
+            ? uri : null;
+
+    /// <summary>
+    /// Opens the page the feed names for this need now, not the one it named when the row was
+    /// drawn: an approval's URL becomes the request's own deep link a moment after it appears.
+    /// </summary>
+    public static bool OpenLatest(OrchestraNeedItem item)
+    {
+        var latest = OrchestraUsage.Current?.Needs.FirstOrDefault(i => Key(i) == Key(item)) ?? item;
+        if (Url(latest.Need) is not { } uri) return false;
+        // AbsoluteUri keeps the fragment — #approval/<id> is the whole point — and shell-executing an
+        // http URL hands it to the default browser intact.
+        SystemStatus.Open(uri.AbsoluteUri);
+        return true;
+    }
+
+    /// <summary>Opens the page for a need named by feed and id, if it is still listed.</summary>
+    public static bool OpenLatest(string feedUrl, string id)
+    {
+        var item = OrchestraUsage.Current?.Needs.FirstOrDefault(i => i.Feed.Url == feedUrl && i.Need.Id == id);
+        return item is not null && OpenLatest(item);
+    }
+}
+
 /// <summary>
 /// The list of what the orchestrator is waiting on a person for: one row each, blocking ones first,
 /// with whatever it takes to deal with it a click away — Open for the page, Copy for the command,
@@ -241,6 +310,12 @@ internal sealed class NeedsPanel : Form
     public bool InTaskbar { get; }
 
     public event Action? SettingsRequested;
+
+    /// <summary>
+    /// The taskbar button was clicked while parked. Returning true means the click was dealt with
+    /// — the need's page opened — and the list stays parked.
+    /// </summary>
+    public event Func<bool>? Restoring;
 
     /// <summary>On screen, not parked in the taskbar.</summary>
     public bool IsOpen => Visible && WindowState != FormWindowState.Minimized;
@@ -416,7 +491,22 @@ internal sealed class NeedsPanel : Form
             buttonReady = true;
             ApplyBadge();
         }
+
+        // The shell restores a minimised window by asking it to restore itself, which is the
+        // chance to go straight to the page instead.
+        if (m.Msg == WM_SYSCOMMAND && ((long)m.WParam & 0xFFF0) == SC_RESTORE
+            && WindowState == FormWindowState.Minimized && Restoring?.Invoke() == true)
+        {
+            StopFlashing();
+            return;
+        }
         base.WndProc(ref m);
+    }
+
+    private void StopFlashing()
+    {
+        var info = new FLASHWINFO { cbSize = (uint)Marshal.SizeOf<FLASHWINFO>(), hwnd = Handle, dwFlags = FLASHW_STOP };
+        FlashWindowEx(ref info);
     }
 
     private void SetBadge(int count, bool blocking)
@@ -527,7 +617,7 @@ internal sealed class NeedsPanel : Form
         }
     }
 
-    private static string Key(OrchestraNeedItem i) => i.Feed.Url + "\n" + i.Need.Id;
+    private static string Key(OrchestraNeedItem i) => NeedActions.Key(i);
 
     private Control Row(OrchestraNeedItem item, int width)
     {
@@ -589,11 +679,29 @@ internal sealed class NeedsPanel : Form
             });
 
         var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(inner, 0), Margin = new Padding(0, S(2), 0, 0), BackColor = Theme.Panel };
-        if (need.Url is { } url && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
+        bool approval = NeedActions.IsApproval(need);
+        if (NeedActions.Url(need) is not null)
         {
-            var openButton = ActionButton("Open", primary: !done && need.Command is null);
-            openButton.Click += (_, _) => SystemStatus.Open(uri.AbsoluteUri);
+            // An approval's whole point is that page, so it is the big button, and the row itself
+            // opens it too. The URL is looked up again on click: it changes as the request appears.
+            var openButton = ActionButton(approval ? "Approve →" : "Open", primary: approval || (!done && need.Command is null));
+            if (approval) openButton.Width = S(124);
+            openButton.Click += (_, _) => NeedActions.OpenLatest(item);
             actions.Controls.Add(openButton);
+
+            if (approval)
+            {
+                void OpenFromRow(object? sender, EventArgs e) => NeedActions.OpenLatest(item);
+                row.Cursor = Cursors.Hand;
+                row.Click += OpenFromRow;
+                foreach (Control c in row.Controls)
+                {
+                    if (c is TextBox) continue;
+                    c.Cursor = Cursors.Hand;
+                    c.Click += OpenFromRow;
+                    foreach (Control chip in c.Controls) { chip.Cursor = Cursors.Hand; chip.Click += OpenFromRow; }
+                }
+            }
         }
         if (need.Command is { } toCopy)
         {
@@ -714,7 +822,8 @@ internal sealed class NeedsPanel : Form
     // ---- interop --------------------------------------------------------------
 
     private const int SW_SHOWMINNOACTIVE = 7;
-    private const uint FLASHW_TRAY = 0x2, FLASHW_TIMERNOFG = 0xC;
+    private const uint FLASHW_STOP = 0x0, FLASHW_TRAY = 0x2, FLASHW_TIMERNOFG = 0xC;
+    private const int WM_SYSCOMMAND = 0x0112, SC_RESTORE = 0xF120;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FLASHWINFO
@@ -787,6 +896,9 @@ internal sealed class NeedsPill : Form
     /// <summary>Clicked without being dragged.</summary>
     public event Action? Clicked;
 
+    /// <summary>Right-clicked: the list, whatever there is to go straight to.</summary>
+    public event Action? ListRequested;
+
     /// <summary>Dropped somewhere new, with its top-left corner in screen pixels.</summary>
     public event Action<Point>? Moved;
 
@@ -800,7 +912,7 @@ internal sealed class NeedsPill : Form
         DoubleBuffered = true;
         BackColor = Theme.Panel;
         Cursor = Cursors.Hand;
-        tip.SetToolTip(this, "Click for what needs you; drag to move");
+        tip.SetToolTip(this, "Click for what needs you (straight to its page when there is just one); right-click for the list; drag to move");
 
         pulse.Tick += (_, _) =>
         {
@@ -943,6 +1055,11 @@ internal sealed class NeedsPill : Form
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
+        if (e.Button == MouseButtons.Right && pressAt is null)
+        {
+            ListRequested?.Invoke();
+            return;
+        }
         if (pressAt is null) return;
         pressAt = null;
         Capture = false;

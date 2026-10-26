@@ -55,7 +55,7 @@ public sealed class BarManager : IDisposable
     public event Action<string>? SettingsRequested;
 
     /// <summary>Raised when a bar's orchestrator strip is clicked while something needs you.</summary>
-    public event Action<System.Drawing.Point>? NeedsRequested;
+    public event Action<System.Drawing.Point, bool>? NeedsRequested;
 
     /// <summary>
     /// Whether some bar on screen is drawing the orchestrator strip where it can — the place the
@@ -111,7 +111,7 @@ public sealed class BarManager : IDisposable
                 var bar = new TaskbarWindow(monitor, settings, zoneManager);
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
                 bar.SettingsRequested += page => SettingsRequested?.Invoke(page);
-                bar.NeedsRequested += p => NeedsRequested?.Invoke(p);
+                bar.NeedsRequested += (p, list) => NeedsRequested?.Invoke(p, list);
                 bar.PinsChanged += () => PinsChanged?.Invoke();
 
                 // Give it its rectangle before the handle exists, so it is created on the display it

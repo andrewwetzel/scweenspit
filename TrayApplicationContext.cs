@@ -22,6 +22,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// <summary>Whether the balloon showing now is about a need, so clicking it opens the list.</summary>
     private bool needsBalloon;
 
+    /// <summary>The one approval the balloon showing now is about, opened directly when it is clicked.</summary>
+    private (string Feed, string Id)? balloonApproval;
+
     // Sampling the foreground window when the menu item is clicked always returns our own window:
     // NotifyIcon calls SetForegroundWindow on its hidden window before showing the menu. So track
     // it continuously instead.
@@ -134,9 +137,14 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         needs = new NeedsIndicator(config, () => bars.AnyShowsOrchestra, config.Save, page => OpenSettings(page),
                                    action => { try { marshaller.BeginInvoke(action); } catch { } });
-        bars.NeedsRequested += at => needs.OpenPanel(at);
-        tray.BalloonTipClicked += (_, _) => { if (needsBalloon) needs.OpenPanel(null); };
-        tray.BalloonTipClosed += (_, _) => needsBalloon = false;
+        bars.NeedsRequested += (at, list) => { if (list) needs.OpenPanel(at); else needs.Activate(at); };
+        tray.BalloonTipClicked += (_, _) =>
+        {
+            if (!needsBalloon) return;
+            if (balloonApproval is { } a && NeedActions.OpenLatest(a.Feed, a.Id)) return;
+            needs.OpenPanel(null);
+        };
+        tray.BalloonTipClosed += (_, _) => { needsBalloon = false; balloonApproval = null; };
         OrchestraUsage.NeedsArrived += OnNeedsArrived;
 
         foregroundWatch.Tick += (_, _) =>
@@ -949,6 +957,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void Notify(string message)
     {
         needsBalloon = false;
+        balloonApproval = null;
         tray.ShowBalloonTip(3000, "ScweenSpit", message, ToolTipIcon.Info);
     }
 
@@ -967,15 +976,18 @@ public sealed class TrayApplicationContext : ApplicationContext
 
                 bool blocking = arrived.Any(i => i.Need.Blocking);
                 var first = arrived.FirstOrDefault(i => i.Need.Blocking) ?? arrived[0];
+                // One approval: the notification is a link straight to its page in the console.
+                bool single = arrived.Count == 1 && NeedActions.IsApproval(first.Need) && NeedActions.Url(first.Need) is not null;
                 string title = arrived.Count == 1
                     ? $"{(blocking ? "Blocking — " : "")}{OrchestraUsage.NeedKindLabel(first.Need.Kind)}"
                     : $"{arrived.Count} things need you{(blocking ? " (blocking)" : "")}";
                 string text = first.Need.Title
                     + (first.Need.Where is { Length: > 0 } where ? $"\n{where}" : "")
                     + (arrived.Count > 1 ? $"\n…and {arrived.Count - 1} more" : "")
-                    + "\nClick to see what needs you.";
+                    + (single ? "\nClick to open the approval page." : "\nClick to see what needs you.");
 
                 needsBalloon = true;
+                balloonApproval = single ? (first.Feed.Url, first.Need.Id) : null;
                 tray.ShowBalloonTip(10_000, title.Length > 63 ? title[..63] : title,
                                     text.Length > 255 ? text[..255] : text,
                                     blocking ? ToolTipIcon.Warning : ToolTipIcon.Info);

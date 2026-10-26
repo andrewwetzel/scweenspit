@@ -641,11 +641,17 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
 
 - **The strip** gets a Needs row beneath its chunks — `! 2 need you`, amber, or red when any of them
   is blocking a run — and stays on the bar while anything is listed, even with no run in flight. It
-  pulses when something new arrives. Clicking the strip then opens the list; right-click still opens
-  the settings.
+  pulses when something new arrives. Right-click the strip for the list; the list links to the
+  settings.
+- **One click to the page.** With exactly one need outstanding and a page to open for it, clicking
+  the strip, the pill or the taskbar button goes straight there — for an approval, that request's
+  own page in the Release Console, `https://deploy.lionpower.app/#approval/<id>`. The next click
+  opens the list instead. A notification about a single approval opens its page too. The URL is
+  read from the latest poll at the moment of the click, never from when the row was drawn: an
+  approval's link becomes the request's deep link a moment after it is first listed.
 - **The list** has one row per need, blocking ones first: what kind it is, the title, `repo/run` and
-  how long it has been waiting, then **Open** (the page it names), **Copy** (the command it names) and
-  **Done**. Done tells the orchestrator, which checks the work and closes it; until then the row says
+  how long it has been waiting, then **Open** (the page it names) — **Approve →** for an approval,
+  whose whole row opens the page too — **Copy** (the command it names) and **Done**. Done tells the orchestrator, which checks the work and closes it; until then the row says
   *Done, waiting for the orchestrator to confirm*.
 - **An indicator** while anything is outstanding, gone when nothing is. On a screen with room, a
   button in the Windows taskbar badged with the count, which flashes when something new arrives and

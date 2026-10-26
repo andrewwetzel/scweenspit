@@ -401,7 +401,9 @@ internal static class OrchestraStrip
                     .Append($"{OrchestraUsage.NeedKindLabel(item.Need.Kind)}: {item.Need.Title}");
                 if (item.Done) text.Append(" (done, confirming)");
             }
-            text.AppendLine().AppendLine().Append("Click to open the list; right-click for orchestrator settings.");
+            text.AppendLine().AppendLine().Append(OrchestraUsage.Current?.Outstanding == 1
+                ? "Click to go straight to it; right-click for the list."
+                : "Click or right-click for the list.");
         }
         else
         {

@@ -157,8 +157,11 @@ public sealed class TaskbarWindow : Form
     /// <summary>Raised when a strip on the bar wants the settings window opened to a specific page.</summary>
     public event Action<string>? SettingsRequested;
 
-    /// <summary>Raised when the orchestrator strip is clicked while something needs you, with where it was clicked.</summary>
-    public event Action<Point>? NeedsRequested;
+    /// <summary>
+    /// Raised when the orchestrator strip is clicked while something needs you, with where it was
+    /// clicked and whether it was the list that was asked for (right-click) rather than the need.
+    /// </summary>
+    public event Action<Point, bool>? NeedsRequested;
 
     /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
     public event Action? PinsChanged;
@@ -1645,10 +1648,9 @@ public sealed class TaskbarWindow : Form
                 break;
 
             case TrackerSection.Orchestra:
-                if (e.Button == MouseButtons.Left && NeedsRequested is not null
-                    && OrchestraUsage.Current is { Needs.Count: > 0 })
+                if (NeedsRequested is not null && OrchestraUsage.Current is { Needs.Count: > 0 })
                 {
-                    NeedsRequested(Cursor.Position);
+                    NeedsRequested(Cursor.Position, e.Button == MouseButtons.Right);
                     break;
                 }
                 OpenSettingsOrMenu("Orchestrator");
