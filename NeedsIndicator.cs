@@ -139,13 +139,12 @@ public sealed class NeedsIndicator : IDisposable
     }
 
     /// <summary>
-    /// A need's own card was clicked: its page when that is where it gets dealt with, otherwise
-    /// the list — which is also what a right-click always opens.
+    /// A need's own card was clicked: a small popup with just that need and what can be done
+    /// about it. A right-click opens the whole list.
     /// </summary>
     public void ActOn(OrchestraNeedItem item, Point near, bool list)
     {
-        if (!list && item.Waiting && NeedActions.GoesToPage(item.Need) && NeedActions.OpenLatest(item)) return;
-        OpenPanel(near);
+        PanelFor(inTaskbar: mode == Mode.Taskbar).Open(near, list ? null : NeedActions.Key(item));
     }
 
     /// <summary>Something new arrived: draw the eye to wherever the indicator is.</summary>
@@ -315,6 +314,7 @@ internal sealed class NeedsPanel : Form
 
     private readonly FlowLayoutPanel list;
     private readonly Label header;
+    private readonly LinkLabel showAll;
     private readonly System.Windows.Forms.Timer ages = new() { Interval = 30_000 };
     private readonly List<(Label Label, OrchestraNeedItem Item)> ageLabels = [];
     private readonly HashSet<string> sending = new(StringComparer.Ordinal);
@@ -370,10 +370,18 @@ internal sealed class NeedsPanel : Form
             LinkBehavior = LinkBehavior.HoverUnderline,
         };
         settingsLink.LinkClicked += (_, _) => { Stow(); SettingsRequested?.Invoke(); };
+        showAll = new LinkLabel
+        {
+            Dock = DockStyle.Bottom, TextAlign = ContentAlignment.MiddleLeft, Visible = false,
+            LinkColor = Theme.Accent, ActiveLinkColor = Theme.Text, BackColor = Theme.Window,
+            LinkBehavior = LinkBehavior.HoverUnderline, Padding = new Padding(12, 0, 0, 0),
+        };
+        showAll.LinkClicked += (_, _) => { only = null; Refill(force: true); Place(Location + new Size(Width / 2, Height)); };
 
         Controls.Add(list);
         Controls.Add(header);
         Controls.Add(settingsLink);
+        Controls.Add(showAll);
 
         HandleCreated += (_, _) => Theme.DarkTitleBar(Handle);
         Activated += (_, _) => ages.Start();
@@ -399,9 +407,16 @@ internal sealed class NeedsPanel : Form
 
     // ---- showing and hiding ---------------------------------------------------
 
-    /// <summary>Brings the list up near <paramref name="near"/> and gives it the keyboard.</summary>
-    public void Open(Point? near)
+    /// <summary>When set, the one need the popup shows; the rest are a link away.</summary>
+    private string? only;
+
+    /// <summary>
+    /// Brings the list up near <paramref name="near"/> and gives it the keyboard — just the need
+    /// keyed <paramref name="onlyKey"/> when one is given.
+    /// </summary>
+    public void Open(Point? near, string? onlyKey = null)
     {
+        only = onlyKey;
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Refill(force: true);
         Place(near);
@@ -438,6 +453,7 @@ internal sealed class NeedsPanel : Form
     {
         if (holdOpen) return;
         ages.Stop();
+        only = null;
         if (!Visible || WindowState == FormWindowState.Minimized) return;
         if (InTaskbar && (OrchestraUsage.Current?.Outstanding ?? 0) > 0)
             WindowState = FormWindowState.Minimized;
@@ -479,7 +495,7 @@ internal sealed class NeedsPanel : Form
         int margin = S(10);
 
         int height = Math.Min(PreferredHeight(), (int)(work.Height * 0.7));
-        Size = new Size(S(460), Math.Max(S(180), height));
+        Size = new Size(S(460), Math.Max(S(only is null ? 180 : 120), height));
 
         int x = Math.Clamp(anchor.X - Width / 2, work.Left + margin, Math.Max(work.Left + margin, work.Right - Width - margin));
         int y = anchor.Y > work.Top + work.Height / 2 ? anchor.Y - Height - margin : anchor.Y + margin;
@@ -498,7 +514,7 @@ internal sealed class NeedsPanel : Form
     {
         int rows = list.Controls.Cast<Control>().Sum(c => c.Height + c.Margin.Vertical);
         int chrome = Height - ClientSize.Height;
-        return rows + header.Height + S(26) + list.Padding.Vertical + chrome + S(8);
+        return rows + header.Height + S(26) + (showAll.Visible ? showAll.Height : 0) + list.Padding.Vertical + chrome + S(8);
     }
 
     // ---- the taskbar button -----------------------------------------------------
@@ -595,8 +611,13 @@ internal sealed class NeedsPanel : Form
     public void Refill(bool force = false)
     {
         if (IsDisposed) return;
-        var items = OrchestraUsage.Current?.Needs ?? [];
-        string key = string.Join("|", items.Select(i => $"{Key(i)}:{i.Done}:{i.Feed.Stale}:{i.Need.GetHashCode()}"))
+        var all = OrchestraUsage.Current?.Needs ?? [];
+        // One need, when that is what was clicked and it is still listed.
+        var items = only is { } one && all.Any(i => Key(i) == one) ? all.Where(i => Key(i) == one).ToList() : all;
+        bool single = items.Count == 1 && all.Count > 1 && only is not null;
+        showAll.Visible = single;
+        showAll.Text = $"All {all.Count} waiting…";
+        string key = (single ? "1:" : "") + string.Join("|", items.Select(i => $"{Key(i)}:{i.Done}:{i.Feed.Stale}:{i.Need.GetHashCode()}"))
                      + $"#{string.Join(",", sending)}#{string.Join(",", failed.Select(f => f.Key + f.Value))}#{DeviceDpi}";
         if (!force && key == shownKey) return;
         shownKey = key;
@@ -605,7 +626,9 @@ internal sealed class NeedsPanel : Form
         header.Height = S(36);
         header.Padding = new Padding(S(12), 0, S(12), 0);
         int open = items.Count(i => i.Waiting);
-        header.Text = items.Count == 0 ? "Nothing needs you" : open == 0 ? "Done — waiting for the orchestrator" : $"{open} need{(open == 1 ? "s" : "")} you";
+        header.Text = only is not null && items.Count == 1
+            ? $"{OrchestraUsage.NeedKindLabel(items[0].Need.Kind)}{(items[0].Need.Blocking ? " — blocking" : "")}"
+            : items.Count == 0 ? "Nothing needs you" : open == 0 ? "Done — waiting for the orchestrator" : $"{open} need{(open == 1 ? "s" : "")} you";
         list.Padding = new Padding(S(10), S(2), S(10), S(6));
 
         list.SuspendLayout();
@@ -629,7 +652,7 @@ internal sealed class NeedsPanel : Form
             // Grow or shrink with the list, keeping the edge nearest the taskbar where it was.
             var work = Screen.FromControl(this).WorkingArea;
             int bottom = Bottom;
-            int height = Math.Max(S(180), Math.Min(PreferredHeight(), (int)(work.Height * 0.7)));
+            int height = Math.Max(S(only is null ? 180 : 120), Math.Min(PreferredHeight(), (int)(work.Height * 0.7)));
             bool anchoredLow = Top + Height / 2 > work.Top + work.Height / 2;
             Height = height;
             if (anchoredLow) Top = Math.Max(work.Top + S(10), bottom - height);

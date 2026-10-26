@@ -538,7 +538,10 @@ public sealed class TaskbarWindow : Form
         if (AntigravityChatsVisible && settings.AntigravityChatsWidth is > 0 and var acw)
             ac = Math.Clamp(acw, MinTrackerExtent, MaxTrackerExtent);
         if (OrchestraVisible && settings.OrchestraWidth is > 0 and var ow)
-            o = Math.Clamp(ow, MinTrackerExtent, MaxTrackerExtent);
+            // A width dragged by hand still makes room for the need cards: they must never be
+            // squeezed over whatever sits next to the strip.
+            o = Math.Max(Math.Clamp(ow, MinTrackerExtent, MaxTrackerExtent),
+                         OrchestraUsage.Current is { Needs.Count: > 0 } ? o : 0);
         if (BambuVisible && UsageStrip.HasActiveBambuPrinters && settings.BambuWidth is > 0 and var bw)
             b = Math.Clamp(bw, MinTrackerExtent, MaxTrackerExtent);
         if (MachineVisible && settings.MachineWidth is > 0 and var mw)
