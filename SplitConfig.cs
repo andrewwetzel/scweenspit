@@ -471,6 +471,9 @@ public sealed class OrchestraSettings
 
     /// <summary>Seconds between polls of a feed that is answering.</summary>
     public int RefreshSeconds { get; set; } = 5;
+
+    /// <summary>Show the elapsed running time next to each repo on the bar.</summary>
+    public bool ShowTimer { get; set; }
 }
 
 public sealed class MonitorLayout
@@ -495,7 +498,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 8;
+    public const int CurrentVersion = 9;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -859,6 +862,10 @@ public sealed class SplitConfig
             {
                 bar.UsageWidth = null;
             }
+            if (Version < 9)
+            {
+                bar.OrchestraWidth = null;
+            }
             bar.RemoteChatsWidth = bar.RemoteChatsWidth is > 0 and var rw ? Math.Clamp(rw, 44, 1200) : null;
             bar.AntigravityChatsWidth = bar.AntigravityChatsWidth is > 0 and var acw ? Math.Clamp(acw, 44, 1200) : null;
             bar.UsageWidth = bar.UsageWidth is > 0 and var uw ? Math.Clamp(uw, 44, 1200) : null;
@@ -1017,6 +1024,7 @@ public sealed class SplitConfig
         Antigravity = o.Antigravity;
         Bambu = o.Bambu;
         RemoteChats = o.RemoteChats;
+        Orchestra = o.Orchestra;
     }
 
     /// <summary>

@@ -119,6 +119,8 @@ public static class OrchestraUsage
 
     public static bool Enabled { get; private set; }
 
+    public static bool ShowTimer { get; private set; }
+
     /// <summary>Glow intensity after any feed goes from no child waiting to at least one.</summary>
     public static float AttentionGlowIntensity => RemoteChatUsage.GlowIntensityFromTick(Interlocked.Read(ref glowStartTick));
 
@@ -129,8 +131,10 @@ public static class OrchestraUsage
     {
         lock (gate)
         {
+            bool timerChanged = ShowTimer != config.ShowTimer;
             settings = config;
             Enabled = config.Enabled;
+            ShowTimer = config.ShowTimer;
 
             if (!config.Enabled)
             {
@@ -154,6 +158,7 @@ public static class OrchestraUsage
             foreach (var gone in byUrl.Keys.Where(u => !urls.Contains(u)).ToList()) byUrl.Remove(gone);
             foreach (var gone in nextAttemptTick.Keys.Where(u => !urls.Contains(u)).ToList()) nextAttemptTick.Remove(gone);
             RebuildLocked();
+            if (timerChanged) FireChanged();
 
             if (life is not null && !listChanged) return;
 

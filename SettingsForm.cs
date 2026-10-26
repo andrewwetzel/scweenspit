@@ -2356,6 +2356,15 @@ public sealed class SettingsForm : Form
             return;
         }
 
+        var showTimer = Theme.Toggle("Show elapsed running time on the bar", orchestra.ShowTimer);
+        showTimer.CheckedChanged += (_, _) =>
+        {
+            orchestra.ShowTimer = showTimer.Checked;
+            Save();
+            OrchestraUsage.Configure(orchestra);
+        };
+        page.Controls.Add(showTimer);
+
         page.Controls.Add(Theme.Caption(
             "The strip appears on the bar only once a feed answers, so a machine that cannot reach " +
             "the orchestrator shows nothing. A feed that has never answered is asked every 30 seconds; " +

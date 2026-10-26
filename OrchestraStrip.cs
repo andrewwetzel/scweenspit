@@ -36,7 +36,7 @@ internal static class OrchestraStrip
     // or the timer growing a digit. UI thread only, like every caller.
     private static readonly Bitmap measureSurface = new(1, 1);
     private static readonly Graphics measure = Graphics.FromImage(measureSurface);
-    private static (OrchestraReading? Reading, bool Vertical, int Rows, int Breadth, int Scale, string Timers, int Extent)? lastExtent;
+    private static (OrchestraReading? Reading, bool Vertical, int Rows, int Breadth, int Scale, bool ShowTimer, string Timers, int Extent)? lastExtent;
 
     /// <summary>Room the strip needs along the bar, sized to what it currently has to say.</summary>
     public static int Extent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
@@ -45,25 +45,26 @@ internal static class OrchestraStrip
         var feeds = reading?.Shown ?? [];
         long now = Environment.TickCount64;
         var chunks = OrchestraUsage.Chunks(feeds, now);
-        if (vertical) return Math.Clamp(Math.Max(1, chunks.Count) * 42 + 8, 44, 260);
+        bool showTimer = OrchestraUsage.ShowTimer;
+        if (vertical) return Math.Clamp(Math.Max(1, chunks.Count) * (showTimer ? 42 : 32) + 8, 44, 260);
 
         double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
         if (chunks.Count == 0)
             return (int)Math.Round(72 * Math.Clamp(barBreadth / 50.0, 0.9, 1.85) * uScale);
 
-        string timers = string.Join("|", chunks.Select(c => Digitless(TimerText(c))));
+        string timers = showTimer ? string.Join("|", chunks.Select(c => Digitless(TimerText(c)))) : "";
 
         if (lastExtent is { } last && ReferenceEquals(last.Reading, reading) && last.Vertical == vertical
             && last.Rows == maxRowsPerColumn && last.Breadth == barBreadth && last.Scale == scalePercent
-            && last.Timers == timers)
+            && last.ShowTimer == showTimer && last.Timers == timers)
             return last.Extent;
 
-        int natural = Layout(measure, new Rectangle(0, 0, 4000, Math.Max(24, barBreadth)), chunks, maxRowsPerColumn, draw: false);
+        int natural = Layout(measure, new Rectangle(0, 0, 4000, Math.Max(24, barBreadth)), chunks, maxRowsPerColumn, showTimer, draw: false);
 
         // Scaled like the other strips, but never below what the words need: a timer cut off
         // mid-digit is worse than a strip a few pixels wider than its neighbours.
         int extent = (int)Math.Ceiling(natural * Math.Max(1.0, uScale));
-        lastExtent = (reading, vertical, maxRowsPerColumn, barBreadth, scalePercent, timers, extent);
+        lastExtent = (reading, vertical, maxRowsPerColumn, barBreadth, scalePercent, showTimer, timers, extent);
         return extent;
     }
 
@@ -78,18 +79,19 @@ internal static class OrchestraStrip
         float glow = OrchestraUsage.AttentionGlowIntensity;
         if (glow > 0.01f) UsageStrip.PaintRemoteChatsAttentionGlow(g, area, glow);
 
+        bool showTimer = OrchestraUsage.ShowTimer;
         if (area.Height > area.Width)
-            PaintVertical(g, area, chunks);
+            PaintVertical(g, area, chunks, showTimer);
         else
-            Layout(g, area, chunks, maxRowsPerColumn, draw: true);
+            Layout(g, area, chunks, maxRowsPerColumn, showTimer, draw: true);
     }
 
     /// <summary>
     /// Measures, and optionally draws, the horizontal strip; returns the width it wants. One chunk
-    /// with room to spare gets two rows — repo and timer above, child counts below. More chunks, or
-    /// a thin bar, get one row each, wrapping into columns past the row limit.
+    /// with room to spare gets two rows — repo (and optional timer) above, child counts below. More
+    /// chunks, or a thin bar, get one row each, wrapping into columns past the row limit.
     /// </summary>
-    private static int Layout(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks, int maxRowsPerColumn, bool draw)
+    private static int Layout(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks, int maxRowsPerColumn, bool showTimer, bool draw)
     {
         int n = chunks.Count;
         int maxRows = Math.Clamp(maxRowsPerColumn, 1, 6);
@@ -134,7 +136,8 @@ internal static class OrchestraStrip
             return w;
         }
 
-        float HeadWidth(OrchestraChunk c) => diamond + Measure(c.Title, titleFont) + gap + TimerWidth(TimerText(c));
+        float HeadWidth(OrchestraChunk c) => diamond + Measure(c.Title, titleFont)
+            + (showTimer ? gap + TimerWidth(TimerText(c)) : 0f);
 
         float ChunkWidth(OrchestraChunk c) => twoRow
             ? Math.Max(HeadWidth(c), CountsWidth(c))
@@ -187,17 +190,23 @@ internal static class OrchestraStrip
                     g.DrawString(chunk.Title, titleFont, title, new RectangleF(head.X + diamond, head.Y, head.Width, head.Height), format);
                 }
 
-                // Timer: right-aligned in two-row mode, straight after the title otherwise.
-                string timer = TimerText(chunk);
-                float timerX = twoRow
-                    ? head.Right - TimerWidth(timer)
-                    : head.X + diamond + Measure(chunk.Title, titleFont) + gap;
-                using (var timerBrush = new SolidBrush(Dim(chunk.Active ? Theme.Text : Theme.Muted, dim)))
-                    g.DrawString(timer, figureFont, timerBrush, new RectangleF(timerX, head.Y, head.Right - timerX + 40, head.Height), format);
+                float afterHeadX = head.X + diamond + Measure(chunk.Title, titleFont);
+                if (showTimer)
+                {
+                    // Timer: right-aligned in two-row mode, straight after the title otherwise.
+                    string timer = TimerText(chunk);
+                    float timerW = TimerWidth(timer);
+                    float timerX = twoRow
+                        ? head.Right - timerW
+                        : afterHeadX + gap;
+                    using (var timerBrush = new SolidBrush(Dim(chunk.Active ? Theme.Text : Theme.Muted, dim)))
+                        g.DrawString(timer, figureFont, timerBrush, new RectangleF(timerX, head.Y, head.Right - timerX + 40, head.Height), format);
+                    afterHeadX = timerX + timerW;
+                }
 
                 if (!chunk.Active) continue;
 
-                float countX = twoRow ? head.X : Math.Max(timerX + TimerWidth(timer) + gap, head.Right - CountsWidth(chunk));
+                float countX = twoRow ? head.X : Math.Max(afterHeadX + gap, head.Right - CountsWidth(chunk));
                 int countY = twoRow ? headY + rowH : headY;
                 foreach (var kind in chunk.Children)
                 {
@@ -228,12 +237,13 @@ internal static class OrchestraStrip
     }
 
     /// <summary>
-    /// A vertical bar is about 50 pixels across, so each chunk stacks: repo, timer, then the
-    /// counts side by side in their colours.
+    /// A vertical bar is about 50 pixels across, so each chunk stacks: repo, optional timer, then
+    /// the counts side by side in their colours.
     /// </summary>
-    private static void PaintVertical(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks)
+    private static void PaintVertical(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks, bool showTimer)
     {
-        int blockH = Math.Max(30, (area.Height - 8) / chunks.Count);
+        int minBlockH = showTimer ? 30 : 22;
+        int blockH = Math.Max(minBlockH, (area.Height - 8) / chunks.Count);
         using Font titleFont = Theme.Face(6.8f, FontStyle.Bold);
         using Font timerFont = Theme.Face(7.4f, FontStyle.Bold);
         using Font countFont = Theme.Face(7f, FontStyle.Bold);
@@ -256,17 +266,22 @@ internal static class OrchestraStrip
             var chunk = chunks[i];
             bool dim = chunk.Stale;
             int y = area.Y + 4 + i * blockH;
-            int lineH = blockH / 3;
+            int lineH = blockH / (showTimer ? 3 : 2);
             var titleRow = new Rectangle(area.X, y, area.Width, lineH);
-            var timerRow = new Rectangle(area.X, y + lineH, area.Width, lineH);
-            var countRow = new Rectangle(area.X, y + 2 * lineH, area.Width, blockH - 2 * lineH);
+            var countRow = showTimer
+                ? new Rectangle(area.X, y + 2 * lineH, area.Width, blockH - 2 * lineH)
+                : new Rectangle(area.X, y + lineH, area.Width, blockH - lineH);
 
             using (var title = new SolidBrush(Dim(TitleColour, dim)))
                 g.DrawString(chunk.Title, titleFont, title, titleRow, centred);
 
-            string timer = !chunk.Active ? "idle" : chunk.Elapsed is { } t ? OrchestraUsage.FormatElapsedShort(t) : "—";
-            using (var brush = new SolidBrush(Dim(chunk.Active ? Theme.Text : Theme.Muted, dim)))
-                g.DrawString(timer, timerFont, brush, timerRow, centred);
+            if (showTimer)
+            {
+                var timerRow = new Rectangle(area.X, y + lineH, area.Width, lineH);
+                string timer = !chunk.Active ? "idle" : chunk.Elapsed is { } t ? OrchestraUsage.FormatElapsedShort(t) : "—";
+                using (var brush = new SolidBrush(Dim(chunk.Active ? Theme.Text : Theme.Muted, dim)))
+                    g.DrawString(timer, timerFont, brush, timerRow, centred);
+            }
 
             var shown = chunk.Active ? chunk.Children.Where(c => c.Total > 0).ToList() : [];
             if (shown.Count == 0) continue;
