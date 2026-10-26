@@ -577,12 +577,15 @@ Niccolò Sabato, under the MIT licence — see [Third-party code](#third-party-c
 ### Orchestrator status in the bar
 
 An orchestrator that runs child sessions on a server can publish a tiny read-only feed, and the bar
-shows it as one strip per orchestrator: **how long it has been running, and how many children of
-each kind it has** — `◆ Orch 3:12:05  ● Claude 3  ● agy 1`. The timer ticks on the bar's own clock
-between polls. A child kind with something waiting on you gets an amber ring and count, and the
-strip pulses the same way the remote chat strip does when that count goes from none to some.
-Hovering lists every run with its repo, base branch and per-kind breakdown; clicking opens
-**Settings ▸ Orchestrator**.
+shows it as **one chunk per repo it is working in: the first letters of the repo, how long it has
+been at it there, and how many children of each kind** — `◆ mono 3:12:05  ● 3  ● 1`. The counts
+carry no names; each is drawn in its service's colour, Claude's blue and Antigravity's violet, the
+same as the usage strips beside it. A feed that does not say which repos its runs are in gets one
+chunk for the whole orchestrator, titled `Orch` (or the server's short name when there are several
+feeds). The timer ticks on the bar's own clock between polls. A child kind with something waiting
+on you gets an amber ring, and the strip pulses the same way the remote chat strip does when that
+count goes from none to some. Hovering lists every run with its repo, base branch and per-kind
+breakdown; clicking opens **Settings ▸ Orchestrator**.
 
 Feeds are listed under **Orchestrator**, one URL per line; the default is
 `http://100.126.10.4:8787/orchestra.json` (lp-server-vm on the tailnet). Nothing is drawn until a
@@ -616,8 +619,11 @@ The feed is `GET` → `application/json`:
   then; when it is missing on an active feed, the earliest run's start is used.
 - The elapsed time is `generated_at − started_at` on the server's clock plus the time since the
   answer arrived on ours, so the two machines' clocks need not agree.
+- Each run's `repo` decides its chunk (`owner/name.git` reads as `name`, cut to four letters); runs
+  in the same repo are added together, timed from the earliest of them.
 - `children` keys are open-ended. `claude`, `agy` and `agy-ide` are drawn first, in that order,
-  with their own colours; any other key is drawn after them under its own name.
+  with their own colours; any other key is drawn after them in a neutral one, and named in the
+  tooltip.
 - Unknown fields are ignored and missing counts are zero: changes within schema 1 must be additive.
   A feed reporting any other `schema` is refused rather than misread.
 

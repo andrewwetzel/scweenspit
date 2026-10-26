@@ -61,6 +61,13 @@ public sealed record OrchestraFeed(
     }
 }
 
+/// <summary>
+/// What one piece of the strip stands for: the runs of one orchestrator in one repo, or the
+/// orchestrator as a whole when its feed does not say which repos its runs are in.
+/// </summary>
+public sealed record OrchestraChunk(string Title, bool Active, TimeSpan? Elapsed,
+                                    IReadOnlyList<OrchestraToolCount> Children, bool Stale);
+
 /// <summary>Every configured feed, in the order Settings lists them.</summary>
 public sealed record OrchestraReading(IReadOnlyList<OrchestraFeed> Feeds)
 {
@@ -456,8 +463,17 @@ public static class OrchestraUsage
             });
         }
 
-        return list.OrderBy(c => KindOrder(c.Tool)).ThenBy(c => c.Tool, StringComparer.OrdinalIgnoreCase).ToList();
+        return Ordered(list);
     }
+
+    private static List<OrchestraToolCount> Ordered(IEnumerable<OrchestraToolCount> counts) =>
+        counts.OrderBy(c => KindOrder(c.Tool)).ThenBy(c => c.Tool, StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>Several runs' counts added up per kind, in the same fixed order as a feed's own.</summary>
+    public static IReadOnlyList<OrchestraToolCount> Sum(IEnumerable<OrchestraToolCount> counts) =>
+        Ordered(counts.GroupBy(c => c.Tool, StringComparer.OrdinalIgnoreCase)
+                      .Select(g => new OrchestraToolCount(g.First().Tool, g.Sum(c => c.Running),
+                                                          g.Sum(c => c.Waiting), g.Sum(c => c.Idle))));
 
     private static int KindOrder(string tool) => tool.ToLowerInvariant() switch
     {
@@ -476,15 +492,6 @@ public static class OrchestraUsage
         _ => tool,
     };
 
-    /// <summary>The same, for a bar too narrow for the word.</summary>
-    public static string KindShortLabel(string tool) => tool.ToLowerInvariant() switch
-    {
-        "claude" => "Cl",
-        "agy" => "ag",
-        "agy-ide" => "IDE",
-        _ => tool.Length > 3 ? tool[..3] : tool,
-    };
-
     private static int Int(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n)
             ? Math.Max(0, n) : 0;
@@ -499,6 +506,52 @@ public static class OrchestraUsage
 
     private static string HostOf(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
+
+    public static List<OrchestraChunk> Chunks(IReadOnlyList<OrchestraFeed> feeds, long now)
+    {
+        var chunks = new List<OrchestraChunk>();
+        foreach (var f in feeds)
+        {
+            // With one orchestrator "Orch" says enough; with several, the server says which.
+            string whole = feeds.Count > 1 ? RemoteServerRowConfig.ShortServerName(f.Server) : "Orch";
+
+            var inRepos = f.Active ? f.Runs.Where(r => !string.IsNullOrWhiteSpace(r.Repo)).ToList() : [];
+            if (inRepos.Count == 0)
+            {
+                chunks.Add(new OrchestraChunk(whole, f.Active, f.Elapsed(now), f.Children, f.Stale));
+                continue;
+            }
+
+            // In the order the feed lists them, the timer from the longest-running run in each.
+            foreach (var repo in inRepos.GroupBy(r => RepoName(r.Repo!), StringComparer.OrdinalIgnoreCase))
+                chunks.Add(new OrchestraChunk(RepoShort(repo.Key), true,
+                                     repo.Select(r => f.ElapsedFor(r, now)).Max() ?? f.Elapsed(now),
+                                     Sum(repo.SelectMany(r => r.Children)), f.Stale));
+
+            var elsewhere = f.Runs.Where(r => string.IsNullOrWhiteSpace(r.Repo)).ToList();
+            if (elsewhere.Any(r => r.Children.Any(c => c.Total > 0)))
+                chunks.Add(new OrchestraChunk(whole, true, elsewhere.Select(r => f.ElapsedFor(r, now)).Max() ?? f.Elapsed(now),
+                                     Sum(elsewhere.SelectMany(r => r.Children)), f.Stale));
+        }
+        return chunks;
+    }
+
+    /// <summary>"owner/monopoly.git" → "monopoly".</summary>
+    private static string RepoName(string repo)
+    {
+        var name = repo.Trim().TrimEnd('/', '\\');
+        int slash = name.LastIndexOfAny(['/', '\\', ':']);
+        if (slash >= 0) name = name[(slash + 1)..];
+        if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        return name.Length > 0 ? name : repo.Trim();
+    }
+
+    /// <summary>The first few letters of a repo's name: enough to tell "mono" from "scwe" at a glance.</summary>
+    public static string RepoShort(string repo)
+    {
+        var name = RepoName(repo);
+        return name.Length > 4 ? name[..4] : name;
+    }
 
     /// <summary>"12:05" under an hour, "3:12:05" under a day, "2d 03:12" beyond.</summary>
     public static string FormatElapsed(TimeSpan t)

@@ -14,8 +14,8 @@ namespace ScweenSpit;
 /// </summary>
 internal static class UsageStrip
 {
-    private static readonly Color ClaudeTitleColour = Color.FromArgb(130, 185, 250);
-    private static readonly Color AntigravityTitleColour = Color.FromArgb(196, 160, 255);
+    internal static readonly Color ClaudeTitleColour = Color.FromArgb(130, 185, 250);
+    internal static readonly Color AntigravityTitleColour = Color.FromArgb(196, 160, 255);
     private static readonly Color BambuTitleColour = Color.FromArgb(120, 232, 160);
     private static readonly Color RemoteChatsTitleColour = Color.FromArgb(145, 215, 255);
 
