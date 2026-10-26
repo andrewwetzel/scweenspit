@@ -36,7 +36,8 @@ internal static class OrchestraStrip
         var needs = reading?.Needs ?? [];
         if (needs.Count == 0) return null;
         int open = reading!.Outstanding, blocking = reading.OutstandingBlocking;
-        if (open == 0) return ($"✓ {needs.Count} confirming", Theme.Muted);
+        if (open == 0)
+            return needs.Any(i => !i.Done) ? ($"{needs.Count} unsure: feed quiet", Theme.Muted) : ($"✓ {needs.Count} confirming", Theme.Muted);
         return ($"{open} need{(open == 1 ? "s" : "")} you", blocking > 0 ? BlockingColour : NeedColour);
     }
 
@@ -74,7 +75,8 @@ internal static class OrchestraStrip
         if (chunks.Count == 0 && needs is null)
             return (int)Math.Round(72 * Math.Clamp(barBreadth / 50.0, 0.9, 1.85) * uScale);
 
-        string timers = showTimer ? string.Join("|", chunks.Select(c => Digitless(TimerText(c)))) : "";
+        // The Needs row's words change as a feed goes quiet, without the reading itself changing.
+        string timers = (showTimer ? string.Join("|", chunks.Select(c => Digitless(TimerText(c)))) : "") + "#" + needs?.Text;
 
         if (lastExtent is { } last && ReferenceEquals(last.Reading, reading) && last.Vertical == vertical
             && last.Rows == maxRowsPerColumn && last.Breadth == barBreadth && last.Scale == scalePercent

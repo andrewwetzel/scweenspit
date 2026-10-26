@@ -70,6 +70,13 @@ public sealed record OrchestraNeedItem(OrchestraFeed Feed, OrchestraNeed Need)
     /// <summary>The feed's own mark, or ours from the moment Done was pressed until the feed agrees.</summary>
     public bool Done => Need.DoneAt is not null || OrchestraUsage.IsMarkedDone(Feed.Url, Need.Id);
 
+    /// <summary>
+    /// Still waiting on a person, as far as anyone can tell: not done, and listed by a feed that is
+    /// still answering. A feed that has gone quiet keeps its last list, and a need dealt with
+    /// meanwhile must not go on demanding attention from it.
+    /// </summary>
+    public bool Waiting => !Done && !Feed.Stale;
+
     /// <summary>How long it has been waiting, on the same clock as the orchestrator's timer.</summary>
     public TimeSpan? Age(long nowTick)
     {
@@ -147,9 +154,9 @@ public sealed record OrchestraReading(IReadOnlyList<OrchestraFeed> Feeds)
              .ToList();
 
     /// <summary>Needs still waiting on a person: listed, and Done not yet pressed.</summary>
-    public int Outstanding => Needs.Count(i => !i.Done);
+    public int Outstanding => Needs.Count(i => i.Waiting);
 
-    public int OutstandingBlocking => Needs.Count(i => !i.Done && i.Need.Blocking);
+    public int OutstandingBlocking => Needs.Count(i => i.Waiting && i.Need.Blocking);
 
     /// <summary>Whether the strip has anything to show: a run in flight, or something waiting on a person.</summary>
     public bool AnythingToShow => Feeds.Any(f => f.Answered && (f.Active || f.Needs.Count > 0));

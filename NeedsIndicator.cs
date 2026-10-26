@@ -126,7 +126,7 @@ public sealed class NeedsIndicator : IDisposable
     /// </summary>
     public bool Activate(Point? near)
     {
-        var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
+        var open = OrchestraUsage.Current?.Needs.Where(i => i.Waiting).ToList() ?? [];
         shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
         if (open.Count == 1 && NeedActions.GoesToPage(open[0].Need) && shortcutTaken.Add(NeedActions.Key(open[0])))
         {
@@ -155,7 +155,7 @@ public sealed class NeedsIndicator : IDisposable
         // Clicking the taskbar button: the page itself when there is exactly one, else the list.
         panel.Restoring += () =>
         {
-            var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
+            var open = OrchestraUsage.Current?.Needs.Where(i => i.Waiting).ToList() ?? [];
             shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
             if (open.Count != 1 || !NeedActions.GoesToPage(open[0].Need) || !shortcutTaken.Add(NeedActions.Key(open[0])))
                 return false;
@@ -586,7 +586,7 @@ internal sealed class NeedsPanel : Form
     {
         if (IsDisposed) return;
         var items = OrchestraUsage.Current?.Needs ?? [];
-        string key = string.Join("|", items.Select(i => $"{Key(i)}:{i.Done}:{i.Need.GetHashCode()}"))
+        string key = string.Join("|", items.Select(i => $"{Key(i)}:{i.Done}:{i.Feed.Stale}:{i.Need.GetHashCode()}"))
                      + $"#{string.Join(",", sending)}#{string.Join(",", failed.Select(f => f.Key + f.Value))}#{DeviceDpi}";
         if (!force && key == shownKey) return;
         shownKey = key;
@@ -594,7 +594,7 @@ internal sealed class NeedsPanel : Form
         header.Font = Px(15, FontStyle.Bold);
         header.Height = S(36);
         header.Padding = new Padding(S(12), 0, S(12), 0);
-        int open = items.Count(i => !i.Done);
+        int open = items.Count(i => i.Waiting);
         header.Text = items.Count == 0 ? "Nothing needs you" : open == 0 ? "Done — waiting for the orchestrator" : $"{open} need{(open == 1 ? "s" : "")} you";
         list.Padding = new Padding(S(10), S(2), S(10), S(6));
 
