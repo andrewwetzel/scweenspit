@@ -169,6 +169,8 @@ public static class RemoteChatUsage
     private static bool hasCompletedInitialSync;
     private const int AttentionGlowDurationMs = 2600;
     private static readonly TimeSpan PostTurnWaitingWindow = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan StripDoneWindow = TimeSpan.FromMinutes(15);
+    private static readonly HashSet<string> openedChatIds = new(StringComparer.Ordinal);
     private static int? lastSettledWaitingCount;
     private static int? lastClaudeWaitingCount;
     private static int? lastAgWaitingCount;
@@ -368,6 +370,12 @@ public static class RemoteChatUsage
     /// </summary>
     public static void OpenChat(RemoteChatItem chat)
     {
+        lock (gate)
+        {
+            if (openedChatIds.Add(chat.Id))
+                RebuildCurrentReadingLocked();
+        }
+
         if (chat.Service == RemoteChatService.Claude)
         {
             SystemStatus.Open(!string.IsNullOrWhiteSpace(chat.WebUrl) ? chat.WebUrl : ClaudeCodeWebUrl);
@@ -376,6 +384,49 @@ public static class RemoteChatUsage
 
         if (!TryRaiseAntigravityWindow())
             SystemStatus.Open(AntigravityWebUrl);
+    }
+
+    /// <summary>
+    /// True when <paramref name="chat"/> should appear as a live circle on the taskbar strip itself:
+    /// Waiting (!), Running (r), or a newly finished/unread Done (✓) chat within the ~15m strip window.
+    /// Older or already-opened Done chats move out of the strip and stay in the click menu.
+    /// </summary>
+    public static bool ShouldShowChatOnStrip(RemoteChatItem chat)
+    {
+        if (chat.State != RemoteChatState.Done)
+            return true;
+
+        if (!chat.Unread && chat.Service == RemoteChatService.Antigravity)
+            return false;
+
+        lock (gate)
+        {
+            if (openedChatIds.Contains(chat.Id))
+                return false;
+        }
+
+        var age = DateTimeOffset.UtcNow - chat.LastUpdated;
+        return age <= StripDoneWindow;
+    }
+
+    /// <summary>
+    /// Returns all chats for <paramref name="service"/> that should be drawn as circles in the usage
+    /// strip header, ordered by Waiting, then Running, then recent Done.
+    /// </summary>
+    public static List<RemoteChatItem> GetStripChatsForService(
+        RemoteChatService service,
+        RemoteChatsReading? reading = null)
+    {
+        var r = reading ?? current;
+        if (r is null || !enabled) return [];
+
+        return r.Rows
+            .Where(row => row.Service == service)
+            .SelectMany(row => row.Chats)
+            .Where(ShouldShowChatOnStrip)
+            .OrderBy(c => c.State)
+            .ThenByDescending(c => c.LastUpdated)
+            .ToList();
     }
 
     public static void OpenService(RemoteChatService service)
@@ -586,6 +637,11 @@ public static class RemoteChatUsage
             if (removed > 0) changed = true;
         }
 
+        int removedOrchRows = settings.Rows.RemoveAll(r =>
+            r.Server.Contains('/') ||
+            IsOrchestratorSessionTitle(r.Server));
+        if (removedOrchRows > 0) changed = true;
+
         // Order newly discovered buckets by server name, then Claude before Antigravity.
         var orderedBuckets = liveByRowId.Values
             .OrderBy(b => b.Server, StringComparer.OrdinalIgnoreCase)
@@ -773,7 +829,7 @@ public static class RemoteChatUsage
         bool NeedsAuth,
         string? Diagnostic = null);
 
-    private sealed record ClaudeEnvInfo(string Server, string? Repo, bool Online, bool Active);
+    private sealed record ClaudeEnvInfo(string Server, string? Repo, bool Online, bool Active, bool IsOrchestrator = false);
 
     private static PollServiceResult PollClaude(DateTimeOffset doneCutoff, bool forceFullSync = false)
     {
@@ -1045,6 +1101,10 @@ public static class RemoteChatUsage
                 }
 
                 var envName = Text(env, "name");
+                bool isOrchEnv = IsOrchestratorWorktreePath(directory)
+                              || IsOrchestratorSessionTitle(envName)
+                              || (!string.IsNullOrWhiteSpace(envName) && envName.TrimEnd().EndsWith("(agent)", StringComparison.OrdinalIgnoreCase));
+
                 if (string.IsNullOrWhiteSpace(machineName) && !string.IsNullOrWhiteSpace(envName))
                 {
                     var parts = envName.Split(':');
@@ -1056,8 +1116,9 @@ public static class RemoteChatUsage
 
                 string server = NormalizeServerName(machineName);
                 string? repo = ShortRepoName(directory) ?? ShortRepoName(NormalizeGitRepoSlug(gitRepoUrl));
-                var info = new ClaudeEnvInfo(server, repo, online, activeEnv);
+                var info = new ClaudeEnvInfo(server, repo, online, activeEnv, isOrchEnv);
                 envById[envId] = info;
+                if (isOrchEnv) continue;
 
                 // Index by git repository slug ("owner/repo") and short folder name ("repo") so
                 // CLI sessions started with `remote-control-auto` (which omit `environment_id` in
@@ -1123,7 +1184,7 @@ public static class RemoteChatUsage
                 if (string.IsNullOrWhiteSpace(id)) continue;
 
                 var title = (Text(s, "title") ?? "").Trim();
-                if (IsInternalClaudeSessionTitle(title)) continue;
+                if (IsInternalClaudeSessionTitle(title) || IsOrchestratorSessionTitle(title)) continue;
                 if (string.IsNullOrWhiteSpace(title)) title = "Untitled session";
 
                 // Support both `/v1/code/sessions` (`status` + `worker_status` + `connection_status`)
@@ -1261,6 +1322,11 @@ public static class RemoteChatUsage
                 if (!isWaiting && !isRunning && !isDone) continue;
 
                 var envId = Text(s, "environment_id") ?? "";
+                if (!string.IsNullOrWhiteSpace(envId) && envById.TryGetValue(envId, out var preEnv) && preEnv.IsOrchestrator)
+                    continue;
+                if (IsClaudeSessionInOrchestratorWorktree(s))
+                    continue;
+
                 string? sessionRepoSlug = ExtractClaudeSessionRepoSlug(s);
                 string? sessionShortRepo = ShortRepoName(sessionRepoSlug);
 
@@ -1406,6 +1472,82 @@ public static class RemoteChatUsage
         title.Contains("__CBU_POOLED__", StringComparison.OrdinalIgnoreCase) ||
         title.Equals("__warming__", StringComparison.OrdinalIgnoreCase) ||
         title.StartsWith("ditto:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when a session or trajectory title belongs to an orchestrator child session
+    /// (e.g. "orch: run/task: title", "# orch: run/task", or "run/task: title" from orchestra.py).
+    /// </summary>
+    private static bool IsOrchestratorSessionTitle(string? rawTitle)
+    {
+        if (string.IsNullOrWhiteSpace(rawTitle)) return false;
+        var t = rawTitle.Trim();
+        while (t.StartsWith('#') || char.IsWhiteSpace(t.FirstOrDefault()))
+            t = t[1..].TrimStart();
+
+        if (t.StartsWith("orch:", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("(Orchestrated task.", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        int slash = t.IndexOf('/');
+        int colon = t.IndexOf(':');
+        if (slash > 0 && colon > slash + 1 && colon <= 56)
+        {
+            string runPart = t[..slash];
+            string taskPart = t[(slash + 1)..colon];
+            if (IsOrchestratorSlugToken(runPart) && IsOrchestratorSlugToken(taskPart))
+            {
+                if (OrchestraUsage.Current is { } orch &&
+                    orch.Feeds.SelectMany(f => f.Runs).Any(r =>
+                        string.Equals(r.Name, runPart, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+
+                // Also match standard orchestra.py "<run>/<task>: <title>" labels where either
+                // token contains a hyphen/digit or starts with "t" + digit.
+                if (runPart.Any(c => char.IsDigit(c) || c == '-') ||
+                    taskPart.Any(c => char.IsDigit(c) || c == '-'))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsOrchestratorSlugToken(string s)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length > 32) return false;
+        if (!char.IsLetterOrDigit(s[0])) return false;
+        foreach (char c in s)
+        {
+            if (!(char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.'))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsOrchestratorWorktreePath(string? pathOrUri) =>
+        !string.IsNullOrWhiteSpace(pathOrUri) && (
+            pathOrUri.Contains("/.local/worktrees/", StringComparison.OrdinalIgnoreCase) ||
+            pathOrUri.Contains("\\.local\\worktrees\\", StringComparison.OrdinalIgnoreCase) ||
+            pathOrUri.Contains("/orchestra-children/", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsClaudeSessionInOrchestratorWorktree(JsonElement session)
+    {
+        if (session.TryGetProperty("session_context", out var ctx) && ctx.ValueKind == JsonValueKind.Object)
+        {
+            if (IsOrchestratorWorktreePath(Text(ctx, "cwd")) || IsOrchestratorWorktreePath(Text(ctx, "directory")))
+                return true;
+        }
+        if (session.TryGetProperty("config", out var cfg) && cfg.ValueKind == JsonValueKind.Object)
+        {
+            if (IsOrchestratorWorktreePath(Text(cfg, "cwd")) || IsOrchestratorWorktreePath(Text(cfg, "directory")))
+                return true;
+        }
+        return false;
+    }
 
     private static string? ResolveClaudeOrgUuid(string? oauthToken)
     {
@@ -1969,6 +2111,13 @@ public static class RemoteChatUsage
     {
         if (t.ValueKind != JsonValueKind.Object) return null;
 
+        if (Bool(t, "isSubtrajectory") ||
+            !string.IsNullOrWhiteSpace(Text(t, "parentTrajectoryId")) ||
+            !string.IsNullOrWhiteSpace(Text(t, "parentCascadeId")))
+        {
+            return null;
+        }
+
         bool killed = Bool(t, "killed");
         bool archived = false;
         string? annTitle = null;
@@ -1979,9 +2128,15 @@ public static class RemoteChatUsage
             archived = Bool(ann, "archived");
             annTitle = Text(ann, "title");
             lastViewed = ParseIso(Text(ann, "lastUserViewTime"));
+            if (Bool(ann, "isSubtrajectory") || !string.IsNullOrWhiteSpace(Text(ann, "parentTrajectoryId")))
+                return null;
         }
 
-        string title = CleanTitle(annTitle ?? Text(t, "summary")) ?? "Untitled chat";
+        var rawSummary = Text(t, "summary");
+        if (IsOrchestratorSessionTitle(annTitle) || IsOrchestratorSessionTitle(rawSummary) || IsAntigravityOrchestratorWorktree(t))
+            return null;
+
+        string title = CleanTitle(annTitle ?? rawSummary) ?? "Untitled chat";
         var status = Text(t, "status") ?? "";
         bool notFullyIdle = Bool(t, "notFullyIdle");
         bool hasActiveChildren = Bool(t, "hasActiveChildren");
@@ -2054,6 +2209,23 @@ public static class RemoteChatUsage
             t.Unread,
             t.LastModified,
             AntigravityWebUrl);
+    }
+
+    private static bool IsAntigravityOrchestratorWorktree(JsonElement traj)
+    {
+        if (!traj.TryGetProperty("workspaces", out var ws) || ws.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var w in ws.EnumerateArray())
+        {
+            if (w.ValueKind != JsonValueKind.Object) continue;
+            if (IsOrchestratorWorktreePath(Text(w, "workspaceFolderAbsoluteUri")) ||
+                IsOrchestratorWorktreePath(Text(w, "gitRootAbsoluteUri")))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static string? ExtractAntigravityRepo(JsonElement traj)

@@ -204,6 +204,8 @@ public sealed class TaskbarWindow : Form
                 remoteGlowTimer.Stop();
                 return;
             }
+            if (UsageVisible && settings.ShowRemoteChats) Invalidate(UsageArea);
+            if (AntigravityVisible && settings.ShowRemoteChats) Invalidate(AntigravityArea);
             if (ClaudeChatsVisible) Invalidate(ClaudeChatsArea);
             if (AntigravityChatsVisible) Invalidate(AntigravityChatsArea);
             if (OrchestraVisible) Invalidate(OrchestraArea);
@@ -447,19 +449,19 @@ public sealed class TaskbarWindow : Form
     /// with no hint that anything further is needed. The strip renders its own unconfigured state.
     /// </summary>
     private bool UsageVisible => settings.ShowUsage;
-    private bool ClaudeChatsVisible => settings.ShowRemoteChats && RemoteChatUsage.ShouldShowServiceStrip(RemoteChatService.Claude);
+    private bool ClaudeChatsVisible => !UsageVisible && settings.ShowRemoteChats && RemoteChatUsage.ShouldShowServiceStrip(RemoteChatService.Claude);
     private bool AntigravityVisible => settings.ShowAntigravity;
-    private bool AntigravityChatsVisible => settings.ShowRemoteChats && RemoteChatUsage.ShouldShowServiceStrip(RemoteChatService.Antigravity);
-    private bool RemoteChatsVisible => ClaudeChatsVisible || AntigravityChatsVisible;
+    private bool AntigravityChatsVisible => !AntigravityVisible && settings.ShowRemoteChats && RemoteChatUsage.ShouldShowServiceStrip(RemoteChatService.Antigravity);
+    private bool RemoteChatsVisible => settings.ShowRemoteChats && (UsageVisible || AntigravityVisible || ClaudeChatsVisible || AntigravityChatsVisible);
     private bool BambuVisible => settings.ShowBambu;
     private bool MachineVisible => settings.ShowMachine;
 
     /// <summary>
-    /// Only once a feed has answered: a machine that cannot reach the orchestrator should not carry
-    /// an empty strip saying so. Unset means the primary display's bar only.
+    /// Shown only while an orchestrator feed has answered and has an active run in flight (0px when idle).
+    /// Unset means the primary display's bar only.
     /// </summary>
     private bool OrchestraVisible => (settings.ShowOrchestra ?? monitor.IsPrimary)
-                                     && OrchestraUsage.Current is { } o && o.Feeds.Any(f => f.Answered);
+                                     && OrchestraUsage.Current is { } o && o.Feeds.Any(f => f.Answered && f.Active);
 
     private (int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Orchestra, int Bambu, int Machine) DefaultTrackerExtents()
     {
@@ -523,7 +525,7 @@ public sealed class TaskbarWindow : Form
             ac = Math.Clamp(acw, MinTrackerExtent, MaxTrackerExtent);
         if (OrchestraVisible && settings.OrchestraWidth is > 0 and var ow)
             o = Math.Clamp(ow, MinTrackerExtent, MaxTrackerExtent);
-        if (BambuVisible && settings.BambuWidth is > 0 and var bw)
+        if (BambuVisible && UsageStrip.HasActiveBambuPrinters && settings.BambuWidth is > 0 and var bw)
             b = Math.Clamp(bw, MinTrackerExtent, MaxTrackerExtent);
         if (MachineVisible && settings.MachineWidth is > 0 and var mw)
             m = Math.Clamp(mw, MinTrackerExtent, MaxTrackerExtent);
@@ -1168,11 +1170,15 @@ public sealed class TaskbarWindow : Form
         bool claudeChats = ClaudeChatsVisible && ClaudeChatsArea.Contains(e.Location);
         bool antigravity = AntigravityVisible && AntigravityArea.Contains(e.Location);
         bool agChats = AntigravityChatsVisible && AntigravityChatsArea.Contains(e.Location);
-        RemoteChatItem? remoteChatCircle = claudeChats
-            ? UsageStrip.HitTestRemoteChat(ClaudeChatsArea, RemoteChatUsage.Current, e.Location, maxRows, RemoteChatService.Claude)
-            : agChats
-                ? UsageStrip.HitTestRemoteChat(AntigravityChatsArea, RemoteChatUsage.Current, e.Location, maxRows, RemoteChatService.Antigravity)
-                : null;
+        RemoteChatItem? remoteChatCircle = (usage && settings.ShowRemoteChats)
+            ? UsageStrip.HitTestHeaderChat(UsageArea, RemoteChatService.Claude, e.Location, maxRows)
+            : (antigravity && settings.ShowRemoteChats)
+                ? UsageStrip.HitTestHeaderChat(AntigravityArea, RemoteChatService.Antigravity, e.Location, maxRows)
+                : claudeChats
+                    ? UsageStrip.HitTestRemoteChat(ClaudeChatsArea, RemoteChatUsage.Current, e.Location, maxRows, RemoteChatService.Claude)
+                    : agChats
+                        ? UsageStrip.HitTestRemoteChat(AntigravityChatsArea, RemoteChatUsage.Current, e.Location, maxRows, RemoteChatService.Antigravity)
+                        : null;
         string? remoteChatCircleId = remoteChatCircle?.Id;
         bool orchestra = OrchestraVisible && OrchestraArea.Contains(e.Location);
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
@@ -1577,6 +1583,23 @@ public sealed class TaskbarWindow : Form
         switch (section)
         {
             case TrackerSection.Usage:
+                if (settings.ShowRemoteChats && RemoteChatUsage.Enabled)
+                {
+                    int maxR = Math.Clamp(settings.TrackerMaxRows, 1, 6);
+                    if (e.Button == MouseButtons.Left
+                        && UsageStrip.HitTestHeaderChat(UsageArea, RemoteChatService.Claude, e.Location, maxR) is { } clickedClaudeChat)
+                    {
+                        RemoteChatUsage.OpenChat(clickedClaudeChat);
+                        break;
+                    }
+                    if (e.Button == MouseButtons.Right
+                        || UsageStrip.IsPointInHeaderRow(UsageArea, RemoteChatService.Claude, e.Location, maxR)
+                        || RemoteChatUsage.GetStripChatsForService(RemoteChatService.Claude).Count > 0)
+                    {
+                        ShowRemoteChatsMenu(Cursor.Position, RemoteChatService.Claude);
+                        break;
+                    }
+                }
                 // Not set up yet (or expired): the useful destination is our own settings page, not the
                 // website that cannot tell ScweenSpit anything until a credential is in place.
                 if (ClaudeUsage.Enabled && ClaudeUsage.Current is not { NeedsKey: true })
@@ -1590,6 +1613,23 @@ public sealed class TaskbarWindow : Form
                 break;
 
             case TrackerSection.Antigravity:
+                if (settings.ShowRemoteChats && RemoteChatUsage.Enabled)
+                {
+                    int maxR = Math.Clamp(settings.TrackerMaxRows, 1, 6);
+                    if (e.Button == MouseButtons.Left
+                        && UsageStrip.HitTestHeaderChat(AntigravityArea, RemoteChatService.Antigravity, e.Location, maxR) is { } clickedAgChat)
+                    {
+                        RemoteChatUsage.OpenChat(clickedAgChat);
+                        break;
+                    }
+                    if (e.Button == MouseButtons.Right
+                        || UsageStrip.IsPointInHeaderRow(AntigravityArea, RemoteChatService.Antigravity, e.Location, maxR)
+                        || RemoteChatUsage.GetStripChatsForService(RemoteChatService.Antigravity).Count > 0)
+                    {
+                        ShowRemoteChatsMenu(Cursor.Position, RemoteChatService.Antigravity);
+                        break;
+                    }
+                }
                 OpenSettingsOrMenu("Antigravity usage");
                 break;
 
@@ -1735,8 +1775,22 @@ public sealed class TaskbarWindow : Form
         }
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Open Claude Code web (claude.ai/code)", null,
-            (_, _) => SystemStatus.Open(RemoteChatUsage.ClaudeCodeWebUrl)));
+        if (preferredService == RemoteChatService.Antigravity)
+        {
+            menu.Items.Add(new ToolStripMenuItem("Open Antigravity", null,
+                (_, _) => RemoteChatUsage.OpenService(RemoteChatService.Antigravity)));
+            menu.Items.Add(new ToolStripMenuItem("Antigravity usage settings…", null,
+                (_, _) => OpenSettingsOrMenu("Antigravity usage")));
+        }
+        else
+        {
+            menu.Items.Add(new ToolStripMenuItem("Open Claude Code web (claude.ai/code)", null,
+                (_, _) => SystemStatus.Open(RemoteChatUsage.ClaudeCodeWebUrl)));
+            menu.Items.Add(new ToolStripMenuItem("Open Claude usage (claude.ai)", null,
+                (_, _) => SystemStatus.Open(ClaudeUsage.UsagePage)));
+            menu.Items.Add(new ToolStripMenuItem("Claude usage settings…", null,
+                (_, _) => OpenSettingsOrMenu("Claude usage")));
+        }
         menu.Items.Add(new ToolStripMenuItem("Refresh remote chats now", null,
             (_, _) => RemoteChatUsage.Refresh()));
         menu.Items.Add(new ToolStripMenuItem("Remote chats settings…", null, (_, _) =>
@@ -1962,7 +2016,8 @@ public sealed class TaskbarWindow : Form
         {
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
-            UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows);
+            string? claudeHdrHover = hoveredUsage ? hoveredRemoteChatId : null;
+            UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows, settings.ShowRemoteChats, claudeHdrHover);
             DrawStripSeparator(strip, TrackerSection.Usage, innerAiPair: PairedWithPrevious(TrackerSection.Usage));
         }
 
@@ -1979,7 +2034,8 @@ public sealed class TaskbarWindow : Form
         {
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
-            UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows);
+            string? agHdrHover = hoveredAntigravity ? hoveredRemoteChatId : null;
+            UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows, settings.ShowRemoteChats, agHdrHover);
             DrawStripSeparator(strip, TrackerSection.Antigravity, innerAiPair: PairedWithPrevious(TrackerSection.Antigravity));
         }
 

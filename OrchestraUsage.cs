@@ -512,10 +512,12 @@ public static class OrchestraUsage
         var chunks = new List<OrchestraChunk>();
         foreach (var f in feeds)
         {
+            if (!f.Active) continue;
+
             // With one orchestrator "Orch" says enough; with several, the server says which.
             string whole = feeds.Count > 1 ? RemoteServerRowConfig.ShortServerName(f.Server) : "Orch";
 
-            var inRepos = f.Active ? f.Runs.Where(r => !string.IsNullOrWhiteSpace(r.Repo)).ToList() : [];
+            var inRepos = f.Runs.Where(r => !string.IsNullOrWhiteSpace(r.Repo)).ToList();
             if (inRepos.Count == 0)
             {
                 chunks.Add(new OrchestraChunk(whole, f.Active, f.Elapsed(now), f.Children, f.Stale));

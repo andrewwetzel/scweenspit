@@ -26,18 +26,43 @@ internal static class UsageStrip
         return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
-    /// <summary>Room the Antigravity strip needs along the bar.</summary>
+    /// <summary>Room the Antigravity strip needs along the bar (1 column: IDE 5h/7d row + CLI 5h/7d row).</summary>
     public static int AntigravityExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
     {
-        int count = AntigravityUsage.Current?.Limits.Count is > 0 and var c ? c : 4;
-        return MeterStrip.UsageExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+        int rowCount = GetAntigravityRowCount(AntigravityUsage.Current?.Limits);
+        return MeterStrip.UsageExtent(vertical, rowCount, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
-    /// <summary>Room the Bambu printer strip needs along the bar.</summary>
+    private static int GetAntigravityRowCount(IReadOnlyList<UsageLimit>? limits)
+    {
+        if (limits is null || limits.Count == 0) return 2;
+        bool hasIde = limits.Any(l => l.Label.StartsWith("IDE", StringComparison.OrdinalIgnoreCase));
+        bool hasCli = limits.Any(l => l.Label.StartsWith("CLI", StringComparison.OrdinalIgnoreCase));
+        if (hasIde || hasCli) return (hasIde ? 1 : 0) + (hasCli ? 1 : 0);
+        return Math.Min(2, limits.Count);
+    }
+
+    private static bool IsActiveBambuPrinter(BambuPrinterReading p) =>
+        p.State is BambuPrinterState.Printing or BambuPrinterState.Preparing
+                or BambuPrinterState.Paused or BambuPrinterState.Error;
+
+    public static bool HasActiveBambuPrinters =>
+        BambuUsage.Current?.Printers is { Count: > 0 } printers && printers.Any(IsActiveBambuPrinter);
+
+    /// <summary>Room the Bambu printer strip needs along the bar (compact when all idle; expanded for active printers).</summary>
     public static int BambuExtent(bool vertical, int maxRowsPerColumn = 3, int barBreadth = 50, int scalePercent = 100)
     {
-        int count = BambuUsage.Current?.Printers.Count is > 0 and var c ? c : BambuUsage.ConfiguredPrinterCount;
-        return MeterStrip.BambuExtent(vertical, count, maxRowsPerColumn, barBreadth, scalePercent);
+        var printers = BambuUsage.Current?.Printers;
+        int activeCount = printers is { Count: > 0 } ? printers.Count(IsActiveBambuPrinter) : 0;
+        if (activeCount == 0)
+        {
+            if (vertical) return 68;
+            double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
+            double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
+            return (int)Math.Round(96 * hScale * uScale);
+        }
+
+        return MeterStrip.BambuExtent(vertical, activeCount, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
     /// <summary>Room a remote server chats strip needs along the bar, sized tightly to the live chat count.</summary>
@@ -84,10 +109,23 @@ internal static class UsageStrip
         return (int)Math.Ceiling(intrinsicWidth * uScale);
     }
 
-    public static void Paint(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn = 3)
+    public static void Paint(
+        Graphics g,
+        Rectangle area,
+        UsageReading? reading,
+        int maxRowsPerColumn = 3,
+        bool showRemoteChats = false,
+        string? hoveredChatId = null)
     {
         var limits = reading?.Limits ?? [];
         if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: false); return; }
+
+        if (showRemoteChats && RemoteChatUsage.Enabled)
+        {
+            float glow = RemoteChatUsage.GetAttentionGlowIntensity(RemoteChatService.Claude);
+            if (glow > 0.01f)
+                PaintRemoteChatsAttentionGlow(g, area, glow);
+        }
 
         bool vertical = area.Height > area.Width;
         int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
@@ -104,7 +142,9 @@ internal static class UsageStrip
                  : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "Cl 7d"
                  : l.Label)
                 : useHeaderRow
-                    ? l.Label
+                    ? (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "5h"
+                     : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "7d"
+                     : l.Label)
                     : (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "Claude 5h"
                      : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "Claude 7d"
                      : l.Label);
@@ -123,26 +163,108 @@ internal static class UsageStrip
                 Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
         }
 
+        var stripChats = showRemoteChats && RemoteChatUsage.Enabled
+            ? RemoteChatUsage.GetStripChatsForService(RemoteChatService.Claude)
+            : [];
+        bool hasWaiting = stripChats.Any(c => c.State == RemoteChatState.Waiting);
+
         MeterStrip.Paint(
             g, area, meters,
             lowColour: MeterStrip.Low,
             headerTitle: useHeaderRow ? "Claude" : null,
             headerTag: null,
-            headerColour: ClaudeTitleColour,
+            headerColour: hasWaiting ? Color.FromArgb(255, 210, 115) : ClaudeTitleColour,
             sparkleGlyph: false,
-            maxRowsPerColumn: maxRowsPerColumn);
+            maxRowsPerColumn: maxRowsPerColumn,
+            paintHeaderRight: stripChats.Count > 0
+                ? (hg, rightBox, hdrScale) => PaintOrHitTestHeaderCapsule(hg, rightBox, stripChats, hoveredChatId, null, hdrScale, out _)
+                : null);
     }
 
-    public static void PaintAntigravity(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn = 3)
+    public static void PaintAntigravity(
+        Graphics g,
+        Rectangle area,
+        UsageReading? reading,
+        int maxRowsPerColumn = 3,
+        bool showRemoteChats = false,
+        string? hoveredChatId = null)
     {
         var limits = reading?.Limits ?? [];
         if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: true); return; }
 
+        if (showRemoteChats && RemoteChatUsage.Enabled)
+        {
+            float glow = RemoteChatUsage.GetAttentionGlowIntensity(RemoteChatService.Antigravity);
+            if (glow > 0.01f)
+                PaintRemoteChatsAttentionGlow(g, area, glow);
+        }
+
         bool vertical = area.Height > area.Width;
+        var meters = BuildAntigravityMeters(limits, vertical, maxRowsPerColumn, area.Height);
+
+        var stripChats = showRemoteChats && RemoteChatUsage.Enabled
+            ? RemoteChatUsage.GetStripChatsForService(RemoteChatService.Antigravity)
+            : [];
+        bool hasWaiting = stripChats.Any(c => c.State == RemoteChatState.Waiting);
+        string hdrTitle = GetAntigravityHeaderTitle(area.Width, stripChats.Count);
+
+        MeterStrip.Paint(
+            g, area, meters,
+            lowColour: MeterStrip.VioletLow,
+            headerTitle: hdrTitle,
+            headerTag: null,
+            headerColour: hasWaiting ? Color.FromArgb(255, 210, 115) : AntigravityTitleColour,
+            sparkleGlyph: true,
+            maxRowsPerColumn: maxRowsPerColumn,
+            paintHeaderRight: stripChats.Count > 0
+                ? (hg, rightBox, hdrScale) => PaintOrHitTestHeaderCapsule(hg, rightBox, stripChats, hoveredChatId, null, hdrScale, out _)
+                : null);
+    }
+
+    private static string GetAntigravityHeaderTitle(int stripWidth, int chatCount) =>
+        (chatCount >= 3 || (chatCount > 0 && stripWidth < 185)) ? "AG" : "Antigravity";
+
+    private static List<Meter> BuildAntigravityMeters(IReadOnlyList<UsageLimit> limits, bool vertical, int maxRowsPerColumn, int areaHeight)
+    {
+        var ide5h = limits.FirstOrDefault(l => l.Label.Equals("IDE 5h", StringComparison.OrdinalIgnoreCase));
+        var ide7d = limits.FirstOrDefault(l => l.Label.Equals("IDE 7d", StringComparison.OrdinalIgnoreCase));
+        var cli5h = limits.FirstOrDefault(l => l.Label.Equals("CLI 5h", StringComparison.OrdinalIgnoreCase));
+        var cli7d = limits.FirstOrDefault(l => l.Label.Equals("CLI 7d", StringComparison.OrdinalIgnoreCase));
+
+        if (ide5h is not null || ide7d is not null || cli5h is not null || cli7d is not null)
+        {
+            var paired = new List<Meter>(2);
+            if (ide5h is not null || ide7d is not null)
+            {
+                var p1 = ide5h ?? ide7d!;
+                var p2 = ide5h is not null ? ide7d : null;
+                paired.Add(new Meter(
+                    "IDE",
+                    p1.Percent,
+                    $"IDE: {p1.Percent}% 5h" + (p2 is not null ? $" · {p2.Percent}% 7d" : ""),
+                    FigureText: $"{p1.Percent}%",
+                    SecondPercent: p2?.Percent,
+                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null));
+            }
+            if (cli5h is not null || cli7d is not null)
+            {
+                var p1 = cli5h ?? cli7d!;
+                var p2 = cli5h is not null ? cli7d : null;
+                paired.Add(new Meter(
+                    "CLI",
+                    p1.Percent,
+                    $"CLI: {p1.Percent}% 5h" + (p2 is not null ? $" · {p2.Percent}% 7d" : ""),
+                    FigureText: $"{p1.Percent}%",
+                    SecondPercent: p2?.Percent,
+                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null));
+            }
+            return paired;
+        }
+
         int maxRows = Math.Clamp(maxRowsPerColumn, 1, 8);
         int cols = MeterStrip.ColumnsFor(vertical, limits.Count, maxRows);
         int rowsPerCol = (int)Math.Ceiling(limits.Count / (double)cols);
-        bool useHeaderRow = !vertical && (rowsPerCol + 1 <= maxRows) && (area.Height - 2) / (rowsPerCol + 1) >= 11;
+        bool useHeaderRow = !vertical && (rowsPerCol + 1 <= maxRows) && (areaHeight - 2) / (rowsPerCol + 1) >= 11;
 
         var meters = new List<Meter>(limits.Count);
         for (int i = 0; i < limits.Count; i++)
@@ -152,7 +274,9 @@ internal static class UsageStrip
                 ? (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "AG 5h"
                  : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "AG 7d"
                  : l.Label)
-                : l.Label;
+                : (l.Label.Equals("Session", StringComparison.OrdinalIgnoreCase) ? "5h"
+                 : l.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase) ? "7d"
+                 : l.Label);
 
             bool highlightFirst = !vertical && !useHeaderRow && i == 0;
             string detail = ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left
@@ -164,18 +288,9 @@ internal static class UsageStrip
                 l.Percent,
                 detail,
                 LabelColour: highlightFirst ? AntigravityTitleColour : null,
-                BoldLabel: highlightFirst,
-                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
+                BoldLabel: highlightFirst));
         }
-
-        MeterStrip.Paint(
-            g, area, meters,
-            lowColour: MeterStrip.VioletLow,
-            headerTitle: "Antigravity",
-            headerTag: "Pro·Flash",
-            headerColour: AntigravityTitleColour,
-            sparkleGlyph: true,
-            maxRowsPerColumn: maxRowsPerColumn);
+        return meters;
     }
 
     public static void PaintBambu(Graphics g, Rectangle area, BambuReading? reading, int maxRowsPerColumn = 3)
@@ -183,8 +298,15 @@ internal static class UsageStrip
         var printers = reading?.Printers ?? [];
         if (printers.Count == 0) { PaintBambuState(g, area, reading); return; }
 
-        var meters = new List<Meter>(printers.Count);
-        foreach (var p in printers)
+        var activePrinters = printers.Where(IsActiveBambuPrinter).ToList();
+        if (activePrinters.Count == 0)
+        {
+            PaintBambuCompactIdle(g, area, printers);
+            return;
+        }
+
+        var meters = new List<Meter>(activePrinters.Count);
+        foreach (var p in activePrinters)
         {
             string rem = BambuUsage.FormatRemaining(p.RemainingMinutes);
             string detail = $"{p.Label}: {BambuUsage.DescribePrinterState(p)}";
@@ -218,7 +340,7 @@ internal static class UsageStrip
                     "ERR",
                     (Color?)Color.FromArgb(255, 120, 120)),
 
-                BambuPrinterState.Paused => (
+                _ => (
                     Math.Clamp(p.Percent, 8, 100),
                     MeterStrip.Mid,
                     (Color?)Color.FromArgb(250, 205, 110),
@@ -226,33 +348,6 @@ internal static class UsageStrip
                     $"{p.Percent}%",
                     "Pause",
                     (Color?)MeterStrip.Mid),
-
-                BambuPrinterState.Finished => (
-                    100,
-                    MeterStrip.BambuDone,
-                    (Color?)Color.FromArgb(145, 220, 195),
-                    false,
-                    "100%",
-                    "Done",
-                    (Color?)Color.FromArgb(130, 220, 190)),
-
-                BambuPrinterState.Offline => (
-                    0,
-                    Theme.Muted,
-                    (Color?)null,
-                    false,
-                    "—",
-                    "Off",
-                    (Color?)Theme.Muted),
-
-                _ => (
-                    0,
-                    Theme.Muted,
-                    (Color?)null,
-                    false,
-                    "—",
-                    "Idle",
-                    (Color?)Theme.Muted),
             };
 
             meters.Add(new Meter(
@@ -271,10 +366,88 @@ internal static class UsageStrip
             g, area, meters,
             lowColour: MeterStrip.BambuLow,
             headerTitle: "Bambu Lab",
-            headerTag: $"{printers.Count}",
+            headerTag: $"{activePrinters.Count}/{printers.Count}",
             headerColour: BambuTitleColour,
             sparkleGlyph: false,
             maxRowsPerColumn: maxRowsPerColumn);
+    }
+
+    private static void PaintBambuCompactIdle(Graphics g, Rectangle area, IReadOnlyList<BambuPrinterReading> printers)
+    {
+        bool vertical = area.Height > area.Width;
+        int totalRows = 2;
+        int vPad = area.Height >= 56 ? 8 : 6;
+        int rowHeight = Math.Clamp((area.Height - vPad) / totalRows, 10, 26);
+        int top = area.Y + Math.Max(1, (area.Height - totalRows * rowHeight) / 2);
+        float scale = vertical ? 1f : Math.Clamp(rowHeight / 13.0f, 0.78f, 1.75f);
+        int outerPad = vertical ? 3 : Math.Clamp((int)Math.Round(5 * scale), 4, 8);
+
+        using var boldFont = Theme.Face(Math.Clamp(7.2f * scale, 6.5f, 13f), FontStyle.Bold);
+        using var tagFont = Theme.Face(Math.Clamp(6.8f * scale, 6.2f, 12f), FontStyle.Bold);
+        using var mutedBrush = new SolidBrush(Theme.Muted);
+
+        var hdrRow = new Rectangle(area.X + outerPad, top, Math.Max(12, area.Width - outerPad * 2), rowHeight);
+        PaintRemoteHeaderRow(g, hdrRow, vertical ? "Bambu" : "Bambu", $"{printers.Count}", BambuTitleColour,
+                             boldFont, tagFont, mutedBrush, scale, sparkleGlyph: false);
+
+        var dotRow = new Rectangle(area.X + outerPad, top + rowHeight, Math.Max(12, area.Width - outerPad * 2), rowHeight);
+        int capsuleH = Math.Clamp((int)Math.Round(rowHeight * 0.72), 8, 15);
+        int dia = Math.Clamp(capsuleH - 4, 5, 9);
+        int dotGap = Math.Max(2, dia / 3);
+        int padX = Math.Clamp(capsuleH / 4, 3, 5);
+        int reqCapW = padX * 2 + printers.Count * dia + Math.Max(0, printers.Count - 1) * dotGap;
+        int capW = Math.Min(dotRow.Width, reqCapW);
+        var capRect = new Rectangle(dotRow.X, dotRow.Y + (dotRow.Height - capsuleH) / 2, capW, capsuleH);
+
+        var prev = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var fill = new SolidBrush(CapsuleFill))
+        using (var border = new Pen(CapsuleBorder, 1f))
+        {
+            FillRoundedCapsule(g, capRect, fill, border);
+        }
+
+        using var doneFill = new SolidBrush(MeterStrip.BambuDone);
+        using var idleFill = new SolidBrush(Color.FromArgb(72, 104, 88));
+        using var offPen = new Pen(Color.FromArgb(78, 86, 102), 1.1f);
+        float cy = capRect.Y + capRect.Height / 2f;
+        float x = capRect.X + padX;
+        int doneCount = 0;
+
+        foreach (var p in printers)
+        {
+            if (x + dia > capRect.Right - 2) break;
+            var box = new RectangleF(x, cy - dia / 2f, dia, dia);
+            if (p.State == BambuPrinterState.Finished)
+            {
+                doneCount++;
+                g.FillEllipse(doneFill, box);
+            }
+            else if (p.State == BambuPrinterState.Offline)
+            {
+                g.DrawEllipse(offPen, box);
+            }
+            else
+            {
+                g.FillEllipse(idleFill, box);
+            }
+            x += dia + dotGap;
+        }
+        g.SmoothingMode = prev;
+
+        int textLeft = capRect.Right + 4;
+        if (!vertical && dotRow.Right - textLeft >= 18)
+        {
+            string statusTxt = doneCount > 0 ? $"{doneCount}✓" : "idle";
+            using var statusBrush = new SolidBrush(doneCount > 0 ? Color.FromArgb(130, 220, 190) : Theme.Muted);
+            using var fmt = new StringFormat
+            {
+                Alignment = StringAlignment.Near,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+            };
+            g.DrawString(statusTxt, tagFont, statusBrush, new Rectangle(textLeft, dotRow.Y, dotRow.Right - textLeft, dotRow.Height), fmt);
+        }
     }
 
     private static readonly Color WaitingDotFill = Color.FromArgb(255, 158, 24);
@@ -351,6 +524,138 @@ internal static class UsageStrip
         path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
         path.CloseFigure();
         return path;
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="pt"/> falls within the header row of the Claude or Antigravity usage strip.
+    /// </summary>
+    public static bool IsPointInHeaderRow(
+        Rectangle area,
+        RemoteChatService service,
+        Point pt,
+        int maxRowsPerColumn = 3)
+    {
+        if (!area.Contains(pt)) return false;
+        int meterCount = service == RemoteChatService.Antigravity
+            ? GetAntigravityRowCount(AntigravityUsage.Current?.Limits)
+            : (ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2);
+        return MeterStrip.GetHeaderRow(area, meterCount, maxRowsPerColumn, out _) is { } hdr && hdr.Contains(pt);
+    }
+
+    /// <summary>
+    /// Returns the individual chat circle under <paramref name="pt"/> inside the header row of the
+    /// Claude or Antigravity usage strip, or null if none.
+    /// </summary>
+    public static RemoteChatItem? HitTestHeaderChat(
+        Rectangle area,
+        RemoteChatService service,
+        Point pt,
+        int maxRowsPerColumn = 3)
+    {
+        if (!area.Contains(pt) || !RemoteChatUsage.Enabled) return null;
+        var stripChats = RemoteChatUsage.GetStripChatsForService(service);
+        if (stripChats.Count == 0) return null;
+
+        int meterCount = service == RemoteChatService.Antigravity
+            ? GetAntigravityRowCount(AntigravityUsage.Current?.Limits)
+            : (ClaudeUsage.Current?.Limits.Count is > 0 and var c ? c : 2);
+
+        if (MeterStrip.GetHeaderRow(area, meterCount, maxRowsPerColumn, out float scale) is not { } hdrRow)
+            return null;
+        if (!hdrRow.Contains(pt)) return null;
+
+        bool compact = hdrRow.Height <= 9;
+        float namePt = compact ? 6.3f : Math.Clamp(7.2f * scale, 6.5f, 14f);
+        using var measureBmp = new Bitmap(1, 1);
+        using var measureG = Graphics.FromImage(measureBmp);
+        using var boldNameFont = Theme.Face(namePt, FontStyle.Bold);
+
+        bool sparkleGlyph = service == RemoteChatService.Antigravity;
+        string title = sparkleGlyph ? GetAntigravityHeaderTitle(area.Width, stripChats.Count) : "Claude";
+        int glyphW = sparkleGlyph
+            ? (int)Math.Ceiling(Math.Clamp(4.2f * scale, 3.8f, 7.5f) * 2 + 3 * scale)
+            : (int)Math.Ceiling(Math.Clamp(3.5f * scale, 3.2f, 6.2f) * 2 + 3 * scale);
+        int textX = hdrRow.X + glyphW;
+        int availTextW = Math.Max(8, hdrRow.Right - textX);
+        int titleWInt = Math.Min(availTextW, (int)Math.Ceiling(measureG.MeasureString(title, boldNameFont).Width) + 2);
+        int rightX = textX + titleWInt + (int)Math.Round(3 * scale);
+        if (hdrRow.Right - rightX < 14) return null;
+
+        var rightBox = new Rectangle(rightX, hdrRow.Y, hdrRow.Right - rightX, hdrRow.Height);
+        PaintOrHitTestHeaderCapsule(g: null, rightBox, stripChats, hoveredChatId: null, pt, scale, out var hit);
+        return hit;
+    }
+
+    private static bool PaintOrHitTestHeaderCapsule(
+        Graphics? g,
+        Rectangle rightBox,
+        IReadOnlyList<RemoteChatItem> stripChats,
+        string? hoveredChatId,
+        Point? hitPoint,
+        float scale,
+        out RemoteChatItem? hitChat)
+    {
+        hitChat = null;
+        if (stripChats.Count == 0 || rightBox.Width < 12) return false;
+
+        int waiting = stripChats.Count(c => c.State == RemoteChatState.Waiting);
+        int running = stripChats.Count(c => c.State == RemoteChatState.Running);
+        int done = stripChats.Count(c => c.State == RemoteChatState.Done);
+        var synthRow = new RemoteServerRow(
+            "hdr", "", "", stripChats[0].Service, Online: true,
+            waiting, running, done, stripChats);
+
+        int capsuleH = Math.Clamp((int)Math.Round(rightBox.Height * 0.78), 8, 16);
+        int idealDia = Math.Clamp(capsuleH - 4, 6, 11);
+        int padX = Math.Clamp(capsuleH / 4, 3, 5);
+        int desiredCapW = MeasureRowCapsuleWidth(synthRow, idealDia, padX, maxCircles: 8);
+
+        float subPt = Math.Clamp(6.6f * scale, 6.0f, 12f);
+        using var subFont = Theme.Face(subPt, FontStyle.Bold);
+        using var overflowFont = Theme.Face(Math.Max(5.8f, subPt - 0.6f), FontStyle.Bold);
+
+        string badgeText = FormatRowBadgeText(synthRow);
+        int badgeW = 0;
+        if (badgeText.Length > 0)
+        {
+            using var measureBmp = g is null ? new Bitmap(1, 1) : null;
+            using var ownedG = g is null ? Graphics.FromImage(measureBmp!) : null;
+            var mg = g ?? ownedG!;
+            badgeW = (int)Math.Ceiling(mg.MeasureString(badgeText, subFont).Width) + 2;
+        }
+
+        bool showBadge = badgeW > 0 && rightBox.Width >= desiredCapW + badgeW + 5;
+        int capW = showBadge
+            ? desiredCapW
+            : Math.Min(rightBox.Width, desiredCapW);
+        int capX = showBadge
+            ? rightBox.Right - badgeW - 3 - capW
+            : rightBox.Right - capW;
+
+        var trackRect = new Rectangle(
+            Math.Max(rightBox.X, capX),
+            rightBox.Y + (rightBox.Height - capsuleH) / 2,
+            capW,
+            capsuleH);
+
+        if (PaintOrHitTestRowCircles(g, trackRect, synthRow, hoveredChatId, hitPoint, overflowFont, out hitChat))
+            return true;
+
+        if (g is not null && showBadge)
+        {
+            var (_, subCol, _) = RowColours(synthRow);
+            using var subBrush = new SolidBrush(subCol);
+            using var rightFmt = new StringFormat
+            {
+                Alignment = StringAlignment.Far,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+            };
+            var subRect = new Rectangle(trackRect.Right + 2, rightBox.Y, rightBox.Right - (trackRect.Right + 2), rightBox.Height);
+            g.DrawString(badgeText, subFont, subBrush, subRect, rightFmt);
+        }
+
+        return false;
     }
 
     /// <summary>Returns the individual chat circle under <paramref name="pt"/>, or null if none.</summary>
@@ -654,11 +959,11 @@ internal static class UsageStrip
     private static string FormatRowBadgeText(RemoteServerRow r)
     {
         if (!r.Online && r.TotalCount == 0) return "Off";
-        if (r.TotalCount == 0) return "Idle";
+        if (r.TotalCount == 0) return "";
 
         var parts = new List<string>(3);
         if (r.WaitingCount > 0) parts.Add($"{r.WaitingCount}!");
-        if (r.RunningCount > 0) parts.Add(r.WaitingCount == 0 && r.DoneCount == 0 ? $"{r.RunningCount} run" : $"{r.RunningCount}r");
+        if (r.RunningCount > 0) parts.Add($"{r.RunningCount}r");
         if (r.DoneCount > 0) parts.Add($"{r.DoneCount}✓");
         return string.Join(" ", parts);
     }
@@ -1194,6 +1499,7 @@ internal static class UsageStrip
             if (countdown.Length > 0) text.Append($"  ({countdown})");
         }
 
+        AppendServiceRemoteChatsTip(text, RemoteChatService.Claude);
         return text.ToString();
     }
 
@@ -1232,7 +1538,44 @@ internal static class UsageStrip
             if (countdown.Length > 0) text.Append($"  ({countdown})");
         }
 
+        AppendServiceRemoteChatsTip(text, RemoteChatService.Antigravity);
         return text.ToString();
+    }
+
+    private static void AppendServiceRemoteChatsTip(StringBuilder text, RemoteChatService service)
+    {
+        if (!RemoteChatUsage.Enabled || RemoteChatUsage.Current is not { } reading)
+            return;
+
+        var rows = reading.Rows.Where(r => r.Service == service).ToList();
+        if (rows.Count == 0) return;
+
+        int waiting = rows.Sum(r => r.WaitingCount);
+        int running = rows.Sum(r => r.RunningCount);
+        int done = rows.Sum(r => r.DoneCount);
+
+        var summary = new List<string>();
+        if (waiting > 0) summary.Add($"{waiting} need input");
+        if (running > 0) summary.Add($"{running} running");
+        if (done > 0) summary.Add($"{done} done");
+        if (summary.Count == 0) summary.Add("all idle");
+
+        text.AppendLine();
+        text.AppendLine();
+        text.Append($"Remote Chats — {string.Join(", ", summary)} (click for menu)");
+        foreach (var c in rows.SelectMany(r => r.Chats).OrderBy(c => c.State).ThenByDescending(c => c.LastUpdated).Take(4))
+        {
+            text.AppendLine();
+            string badge = c.State switch
+            {
+                RemoteChatState.Waiting => "⚠ WAIT",
+                RemoteChatState.Running => "● RUN",
+                _ => "✓ DONE",
+            };
+            string repoPrefix = !string.IsNullOrWhiteSpace(c.Repo) ? $"[{c.Repo}] " : "";
+            string shortTitle = c.Title.Length <= 44 ? c.Title : c.Title[..41].TrimEnd() + "…";
+            text.Append($"  {badge} ({c.Server}): {repoPrefix}{shortTitle}");
+        }
     }
 
     /// <summary>Full tooltip breakdown for all enabled Bambu Lab printers in closet order.</summary>

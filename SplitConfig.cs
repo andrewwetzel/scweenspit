@@ -495,7 +495,7 @@ public sealed class SplitConfig
     public int Version { get; set; }
 
     /// <summary>Revision <see cref="Normalized"/> brings a file up to.</summary>
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     /// <summary>
     /// Set while ScweenSpit has handed the machine back to Windows, holding what it was doing before
@@ -848,6 +848,12 @@ public sealed class SplitConfig
             {
                 bar.RemoteChatsWidth = null;
                 bar.AntigravityWidth = null;
+            }
+            if (Version < 7)
+            {
+                bar.UsageWidth = null;
+                bar.AntigravityWidth = null;
+                bar.BambuWidth = null;
             }
             bar.RemoteChatsWidth = bar.RemoteChatsWidth is > 0 and var rw ? Math.Clamp(rw, 44, 1200) : null;
             bar.AntigravityChatsWidth = bar.AntigravityChatsWidth is > 0 and var acw ? Math.Clamp(acw, 44, 1200) : null;
