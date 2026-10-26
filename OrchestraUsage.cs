@@ -34,7 +34,9 @@ public sealed record OrchestraNeed(
     string? Task,
     DateTimeOffset? CreatedAt,
     bool Blocking,
-    DateTimeOffset? DoneAt)
+    DateTimeOffset? DoneAt,
+    NeedQuestion? Question = null,
+    bool ApproveApi = false)
 {
     /// <summary>"monopoly/kick26", or whichever half the feed gave, or nothing.</summary>
     public string Where => (Repo, Run) switch
@@ -44,6 +46,22 @@ public sealed record OrchestraNeed(
         (_, { Length: > 0 } run) => run,
         _ => "",
     };
+}
+
+/// <summary>One answer the orchestrator offers to a question it is waiting on.</summary>
+public sealed record NeedChoice(string Id, string Label, string? Description);
+
+/// <summary>
+/// The choices a need offers, picked right in ScweenSpit's list. Compared by content, so a feed
+/// repeating the same question on every poll is the same question, not a new one.
+/// </summary>
+public sealed record NeedQuestion(IReadOnlyList<NeedChoice> Choices, bool Multi, bool AllowText)
+{
+    public bool Equals(NeedQuestion? other) =>
+        other is not null && Multi == other.Multi && AllowText == other.AllowText && Choices.SequenceEqual(other.Choices);
+
+    public override int GetHashCode() =>
+        Choices.Aggregate(HashCode.Combine(Multi, AllowText), (h, c) => HashCode.Combine(h, c));
 }
 
 /// <summary>A need, with the feed it came from: Done is posted back to that feed's server.</summary>
@@ -454,6 +472,161 @@ public static class OrchestraUsage
         return true;
     }
 
+    // ---- answering and approving from here ------------------------------------
+
+    /// <summary>`needs/&lt;id&gt;/&lt;rest&gt;` beside the feed, as Done is.</summary>
+    private static Uri? Beside(OrchestraNeedItem item, string rest) =>
+        Uri.TryCreate(item.Feed.Url, UriKind.Absolute, out var feed)
+            ? new Uri(feed, $"needs/{Uri.EscapeDataString(item.Need.Id)}/{rest}")
+            : null;
+
+    /// <summary>
+    /// Sends the person's pick to the orchestrator: `POST needs/&lt;id&gt;/answer` with the ids of
+    /// the chosen choices and any text typed. Returns null on success, or what went wrong.
+    /// </summary>
+    public static async Task<string?> AnswerAsync(OrchestraNeedItem item, IReadOnlyList<string> choiceIds, string? text)
+    {
+        if (item.Feed.Url == PreviewFeedUrl) { MarkDoneHere(item); return null; }
+        if (Beside(item, "answer") is not { } url) return "the feed URL is not absolute";
+
+        var body = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["choices"] = choiceIds,
+            ["text"] = string.IsNullOrWhiteSpace(text) ? null : text.Trim(),
+        });
+        var error = await PostAsync(url, body);
+        if (error is null) MarkDoneHere(item);
+        else Log.Write($"orchestra need {item.Need.Id} answer failed: {error}");
+        Refresh();
+        return error;
+    }
+
+    /// <summary>
+    /// Approves with a passkey without a browser: asks the orchestrator for a challenge
+    /// (`POST needs/&lt;id&gt;/approve/options`), has Windows sign it — the Windows Hello prompt
+    /// appears over <paramref name="owner"/> — and sends the signature back
+    /// (`POST needs/&lt;id&gt;/approve`). Returns null on success, or what went wrong.
+    /// </summary>
+    public static async Task<string?> ApproveWithPasskeyAsync(OrchestraNeedItem item, IntPtr owner)
+    {
+        if (item.Feed.Url == PreviewFeedUrl) return "this is only a preview — there is nothing to approve";
+        if (!WebAuthn.Available) return "this version of Windows has no passkey API";
+        if (Beside(item, "approve/options") is not { } optionsUrl || Beside(item, "approve") is not { } approveUrl)
+            return "the feed URL is not absolute";
+
+        string optionsJson;
+        try
+        {
+            using var content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(optionsUrl, content);
+            optionsJson = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                return ServerError(response.StatusCode, optionsJson);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return ex is TaskCanceledException ? "the orchestrator did not answer in time" : ex.InnerException?.Message ?? ex.Message;
+        }
+
+        string session, origin, rpId, challenge, verification;
+        List<string> allow = [];
+        int timeout;
+        try
+        {
+            using var doc = JsonDocument.Parse(optionsJson);
+            var root = doc.RootElement;
+            var pk = root.TryGetProperty("publicKey", out var inner) && inner.ValueKind == JsonValueKind.Object ? inner : root;
+            challenge = Text(pk, "challenge") ?? throw new FormatException("no challenge");
+            rpId = Text(pk, "rpId") ?? throw new FormatException("no rpId");
+            origin = Text(root, "origin") ?? $"https://{rpId}";
+            session = Text(root, "session") ?? "";
+            verification = Text(pk, "userVerification") ?? "preferred";
+            timeout = pk.TryGetProperty("timeout", out var t) && t.TryGetInt32(out int ms) ? ms : 120_000;
+            if (pk.TryGetProperty("allowCredentials", out var list) && list.ValueKind == JsonValueKind.Array)
+                foreach (var c in list.EnumerateArray())
+                    if (Text(c, "id") is { Length: > 0 } id) allow.Add(id);
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException)
+        {
+            return $"the orchestrator's challenge could not be read ({ex.Message})";
+        }
+
+        WebAuthn.Assertion assertion;
+        try
+        {
+            assertion = await Task.Run(() => WebAuthn.GetAssertion(owner, rpId, origin, challenge, allow, verification, timeout));
+        }
+        catch (OperationCanceledException)
+        {
+            return "cancelled";
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"passkey for need {item.Need.Id} failed: {ex.Message}");
+            return ex.Message;
+        }
+
+        var body = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session"] = session,
+            ["credential"] = assertion.ToJson(),
+        });
+        var error = await PostAsync(approveUrl, body);
+        if (error is null)
+        {
+            Log.Write($"need {item.Need.Id} approved with a passkey (challenge {WebAuthn.Fingerprint(challenge)})");
+            MarkDoneHere(item);
+        }
+        else
+        {
+            Log.Write($"passkey approval of need {item.Need.Id} refused: {error}");
+        }
+        Refresh();
+        return error;
+    }
+
+    private static async Task<string?> PostAsync(Uri url, string json)
+    {
+        try
+        {
+            using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(url, content);
+            if (response.IsSuccessStatusCode) return null;
+            return ServerError(response.StatusCode, await response.Content.ReadAsStringAsync());
+        }
+        catch (TaskCanceledException)
+        {
+            return "the orchestrator did not answer in time";
+        }
+        catch (HttpRequestException ex)
+        {
+            return ex.InnerException?.Message ?? ex.Message;
+        }
+    }
+
+    /// <summary>The server's own words where it gave some (`{"error": "..."}`), else the status.</summary>
+    private static string ServerError(HttpStatusCode status, string body)
+    {
+        if (status == HttpStatusCode.NotFound && body.Length == 0) return "the orchestrator does not offer this (404)";
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && Text(doc.RootElement, "error") is { Length: > 0 } said)
+                return said;
+        }
+        catch (JsonException) { }
+        return $"HTTP {(int)status}";
+    }
+
+    private static void MarkDoneHere(OrchestraNeedItem item)
+    {
+        lock (gate)
+        {
+            markedDone.Add(Key(item.Feed.Url, item.Need.Id));
+            RebuildLocked(force: true);
+        }
+    }
+
     // ---- preview -------------------------------------------------------------
 
     /// <summary>Stands in for a feed URL; never asked, and Done for it is posted nowhere.</summary>
@@ -481,14 +654,23 @@ public static class OrchestraUsage
                 "A made-up need, to show what one looks like. Nothing happens when you press Done.",
                 "https://deploy.lionpower.app/#approvals", null, "monopoly", "preview", null,
                 now.AddMinutes(-2), Blocking: true, DoneAt: null);
+            var question = new OrchestraNeed(
+                $"preview-q-{tick:x}", "answer", "Preview: which base should kick26 merge into?",
+                "A made-up question. Pick an answer here; nothing is sent.",
+                null, null, "monopoly", "preview", null, now.AddMinutes(-1), Blocking: false, DoneAt: null,
+                Question: new NeedQuestion([
+                    new NeedChoice("release", "release/v3.0.0", "The release branch, as planned"),
+                    new NeedChoice("main", "main", "Hold it back from the release"),
+                ], Multi: false, AllowText: true));
             markedDone.RemoveWhere(k => k.StartsWith(PreviewFeedUrl + "\n", StringComparison.Ordinal));
             preview = new OrchestraFeed(PreviewFeedUrl, "preview", Answered: true, Active: false, StartedAt: null,
                                         GeneratedAt: now, ReceivedTick: tick, Children: [], Caps: [], Runs: [],
-                                        Needs: [need], Error: null, LastAnswerTick: long.MaxValue / 2);
+                                        Needs: [need, question], Error: null, LastAnswerTick: long.MaxValue / 2);
             announced.Add(Key(PreviewFeedUrl, need.Id));
+            announced.Add(Key(PreviewFeedUrl, question.Id));
             Interlocked.Exchange(ref glowStartTick, tick);
             RebuildLocked(force: true);
-            FireNeedsArrived([new OrchestraNeedItem(preview, need)]);
+            FireNeedsArrived([new OrchestraNeedItem(preview, need), new OrchestraNeedItem(preview, question)]);
 
             previewEnd?.Dispose();
             previewEnd = new System.Threading.Timer(_ => EndPreview(), null, duration, Timeout.InfiniteTimeSpan);
@@ -672,7 +854,9 @@ public static class OrchestraUsage
                         NonEmpty(Text(n, "task")),
                         Time(n, "created_at"),
                         n.TryGetProperty("blocking", out var b) && b.ValueKind == JsonValueKind.True,
-                        Time(n, "done_at")));
+                        Time(n, "done_at"),
+                        Question(n),
+                        n.TryGetProperty("approve_api", out var api) && api.ValueKind == JsonValueKind.True));
                 }
             }
 
@@ -765,6 +949,27 @@ public static class OrchestraUsage
     private static int Int(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n)
             ? Math.Max(0, n) : 0;
+
+    /// <summary>`choices`, `multi` and `allow_text`, or null when the need offers nothing to pick.</summary>
+    private static NeedQuestion? Question(JsonElement need)
+    {
+        var choices = new List<NeedChoice>();
+        if (need.TryGetProperty("choices", out var list) && list.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var c in list.EnumerateArray())
+            {
+                // A bare string is a choice whose id is its label.
+                if (c.ValueKind == JsonValueKind.String && c.GetString() is { Length: > 0 } bare)
+                    choices.Add(new NeedChoice(bare, bare, null));
+                else if (c.ValueKind == JsonValueKind.Object
+                         && (Text(c, "id") ?? Text(c, "label")) is { Length: > 0 } id)
+                    choices.Add(new NeedChoice(id, NonEmpty(Text(c, "label")) ?? id, NonEmpty(Text(c, "description"))));
+            }
+        }
+        bool multi = need.TryGetProperty("multi", out var m) && m.ValueKind == JsonValueKind.True;
+        bool allowText = need.TryGetProperty("allow_text", out var t) && t.ValueKind == JsonValueKind.True;
+        return choices.Count == 0 && !allowText ? null : new NeedQuestion(choices, multi, allowText);
+    }
 
     private static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 

@@ -661,8 +661,8 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
   there. A ScweenSpit bar drawing the strip counts as room. Re-decided whenever the displays, their
   scale or the settings change. **Settings ▸ Orchestrator ▸ Show what needs you** forces Taskbar,
   Floating or Off.
-- **A preview.** **Settings ▸ Orchestrator ▸ Preview** shows one made-up blocking approval for two
-  minutes, through the strip, the indicator and the notification, so you can see it all without the
+- **A preview.** **Settings ▸ Orchestrator ▸ Preview** shows a made-up blocking approval and a
+  made-up question with choices for two minutes, through the strip, the indicator and the notification, so you can see it all without the
   orchestrator needing anything. Done on it is sent nowhere. The same page lists what ScweenSpit
   believes is waiting and which indicator it chose, and why.
 - **A notification** for each new need, once — by id, not by poll — warning-styled when it is
@@ -683,6 +683,34 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
 - Done is `POST needs/<id>/done` beside the feed (`http://100.126.10.4:8787/needs/<id>/done` for
   the default one), empty body: 204 on success, 404 for an id the orchestrator no longer has.
 - A feed with no `needs` key has nothing waiting.
+
+**Answering in the list.** A need with `choices` is a question answered right there: each choice is a
+button (or a tick box with `"multi": true`), and `"allow_text": true` adds a box to type an answer
+into. Choices are `{"id", "label", "description"}` objects, or bare strings that are their own id.
+The answer is `POST needs/<id>/answer` with `{"choices": ["<id>", …], "text": "…" | null}`; 2xx means
+taken, and the need shows as done until the orchestrator closes it.
+
+**Approving with a passkey, no browser.** An `approve` need with `"approve_api": true` gets
+**Approve with passkey**, signed by Windows itself — the Windows Hello prompt (PIN, fingerprint,
+face, security key, or phone by QR) appears over the list. The console page stays a click away as
+**Open in console**, and approving there works exactly as before.
+
+1. `POST needs/<id>/approve/options` (body `{}`) answers
+   `{"session": "…", "origin": "https://deploy.lionpower.app", "publicKey": {"challenge": "<b64url>",
+   "rpId": "deploy.lionpower.app", "allowCredentials": [{"id": "<b64url>", "type": "public-key"}],
+   "userVerification": "required", "timeout": 120000}}` — the console's own request options for
+   that approval, plus the origin its verifier expects and whatever it needs to find the challenge
+   again.
+2. ScweenSpit has Windows sign it, as from `origin`, and sends `POST needs/<id>/approve` with
+   `{"session": "…", "credential": {"id", "rawId", "type": "public-key", "response": {"clientDataJSON",
+   "authenticatorData", "signature", "userHandle"}, "clientExtensionResults": {}}}` — the same JSON a
+   browser's `navigator.credentials.get()` produces, so the console's existing verification takes it
+   as it is. 2xx is approved; anything else may say why as `{"error": "…"}`, shown on the row.
+
+Both are on the orchestrator's tailnet server, beside the feed, so ScweenSpit never has to get
+through Cloudflare Access; the server passes them on to the Release Console. Windows offers the
+passkeys it knows — Windows Hello, security keys, phones — not ones kept only in a browser's
+password manager.
 
 ### Why "fill over the taskbar" sometimes does nothing
 

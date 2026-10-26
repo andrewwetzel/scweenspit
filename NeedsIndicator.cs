@@ -122,13 +122,13 @@ public sealed class NeedsIndicator : IDisposable
 
     /// <summary>
     /// A click on the pill, the taskbar button or the strip: with exactly one need outstanding and a
-    /// page to open for it, that page; otherwise the list. Returns true when it opened the page.
+    /// page to open for it — and nothing to do for it in the list itself — that page; otherwise the list. Returns true when it opened the page.
     /// </summary>
     public bool Activate(Point? near)
     {
         var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
         shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
-        if (open.Count == 1 && NeedActions.Url(open[0].Need) is not null && shortcutTaken.Add(NeedActions.Key(open[0])))
+        if (open.Count == 1 && NeedActions.GoesToPage(open[0].Need) && shortcutTaken.Add(NeedActions.Key(open[0])))
         {
             NeedActions.OpenLatest(open[0]);
             return true;
@@ -157,7 +157,7 @@ public sealed class NeedsIndicator : IDisposable
         {
             var open = OrchestraUsage.Current?.Needs.Where(i => !i.Done).ToList() ?? [];
             shortcutTaken.RemoveWhere(k => !open.Any(i => NeedActions.Key(i) == k));
-            if (open.Count != 1 || NeedActions.Url(open[0].Need) is null || !shortcutTaken.Add(NeedActions.Key(open[0])))
+            if (open.Count != 1 || !NeedActions.GoesToPage(open[0].Need) || !shortcutTaken.Add(NeedActions.Key(open[0])))
                 return false;
             NeedActions.OpenLatest(open[0]);
             return true;
@@ -255,6 +255,14 @@ internal static class NeedActions
     public static string Key(OrchestraNeedItem i) => i.Feed.Url + "\n" + i.Need.Id;
 
     public static bool IsApproval(OrchestraNeed need) => need.Kind.Equals("approve", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether a click on the indicator should open the need's page. Not when it can be dealt with
+    /// in the list itself — a question with choices, or an approval signed with a passkey right
+    /// here — since the list is then where it gets done.
+    /// </summary>
+    public static bool GoesToPage(OrchestraNeed need) =>
+        Url(need) is not null && need.Question is null && !(IsApproval(need) && need.ApproveApi);
 
     /// <summary>The need's page, if it has one worth opening: an absolute http(s) URL, fragment and all.</summary>
     public static Uri? Url(OrchestraNeed need) =>
@@ -418,6 +426,7 @@ internal sealed class NeedsPanel : Form
     /// <summary>Put away rather than closed: back into the taskbar while anything is outstanding.</summary>
     private void Stow()
     {
+        if (holdOpen) return;
         ages.Stop();
         if (!Visible || WindowState == FormWindowState.Minimized) return;
         if (InTaskbar && (OrchestraUsage.Current?.Outstanding ?? 0) > 0)
@@ -678,18 +687,100 @@ internal sealed class NeedsPanel : Form
                 Margin = new Padding(0, S(2), 0, S(4)),
             });
 
+        string key = Key(item);
+        bool busy = sending.Contains(key);
+
+        // A question: its choices are buttons right here, so answering it needs nothing else open.
+        if (need.Question is { } question && !done)
+        {
+            var picked = picks.TryGetValue(key, out var set) ? set : picks[key] = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var choice in question.Choices)
+            {
+                if (question.Multi)
+                {
+                    var tick = new CheckBox
+                    {
+                        Text = choice.Label, Checked = picked.Contains(choice.Id), AutoSize = true, Enabled = !busy,
+                        ForeColor = Theme.Text, Font = Px(13), FlatStyle = FlatStyle.Flat, UseMnemonic = false,
+                        Margin = new Padding(0, S(2), 0, choice.Description is null ? S(2) : 0), Cursor = Cursors.Hand,
+                    };
+                    tick.CheckedChanged += (_, _) => { if (tick.Checked) picked.Add(choice.Id); else picked.Remove(choice.Id); };
+                    row.Controls.Add(tick);
+                }
+                else
+                {
+                    var pick = ChoiceButton(choice.Label, inner);
+                    pick.Enabled = !busy;
+                    pick.Click += (_, _) => Run(key, () => OrchestraUsage.AnswerAsync(item, [choice.Id], Draft(key)));
+                    row.Controls.Add(pick);
+                }
+                if (choice.Description is { } about)
+                    row.Controls.Add(new Label
+                    {
+                        Text = about, AutoSize = true, MaximumSize = new Size(inner - S(8), 0), ForeColor = Theme.Muted,
+                        Font = Px(11.5f), Margin = new Padding(S(question.Multi ? 20 : 8), 0, 0, S(4)), UseMnemonic = false,
+                    });
+            }
+
+            if (question.AllowText)
+            {
+                var typed = new TextBox
+                {
+                    Text = Draft(key) ?? "", Width = inner, BorderStyle = BorderStyle.FixedSingle, Enabled = !busy,
+                    BackColor = Theme.Raised, ForeColor = Theme.Text, Font = Px(13),
+                    PlaceholderText = question.Choices.Count > 0 ? "Or type an answer…" : "Type an answer…",
+                    Margin = new Padding(0, S(4), 0, S(2)),
+                };
+                typed.TextChanged += (_, _) => drafts[key] = typed.Text;
+                typed.KeyDown += (_, e) =>
+                {
+                    if (e.KeyCode != Keys.Enter || string.IsNullOrWhiteSpace(typed.Text)) return;
+                    e.SuppressKeyPress = true;
+                    Run(key, () => OrchestraUsage.AnswerAsync(item, question.Multi ? picked.ToList() : [], typed.Text));
+                };
+                row.Controls.Add(typed);
+            }
+        }
+
         var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(inner, 0), Margin = new Padding(0, S(2), 0, 0), BackColor = Theme.Panel };
         bool approval = NeedActions.IsApproval(need);
+
+        if (need.Question is { } q && !done && (q.Multi || q.AllowText))
+        {
+            var send = ActionButton(busy ? "Sending…" : "Send", primary: true);
+            send.Enabled = !busy;
+            send.Click += (_, _) =>
+            {
+                var chosen = q.Multi && picks.TryGetValue(key, out var p) ? p.ToList() : [];
+                if (chosen.Count == 0 && string.IsNullOrWhiteSpace(Draft(key))) return;
+                Run(key, () => OrchestraUsage.AnswerAsync(item, chosen, Draft(key)));
+            };
+            actions.Controls.Add(send);
+        }
+
+        // Approved right here: Windows Hello signs the console's challenge, no browser involved.
+        bool native = approval && need.ApproveApi && !done;
+        if (native)
+        {
+            var approve = ActionButton(busy ? "Waiting for passkey…" : "Approve with passkey", primary: true);
+            approve.Width = S(190);
+            approve.Enabled = !busy;
+            approve.Click += (_, _) => Run(key, () => OrchestraUsage.ApproveWithPasskeyAsync(item, Handle), holdOpen: true);
+            actions.Controls.Add(approve);
+        }
+
         if (NeedActions.Url(need) is not null)
         {
-            // An approval's whole point is that page, so it is the big button, and the row itself
-            // opens it too. The URL is looked up again on click: it changes as the request appears.
-            var openButton = ActionButton(approval ? "Approve →" : "Open", primary: approval || (!done && need.Command is null));
-            if (approval) openButton.Width = S(124);
+            // Without a native approval, an approval's whole point is that page, so it is the big
+            // button and the row itself opens it too. The URL is looked up again on click: it
+            // changes as the request appears.
+            var openButton = ActionButton(native ? "Open in console" : approval ? "Approve →" : "Open",
+                                          primary: !native && (approval || (!done && need.Command is null && need.Question is null)));
+            if (approval) openButton.Width = S(native ? 140 : 124);
             openButton.Click += (_, _) => NeedActions.OpenLatest(item);
             actions.Controls.Add(openButton);
 
-            if (approval)
+            if (approval && !native)
             {
                 void OpenFromRow(object? sender, EventArgs e) => NeedActions.OpenLatest(item);
                 row.Cursor = Cursors.Hand;
@@ -722,7 +813,6 @@ internal sealed class NeedsPanel : Form
             actions.Controls.Add(copy);
         }
 
-        string key = Key(item);
         if (done)
         {
             actions.Controls.Add(new Label
@@ -733,20 +823,9 @@ internal sealed class NeedsPanel : Form
         }
         else
         {
-            bool busy = sending.Contains(key);
-            var doneButton = ActionButton(busy ? "Sending…" : "Done", primary: false);
+            var doneButton = ActionButton(busy && !native ? "Sending…" : "Done", primary: false);
             doneButton.Enabled = !busy;
-            doneButton.Click += async (_, _) =>
-            {
-                sending.Add(key);
-                failed.Remove(key);
-                // Not straight away: the rebuild disposes this very button, mid-click.
-                BeginInvoke(() => Refill());
-                string? error = await OrchestraUsage.MarkDoneAsync(item);
-                sending.Remove(key);
-                if (error is not null) failed[key] = error;
-                if (!IsDisposed) Refill();
-            };
+            doneButton.Click += (_, _) => Run(key, () => OrchestraUsage.MarkDoneAsync(item));
             actions.Controls.Add(doneButton);
         }
         row.Controls.Add(actions);
@@ -754,11 +833,59 @@ internal sealed class NeedsPanel : Form
         if (failed.TryGetValue(key, out var why))
             row.Controls.Add(new Label
             {
-                Text = $"Could not tell the orchestrator: {why}", AutoSize = true, MaximumSize = new Size(inner, 0),
+                Text = why == "cancelled" ? "Passkey prompt dismissed — nothing was sent." : $"Did not go through: {why}",
+                AutoSize = true, MaximumSize = new Size(inner, 0),
                 ForeColor = OrchestraStrip.BlockingColour, Font = Px(12), Margin = new Padding(0, S(4), 0, 0),
             });
 
         return row;
+    }
+
+    /// <summary>Typed answers and ticked choices, kept across rebuilds of the rows until sent.</summary>
+    private readonly Dictionary<string, string> drafts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> picks = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Set while a passkey prompt is up: it takes the focus, and the list must not put itself away
+    /// underneath the prompt it owns.
+    /// </summary>
+    private bool holdOpen;
+
+    private string? Draft(string key) => drafts.TryGetValue(key, out var d) && !string.IsNullOrWhiteSpace(d) ? d : null;
+
+    /// <summary>Runs one of a row's actions, showing it as in progress and any failure on the row.</summary>
+    private async void Run(string key, Func<Task<string?>> action, bool holdOpen = false)
+    {
+        if (!sending.Add(key)) return;
+        failed.Remove(key);
+        this.holdOpen |= holdOpen;
+        // Not straight away: the rebuild disposes the very button being clicked.
+        BeginInvoke(() => Refill());
+        string? error;
+        try { error = await action(); }
+        catch (Exception ex) { error = ex.Message; }
+        sending.Remove(key);
+        if (holdOpen) this.holdOpen = false;
+        if (error is null) { drafts.Remove(key); picks.Remove(key); }
+        else failed[key] = error;
+        if (IsDisposed) return;
+        Refill();
+        if (holdOpen && error is null && !ContainsFocus) Activate();
+    }
+
+    private Button ChoiceButton(string text, int width)
+    {
+        var b = new Button
+        {
+            Text = text, AutoSize = false, Size = new Size(width, S(32)), Font = Px(13, FontStyle.Bold),
+            FlatStyle = FlatStyle.Flat, ForeColor = Theme.Text, BackColor = Theme.Raised, Cursor = Cursors.Hand,
+            Margin = new Padding(0, S(3), 0, S(1)), TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(S(8), 0, 0, 0), UseMnemonic = false,
+        };
+        b.FlatAppearance.BorderSize = 1;
+        b.FlatAppearance.BorderColor = Theme.Divider;
+        b.FlatAppearance.MouseOverBackColor = ControlPaint.Light(Theme.Accent, 0.1f);
+        return b;
     }
 
     private static string MetaText(OrchestraNeedItem item)

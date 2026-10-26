@@ -977,7 +977,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                 bool blocking = arrived.Any(i => i.Need.Blocking);
                 var first = arrived.FirstOrDefault(i => i.Need.Blocking) ?? arrived[0];
                 // One approval: the notification is a link straight to its page in the console.
-                bool single = arrived.Count == 1 && NeedActions.IsApproval(first.Need) && NeedActions.Url(first.Need) is not null;
+                bool single = arrived.Count == 1 && NeedActions.IsApproval(first.Need) && NeedActions.GoesToPage(first.Need);
                 string title = arrived.Count == 1
                     ? $"{(blocking ? "Blocking — " : "")}{OrchestraUsage.NeedKindLabel(first.Need.Kind)}"
                     : $"{arrived.Count} things need you{(blocking ? " (blocking)" : "")}";
