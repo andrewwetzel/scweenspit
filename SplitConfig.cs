@@ -208,6 +208,12 @@ public sealed class BarSettings
     public int? MachineWidth { get; set; }
     public int? OrchestraWidth { get; set; }
 
+    /// <summary>
+    /// The order of the tracker strips along the bar, by name, as dragged on the taskbar. Null is
+    /// the default order; a strip missing from the list goes back in where it sits by default.
+    /// </summary>
+    public List<string>? TrackerOrder { get; set; }
+
     /// <summary>List only windows on this display, rather than every window everywhere.</summary>
     public bool ThisDisplayOnly { get; set; } = true;
 
@@ -850,6 +856,7 @@ public sealed class SplitConfig
             bar.BambuWidth = bar.BambuWidth is > 0 and var bw ? Math.Clamp(bw, 44, 1200) : null;
             bar.MachineWidth = bar.MachineWidth is > 0 and var mw ? Math.Clamp(mw, 44, 1200) : null;
             bar.OrchestraWidth = bar.OrchestraWidth is > 0 and var ow ? Math.Clamp(ow, 44, 1200) : null;
+            bar.TrackerOrder = bar.TrackerOrder?.Where(n => !string.IsNullOrWhiteSpace(n)).ToList() is { Count: > 0 } order ? order : null;
             bar.Pinned ??= new();
             if (!EdgeNames.Contains(bar.Edge, StringComparer.OrdinalIgnoreCase)) bar.Edge = "Right";
         }

@@ -512,6 +512,12 @@ appears as soon as you tick it, showing an empty track until usage tracking is s
 session key is saved under Settings → Claude usage — hiding it until then made the toggle look
 broken. Clicking it goes to the settings page while it is unconfigured, and to claude.ai once it is.
 
+The tracker strips — usage, remote chats, orchestrator, printers, this machine — can be **dragged
+along the bar into any order**: press on one and move, and the others make room as it goes; let go
+and the order is kept for that bar. A press that does not move is still a click. Dragging the
+divider at a strip's edge resizes it instead. Right-click a divider, or use Settings → Taskbar, to
+put the default order back.
+
 The status cluster at the far end carries the **ScweenSpit button**, then **volume, network, battery
 and a clock**. Each opens the matching Windows settings page; ScweenSpit opens its own menu, which
 matters once the Windows taskbar is hidden — our tray icon goes with it, and without this there

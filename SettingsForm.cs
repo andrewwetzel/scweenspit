@@ -1117,7 +1117,8 @@ public sealed class SettingsForm : Form
             Row(page, "Max rows per tracker column (horizontal bar)", trackerRows);
             page.Controls.Add(Theme.Caption(
                 "You can also drag the dividers on the taskbar to resize individual trackers (e.g. making " +
-                "Computer usage smaller), or double-click a divider to reset it. " +
+                "Computer usage smaller), or double-click a divider to reset it. Drag a tracker itself " +
+                "along the bar to change the order they sit in. " +
                 "3 rows per column puts 5 Bambu printers or multiple server rows into 2 side-by-side " +
                 "columns. Raising the bar's Thickness above 50 px also scales up tracker fonts and bars."));
 
@@ -1147,6 +1148,20 @@ public sealed class SettingsForm : Form
                     BeginInvoke(ShowTaskbar);
                 };
                 page.Controls.Add(resetWidths);
+            }
+
+            if (barSettings.TrackerOrder is not null)
+            {
+                var resetOrder = Theme.Action("Reset dragged tracker order");
+                resetOrder.AutoSize = true;
+                resetOrder.Margin = new Padding(0, 4, 0, 4);
+                resetOrder.Click += (_, _) =>
+                {
+                    barSettings.TrackerOrder = null;
+                    Save();
+                    BeginInvoke(ShowTaskbar);
+                };
+                page.Controls.Add(resetOrder);
             }
         }
     }

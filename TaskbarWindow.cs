@@ -108,6 +108,18 @@ public sealed class TaskbarWindow : Form
     private bool hoveredMachine;
     private TrackerSection? hoveredDivider;
     private TrackerSection? draggingDivider;
+
+    /// <summary>
+    /// A left press on a strip, not yet acted on: it is a click if released where it started, and
+    /// the start of dragging the strip somewhere else if the pointer moves first.
+    /// </summary>
+    private (TrackerSection Section, MouseEventArgs Press)? pendingStripPress;
+    private TrackerSection? draggingStrip;
+    private int stripGrabOffset, stripDragCoord;
+    private const int StripDragThreshold = 6;
+
+    /// <summary>Whether the press that is pending closed the remote chats menu on its way down.</summary>
+    private bool remoteMenuJustClosed;
     private int dragStartCoord;
     private int dragStartExtent;
     private long lastStatusPoll, lastMachinePoll;
@@ -631,18 +643,19 @@ public sealed class TaskbarWindow : Form
         return Math.Clamp(barLength - trayAndClock - minLeft - others, MinTrackerExtent, MaxTrackerExtent);
     }
 
-    private List<TrackerSection> VisibleTrackers()
+    private bool TrackerVisible(TrackerSection section) => section switch
     {
-        var list = new List<TrackerSection>(7);
-        if (UsageVisible) list.Add(TrackerSection.Usage);
-        if (ClaudeChatsVisible) list.Add(TrackerSection.ClaudeChats);
-        if (AntigravityVisible) list.Add(TrackerSection.Antigravity);
-        if (AntigravityChatsVisible) list.Add(TrackerSection.AntigravityChats);
-        if (OrchestraVisible) list.Add(TrackerSection.Orchestra);
-        if (BambuVisible) list.Add(TrackerSection.Bambu);
-        if (MachineVisible) list.Add(TrackerSection.Machine);
-        return list;
-    }
+        TrackerSection.Usage => UsageVisible,
+        TrackerSection.ClaudeChats => ClaudeChatsVisible,
+        TrackerSection.Antigravity => AntigravityVisible,
+        TrackerSection.AntigravityChats => AntigravityChatsVisible,
+        TrackerSection.Orchestra => OrchestraVisible,
+        TrackerSection.Bambu => BambuVisible,
+        _ => MachineVisible,
+    };
+
+    /// <summary>The strips being shown, in the saved order (not the live one mid-drag, which is built from this).</summary>
+    private List<TrackerSection> VisibleTrackers() => SavedTrackerOrder().Where(TrackerVisible).ToList();
 
     private TrackerSection? DividerUnder(Point p)
     {
@@ -668,6 +681,124 @@ public sealed class TaskbarWindow : Form
         return best;
     }
 
+    private static readonly TrackerSection[] DefaultTrackerOrder =
+    [
+        TrackerSection.Usage, TrackerSection.ClaudeChats, TrackerSection.Antigravity, TrackerSection.AntigravityChats,
+        TrackerSection.Orchestra, TrackerSection.Bambu, TrackerSection.Machine,
+    ];
+
+    /// <summary>
+    /// The strips in the order this bar was told, every one of them, shown or not. A strip the saved
+    /// order does not mention — new since it was saved — goes in after the one it follows by default,
+    /// rather than at the end where nobody would look for it.
+    /// </summary>
+    private List<TrackerSection> SavedTrackerOrder()
+    {
+        var order = new List<TrackerSection>(DefaultTrackerOrder.Length);
+        foreach (var name in settings.TrackerOrder ?? [])
+            if (Enum.TryParse<TrackerSection>(name, out var section) && !order.Contains(section))
+                order.Add(section);
+
+        for (int i = 0; i < DefaultTrackerOrder.Length; i++)
+        {
+            var section = DefaultTrackerOrder[i];
+            if (order.Contains(section)) continue;
+            int after = i == 0 ? -1 : order.IndexOf(DefaultTrackerOrder[i - 1]);
+            order.Insert(after + 1, section);
+        }
+        return order;
+    }
+
+    /// <summary>
+    /// The order strips are laid out in right now: the saved one, or while a strip is being dragged,
+    /// that order with the strip moved to where it would land — so the others make room as it goes.
+    /// </summary>
+    private List<TrackerSection> TrackerOrder()
+    {
+        var order = SavedTrackerOrder();
+        if (draggingStrip is not { } dragged) return order;
+
+        var ext = TrackerExtents();
+        var visible = new HashSet<TrackerSection>(VisibleTrackers());
+        var others = order.Where(s => s != dragged && visible.Contains(s)).ToList();
+
+        // Measured against the others laid out without it, so where it lands depends only on the
+        // pointer and not on where it was a moment ago — no flicker between two places.
+        int centre = stripDragCoord - stripGrabOffset + ExtentOf(ext, dragged) / 2;
+        int pos = StatusStart, index = 0;
+        foreach (var other in others)
+        {
+            int extent = ExtentOf(ext, other);
+            if (pos + extent / 2 < centre) index++;
+            pos += extent;
+        }
+
+        order.Remove(dragged);
+        if (index < others.Count) order.Insert(order.IndexOf(others[index]), dragged);
+        else if (others.Count > 0) order.Insert(order.IndexOf(others[^1]) + 1, dragged);
+        else order.Add(dragged);
+        return order;
+    }
+
+    private static int ExtentOf((int Usage, int ClaudeChats, int Antigravity, int AntigravityChats, int Orchestra, int Bambu, int Machine) e,
+                                TrackerSection section) => section switch
+    {
+        TrackerSection.Usage => e.Usage,
+        TrackerSection.ClaudeChats => e.ClaudeChats,
+        TrackerSection.Antigravity => e.Antigravity,
+        TrackerSection.AntigravityChats => e.AntigravityChats,
+        TrackerSection.Orchestra => e.Orchestra,
+        TrackerSection.Bambu => e.Bambu,
+        _ => e.Machine,
+    };
+
+    /// <summary>Where a strip begins along the bar. Hidden strips take no room, so they can be walked past.</summary>
+    private int StartFor(TrackerSection section)
+    {
+        var ext = TrackerExtents();
+        int pos = StatusStart;
+        foreach (var s in TrackerOrder())
+        {
+            if (s == section) return pos;
+            pos += ExtentOf(ext, s);
+        }
+        return pos;
+    }
+
+    private Rectangle StripAt(TrackerSection section)
+    {
+        int start = StartFor(section), extent = ExtentForTracker(section);
+        return Vertical ? new Rectangle(0, start, Width, extent) : new Rectangle(start, 0, extent, Height);
+    }
+
+    private TrackerSection? TrackerUnder(Point p)
+    {
+        foreach (var section in VisibleTrackers())
+            if (AreaForTracker(section).Contains(p)) return section;
+        return null;
+    }
+
+    /// <summary>The two AI services' strips read as one group each when they sit side by side.</summary>
+    private static int? AiFamily(TrackerSection section) => section switch
+    {
+        TrackerSection.Usage or TrackerSection.ClaudeChats => 0,
+        TrackerSection.Antigravity or TrackerSection.AntigravityChats => 1,
+        _ => null,
+    };
+
+    /// <summary>Puts the dragged strip down where it was last shown, and keeps that order.</summary>
+    private void DropStrip()
+    {
+        if (draggingStrip is null) return;
+        var order = TrackerOrder();
+        draggingStrip = null;
+        settings.TrackerOrder = order.Select(s => s.ToString()).ToList();
+        if (order.SequenceEqual(DefaultTrackerOrder)) settings.TrackerOrder = null;
+        Cursor = Cursors.Default;
+        PinsChanged?.Invoke();
+        Invalidate();
+    }
+
     private int UsageExtent => TrackerExtents().Usage;
     private int ClaudeChatsExtent => TrackerExtents().ClaudeChats;
     private int AntigravityExtent => TrackerExtents().Antigravity;
@@ -689,46 +820,26 @@ public sealed class TaskbarWindow : Form
     private int StatusStart => Math.Max(0, (Vertical ? Height : Width) - StatusExtent);
 
     /// <summary>
-    /// AI usage and remote chat strips are grouped by AI:
+    /// The strips run in the order this bar keeps (dragging one moves it); by default
     ///   [◆ Claude Usage │ ◆ Claude Chats]  ║  [✦ Antigravity Usage │ ✦ Antigravity Chats]
-    /// followed by the orchestrator, Bambu printers and Computer usage.
+    /// followed by the orchestrator, Bambu printers and Computer usage. The tray comes after them all.
     /// </summary>
-    private int UsageStart => StatusStart;
-    private int ClaudeChatsStart => UsageStart + UsageExtent;
-    private int AntigravityStart => ClaudeChatsStart + ClaudeChatsExtent;
-    private int AntigravityChatsStart => AntigravityStart + AntigravityExtent;
-    private int OrchestraStart => AntigravityChatsStart + AntigravityChatsExtent;
-    private int BambuStart => OrchestraStart + OrchestraExtent;
-    private int MachineStart => BambuStart + BambuExtent;
-    private int TrayStart => MachineStart + MachineExtent;
+    private int TrayStart
+    {
+        get
+        {
+            var (u, cc, a, ac, o, b, m) = TrackerExtents();
+            return StatusStart + u + cc + a + ac + o + b + m;
+        }
+    }
 
-    private Rectangle UsageArea => Vertical
-        ? new Rectangle(0, UsageStart, Width, UsageExtent)
-        : new Rectangle(UsageStart, 0, UsageExtent, Height);
-
-    private Rectangle ClaudeChatsArea => Vertical
-        ? new Rectangle(0, ClaudeChatsStart, Width, ClaudeChatsExtent)
-        : new Rectangle(ClaudeChatsStart, 0, ClaudeChatsExtent, Height);
-
-    private Rectangle AntigravityArea => Vertical
-        ? new Rectangle(0, AntigravityStart, Width, AntigravityExtent)
-        : new Rectangle(AntigravityStart, 0, AntigravityExtent, Height);
-
-    private Rectangle AntigravityChatsArea => Vertical
-        ? new Rectangle(0, AntigravityChatsStart, Width, AntigravityChatsExtent)
-        : new Rectangle(AntigravityChatsStart, 0, AntigravityChatsExtent, Height);
-
-    private Rectangle OrchestraArea => Vertical
-        ? new Rectangle(0, OrchestraStart, Width, OrchestraExtent)
-        : new Rectangle(OrchestraStart, 0, OrchestraExtent, Height);
-
-    private Rectangle BambuArea => Vertical
-        ? new Rectangle(0, BambuStart, Width, BambuExtent)
-        : new Rectangle(BambuStart, 0, BambuExtent, Height);
-
-    private Rectangle MachineArea => Vertical
-        ? new Rectangle(0, MachineStart, Width, MachineExtent)
-        : new Rectangle(MachineStart, 0, MachineExtent, Height);
+    private Rectangle UsageArea => StripAt(TrackerSection.Usage);
+    private Rectangle ClaudeChatsArea => StripAt(TrackerSection.ClaudeChats);
+    private Rectangle AntigravityArea => StripAt(TrackerSection.Antigravity);
+    private Rectangle AntigravityChatsArea => StripAt(TrackerSection.AntigravityChats);
+    private Rectangle OrchestraArea => StripAt(TrackerSection.Orchestra);
+    private Rectangle BambuArea => StripAt(TrackerSection.Bambu);
+    private Rectangle MachineArea => StripAt(TrackerSection.Machine);
 
     private Rectangle TrayAt(int index) => Vertical
         ? new Rectangle(0, TrayStart + index * StatusIconSize, Width, StatusIconSize)
@@ -998,6 +1109,32 @@ public sealed class TaskbarWindow : Form
             return;
         }
 
+        if (draggingStrip is not null)
+        {
+            stripDragCoord = Vertical ? e.Y : e.X;
+            Invalidate();
+            return;
+        }
+
+        if (pendingStripPress is { } press && (e.Button & MouseButtons.Left) != 0)
+        {
+            int coord = Vertical ? e.Y : e.X;
+            int pressed = Vertical ? press.Press.Y : press.Press.X;
+            if (Math.Abs(coord - pressed) < StripDragThreshold) return;
+
+            // Far enough that it is not a click with a shaky hand: pick the strip up.
+            pendingStripPress = null;
+            draggingStrip = press.Section;
+            stripGrabOffset = pressed - StartFor(press.Section);
+            stripDragCoord = coord;
+            Capture = true;
+            Cursor = Vertical ? Cursors.SizeNS : Cursors.SizeWE;
+            tips.SetToolTip(this, string.Empty);
+            TrackPreview(-1, false);
+            Invalidate();
+            return;
+        }
+
         var div = DividerUnder(e.Location);
         if (div is not null)
         {
@@ -1184,6 +1321,18 @@ public sealed class TaskbarWindow : Form
             PinsChanged?.Invoke();
             Invalidate();
         }
+
+        if (draggingStrip is not null)
+        {
+            DropStrip();
+            Capture = false;
+        }
+        else if (pendingStripPress is { } press && e.Button == MouseButtons.Left)
+        {
+            pendingStripPress = null;
+            if (AreaForTracker(press.Section).Contains(e.Location)) ClickTracker(press.Section, press.Press);
+        }
+        remoteMenuJustClosed = false;
     }
 
     protected override void OnMouseCaptureChanged(EventArgs e)
@@ -1195,6 +1344,9 @@ public sealed class TaskbarWindow : Form
             PinsChanged?.Invoke();
             Invalidate();
         }
+
+        // Losing the pointer mid-drag — a window popping up, say — puts the strip down where it was shown.
+        if (!Capture && draggingStrip is not null) DropStrip();
     }
 
     private void ShowDividerMenu(TrackerSection section, Point at)
@@ -1228,6 +1380,16 @@ public sealed class TaskbarWindow : Form
         })
         {
             Enabled = anyCustom,
+        });
+
+        menu.Items.Add(new ToolStripMenuItem("Reset tracker order", null, (_, _) =>
+        {
+            settings.TrackerOrder = null;
+            PinsChanged?.Invoke();
+            Invalidate();
+        })
+        {
+            Enabled = settings.TrackerOrder is not null,
         });
 
         menu.Show(at);
@@ -1268,61 +1430,20 @@ public sealed class TaskbarWindow : Form
             }
         }
 
-        if (UsageVisible && UsageArea.Contains(e.Location))
+        // Checked now, while the press that may have closed it is still recent; the click it
+        // turns into is only known on release.
+        remoteMenuJustClosed = Theme.WasJustDismissedAt("RemoteChats", Cursor.Position);
+
+        if (TrackerUnder(e.Location) is { } strip)
         {
-            // Not set up yet (or expired): the useful destination is our own settings page, not the
-            // website that cannot tell ScweenSpit anything until a credential is in place.
-            if (ClaudeUsage.Enabled && ClaudeUsage.Current is not { NeedsKey: true })
-                SystemStatus.Open(ClaudeUsage.UsagePage);
-            else if (SettingsRequested is not null)
-                SettingsRequested.Invoke("Claude usage");
+            preview.Dismiss();
+
+            // A left press may be the start of dragging the strip elsewhere, so what it does is
+            // decided when it is released. The other buttons act at once, as they always have.
+            if (e.Button == MouseButtons.Left)
+                pendingStripPress = (strip, e);
             else
-                MenuRequested?.Invoke(Cursor.Position);
-            return;
-        }
-
-        if (ClaudeChatsVisible && ClaudeChatsArea.Contains(e.Location))
-        {
-            HandleRemoteChatsClick(e, ClaudeChatsArea, RemoteChatService.Claude);
-            return;
-        }
-
-        if (AntigravityVisible && AntigravityArea.Contains(e.Location))
-        {
-            if (SettingsRequested is not null)
-                SettingsRequested.Invoke("Antigravity usage");
-            else
-                MenuRequested?.Invoke(Cursor.Position);
-            return;
-        }
-
-        if (AntigravityChatsVisible && AntigravityChatsArea.Contains(e.Location))
-        {
-            HandleRemoteChatsClick(e, AntigravityChatsArea, RemoteChatService.Antigravity);
-            return;
-        }
-
-        if (OrchestraVisible && OrchestraArea.Contains(e.Location))
-        {
-            if (SettingsRequested is not null)
-                SettingsRequested.Invoke("Orchestrator");
-            else
-                MenuRequested?.Invoke(Cursor.Position);
-            return;
-        }
-
-        if (BambuVisible && BambuArea.Contains(e.Location))
-        {
-            if (e.Button != MouseButtons.Right && BambuUsage.Enabled && BambuUsage.Current is not { NeedsAuth: true }
-                && BambuUsage.OpenSlicer())
-            {
-                return;
-            }
-
-            if (SettingsRequested is not null)
-                SettingsRequested.Invoke("Bambu printers");
-            else
-                MenuRequested?.Invoke(Cursor.Position);
+                ClickTracker(strip, e);
             return;
         }
 
@@ -1342,13 +1463,6 @@ public sealed class TaskbarWindow : Form
                 case Tray.Network: SystemStatus.Open("ms-settings:network"); break;
                 case Tray.Battery: SystemStatus.Open("ms-settings:batterysaver"); break;
             }
-            return;
-        }
-
-        if (MachineVisible && MachineArea.Contains(e.Location))
-        {
-            // Task Manager is where anyone would go next, and it opens with no taskbar at all.
-            SystemStatus.Open("taskmgr.exe");
             return;
         }
 
@@ -1457,6 +1571,58 @@ public sealed class TaskbarWindow : Form
         if (menu.Items.Count > 0) menu.Show(at); else menu.Dispose();
     }
 
+    /// <summary>What a click on each strip does.</summary>
+    private void ClickTracker(TrackerSection section, MouseEventArgs e)
+    {
+        switch (section)
+        {
+            case TrackerSection.Usage:
+                // Not set up yet (or expired): the useful destination is our own settings page, not the
+                // website that cannot tell ScweenSpit anything until a credential is in place.
+                if (ClaudeUsage.Enabled && ClaudeUsage.Current is not { NeedsKey: true })
+                    SystemStatus.Open(ClaudeUsage.UsagePage);
+                else
+                    OpenSettingsOrMenu("Claude usage");
+                break;
+
+            case TrackerSection.ClaudeChats:
+                HandleRemoteChatsClick(e, ClaudeChatsArea, RemoteChatService.Claude);
+                break;
+
+            case TrackerSection.Antigravity:
+                OpenSettingsOrMenu("Antigravity usage");
+                break;
+
+            case TrackerSection.AntigravityChats:
+                HandleRemoteChatsClick(e, AntigravityChatsArea, RemoteChatService.Antigravity);
+                break;
+
+            case TrackerSection.Orchestra:
+                OpenSettingsOrMenu("Orchestrator");
+                break;
+
+            case TrackerSection.Bambu:
+                if (e.Button != MouseButtons.Right && BambuUsage.Enabled && BambuUsage.Current is not { NeedsAuth: true }
+                    && BambuUsage.OpenSlicer())
+                    break;
+                OpenSettingsOrMenu("Bambu printers");
+                break;
+
+            case TrackerSection.Machine:
+                // Task Manager is where anyone would go next, and it opens with no taskbar at all.
+                SystemStatus.Open("taskmgr.exe");
+                break;
+        }
+    }
+
+    private void OpenSettingsOrMenu(string page)
+    {
+        if (SettingsRequested is not null)
+            SettingsRequested.Invoke(page);
+        else
+            MenuRequested?.Invoke(Cursor.Position);
+    }
+
     private void HandleRemoteChatsClick(MouseEventArgs e, Rectangle stripArea, RemoteChatService service)
     {
         if (!RemoteChatUsage.Enabled || RemoteChatUsage.Current is { NeedsAuth: true })
@@ -1485,8 +1651,11 @@ public sealed class TaskbarWindow : Form
     /// </summary>
     private void ShowRemoteChatsMenu(Point at, RemoteChatService? preferredService = null)
     {
-        if (Theme.WasJustDismissedAt("RemoteChats", at))
+        if (remoteMenuJustClosed || Theme.WasJustDismissedAt("RemoteChats", at))
+        {
+            remoteMenuJustClosed = false;
             return;
+        }
 
         var menu = Theme.Menu("RemoteChats");
         var reading = RemoteChatUsage.Current;
@@ -1779,12 +1948,22 @@ public sealed class TaskbarWindow : Form
 
         int maxRows = Math.Clamp(settings.TrackerMaxRows, 1, 6);
 
+        // Grouping follows the strips wherever they have been dragged: a Claude strip next to the
+        // other Claude strip shares its accent and gets the lighter inner divider, one moved away
+        // from it stands alone.
+        var shown = TrackerOrder().Where(TrackerVisible).ToList();
+        bool PairedWithPrevious(TrackerSection section)
+        {
+            int at = shown.IndexOf(section);
+            return at > 0 && AiFamily(section) is { } family && AiFamily(shown[at - 1]) == family;
+        }
+
         if (UsageVisible)
         {
             var strip = UsageArea;
             if (hoveredUsage) g.FillRectangle(hot, strip);
             UsageStrip.Paint(g, strip, ClaudeUsage.Current, maxRows);
-            DrawStripSeparator(strip, TrackerSection.Usage);
+            DrawStripSeparator(strip, TrackerSection.Usage, innerAiPair: PairedWithPrevious(TrackerSection.Usage));
         }
 
         if (ClaudeChatsVisible)
@@ -1793,18 +1972,15 @@ public sealed class TaskbarWindow : Form
             if (hoveredClaudeChats) g.FillRectangle(hot, strip);
             string? claudeHoverId = hoveredClaudeChats ? hoveredRemoteChatId : null;
             UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, claudeHoverId, hoveredClaudeChats, RemoteChatService.Claude);
-            DrawStripSeparator(strip, TrackerSection.ClaudeChats, innerAiPair: UsageVisible);
+            DrawStripSeparator(strip, TrackerSection.ClaudeChats, innerAiPair: PairedWithPrevious(TrackerSection.ClaudeChats));
         }
-
-        if (UsageVisible || ClaudeChatsVisible)
-            DrawAiGroupAccent(UsageStart, UsageExtent + ClaudeChatsExtent, claudeGroupAccent);
 
         if (AntigravityVisible)
         {
             var strip = AntigravityArea;
             if (hoveredAntigravity) g.FillRectangle(hot, strip);
             UsageStrip.PaintAntigravity(g, strip, AntigravityUsage.Current, maxRows);
-            DrawStripSeparator(strip, TrackerSection.Antigravity);
+            DrawStripSeparator(strip, TrackerSection.Antigravity, innerAiPair: PairedWithPrevious(TrackerSection.Antigravity));
         }
 
         if (AntigravityChatsVisible)
@@ -1813,11 +1989,22 @@ public sealed class TaskbarWindow : Form
             if (hoveredAntigravityChats) g.FillRectangle(hot, strip);
             string? agHoverId = hoveredAntigravityChats ? hoveredRemoteChatId : null;
             UsageStrip.PaintRemoteChats(g, strip, RemoteChatUsage.Current, maxRows, agHoverId, hoveredAntigravityChats, RemoteChatService.Antigravity);
-            DrawStripSeparator(strip, TrackerSection.AntigravityChats, innerAiPair: AntigravityVisible);
+            DrawStripSeparator(strip, TrackerSection.AntigravityChats, innerAiPair: PairedWithPrevious(TrackerSection.AntigravityChats));
         }
 
-        if (AntigravityVisible || AntigravityChatsVisible)
-            DrawAiGroupAccent(AntigravityStart, AntigravityExtent + AntigravityChatsExtent, agGroupAccent);
+        // One accent across each run of same-service strips.
+        for (int i = 0; i < shown.Count; i++)
+        {
+            if (AiFamily(shown[i]) is not { } family) continue;
+            int j = i;
+            while (j + 1 < shown.Count && AiFamily(shown[j + 1]) == family) j++;
+            var first = AreaForTracker(shown[i]);
+            var last = AreaForTracker(shown[j]);
+            int start = Vertical ? first.Y : first.X;
+            int end = Vertical ? last.Bottom : last.Right;
+            DrawAiGroupAccent(start, end - start, family == 0 ? claudeGroupAccent : agGroupAccent);
+            i = j;
+        }
 
         if (OrchestraVisible)
         {
@@ -1841,6 +2028,16 @@ public sealed class TaskbarWindow : Form
             if (hoveredMachine) g.FillRectangle(hot, strip);
             MeterStrip.Paint(g, strip, machine, maxRowsPerColumn: maxRows);
             DrawStripSeparator(strip, TrackerSection.Machine);
+        }
+
+        // The strip in hand, wherever it would land if let go now.
+        if (draggingStrip is { } dragged && TrackerVisible(dragged))
+        {
+            var box = AreaForTracker(dragged);
+            box.Inflate(-1, -1);
+            g.FillRectangle(resizeWash, box);
+            using var outline = new Pen(Theme.Accent, 2f);
+            g.DrawRectangle(outline, box.X, box.Y, box.Width - 1, box.Height - 1);
         }
 
         var items = TrayItems();
