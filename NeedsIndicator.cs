@@ -138,6 +138,16 @@ public sealed class NeedsIndicator : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// A need's own card was clicked: its page when that is where it gets dealt with, otherwise
+    /// the list — which is also what a right-click always opens.
+    /// </summary>
+    public void ActOn(OrchestraNeedItem item, Point near, bool list)
+    {
+        if (!list && item.Waiting && NeedActions.GoesToPage(item.Need) && NeedActions.OpenLatest(item)) return;
+        OpenPanel(near);
+    }
+
     /// <summary>Something new arrived: draw the eye to wherever the indicator is.</summary>
     public void Announce()
     {

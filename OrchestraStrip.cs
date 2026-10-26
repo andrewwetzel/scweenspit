@@ -83,7 +83,12 @@ internal static class OrchestraStrip
             && last.ShowTimer == showTimer && last.Timers == timers)
             return last.Extent;
 
-        int natural = Layout(measure, new Rectangle(0, 0, 4000, Math.Max(24, barBreadth)), chunks, needs, maxRowsPerColumn, showTimer, draw: false);
+        // Across the bar, needs are cards rather than a row; a vertical bar has no room for cards.
+        var probe = new Rectangle(0, 0, 4000, Math.Max(24, barBreadth));
+        int cardsWidth = CardsWidth(probe, CardItems(reading).Count);
+        int natural = cardsWidth + (chunks.Count > 0 || cardsWidth == 0
+            ? Layout(measure, probe, chunks, cardsWidth > 0 ? null : needs, maxRowsPerColumn, showTimer, draw: false)
+            : 0);
 
         // Scaled like the other strips, but never below what the words need: a timer cut off
         // mid-digit is worse than a strip a few pixels wider than its neighbours.
@@ -106,9 +111,174 @@ internal static class OrchestraStrip
 
         bool showTimer = OrchestraUsage.ShowTimer;
         if (area.Height > area.Width)
+        {
             PaintVertical(g, area, chunks, needs, showTimer);
-        else
-            Layout(g, area, chunks, needs, maxRowsPerColumn, showTimer, draw: true);
+            return;
+        }
+
+        var items = CardItems(reading);
+        int cardsWidth = CardsWidth(area, items.Count);
+        if (cardsWidth > 0) PaintCards(g, area, items, hoveredCard);
+        if (chunks.Count > 0 || cardsWidth == 0)
+            Layout(g, new Rectangle(area.X + cardsWidth, area.Y, Math.Max(1, area.Width - cardsWidth), area.Height),
+                   chunks, cardsWidth > 0 ? null : needs, maxRowsPerColumn, showTimer, draw: true);
+    }
+
+    // ---- need cards ------------------------------------------------------------
+
+    /// <summary>Beyond this many, the rest are one "+N" card: the bar has other things to show.</summary>
+    public const int MaxCards = 6;
+
+    /// <summary>The card under the pointer, by need key, so it can be lit; set by the bar before it paints.</summary>
+    public static string? hoveredCard;
+
+    /// <summary>
+    /// The needs as cards, newest first: each new one lines up on the left of the last, so the
+    /// row reads from what just arrived to what has been waiting longest.
+    /// </summary>
+    public static IReadOnlyList<OrchestraNeedItem> CardItems(OrchestraReading? reading) =>
+        (reading?.Needs ?? []).OrderByDescending(i => i.Need.CreatedAt ?? DateTimeOffset.MinValue).ToList();
+
+    public static string CardKey(OrchestraNeedItem i) => i.Feed.Url + "\n" + i.Need.Id;
+
+    /// <summary>Where each card goes in <paramref name="area"/>, and the "+N" card if there is one.</summary>
+    private static (List<Rectangle> Cards, Rectangle? More, int Width) CardLayout(Rectangle area, int count)
+    {
+        var cards = new List<Rectangle>();
+        if (count == 0) return (cards, null, 0);
+
+        int vPad = area.Height >= 56 ? 5 : 3;
+        int h = Math.Max(16, area.Height - vPad * 2);
+        int w = Math.Clamp((int)Math.Round(h * 3.1), 96, 200);
+        int gap = Math.Clamp(h / 9, 3, 8);
+        int x = area.X + 4;
+        for (int i = 0; i < Math.Min(count, MaxCards); i++)
+        {
+            cards.Add(new Rectangle(x, area.Y + vPad, w, h));
+            x += w + gap;
+        }
+        Rectangle? more = null;
+        if (count > MaxCards)
+        {
+            more = new Rectangle(x, area.Y + vPad, Math.Max(h, 30), h);
+            x += more.Value.Width + gap;
+        }
+        return (cards, more, x - area.X + 2);
+    }
+
+    private static int CardsWidth(Rectangle area, int count) => CardLayout(area, count).Width;
+
+    /// <summary>The need whose card is under <paramref name="p"/>, or null; <paramref name="more"/> when it is the "+N" card.</summary>
+    public static OrchestraNeedItem? CardAt(Rectangle area, Point p, out bool more)
+    {
+        more = false;
+        if (area.Height > area.Width) return null;
+        var items = CardItems(OrchestraUsage.Current);
+        var (cards, moreCard, _) = CardLayout(area, items.Count);
+        for (int i = 0; i < cards.Count; i++)
+            if (cards[i].Contains(p)) return items[i];
+        if (moreCard is { } m && m.Contains(p)) more = true;
+        return null;
+    }
+
+    private static void PaintCards(Graphics g, Rectangle area, IReadOnlyList<OrchestraNeedItem> items, string? hovered)
+    {
+        var (cards, more, _) = CardLayout(area, items.Count);
+        var smoothing = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        long now = Environment.TickCount64;
+
+        for (int i = 0; i < cards.Count; i++)
+        {
+            var item = items[i];
+            var box = cards[i];
+            bool waiting = item.Waiting;
+            var accent = !waiting ? Theme.Muted : item.Need.Blocking ? BlockingColour : NeedColour;
+            bool lit = hovered == CardKey(item);
+
+            using (var path = Rounded(box, Math.Min(6, box.Height / 4)))
+            {
+                using var back = new SolidBrush(lit ? Color.FromArgb(52, 57, 70) : Color.FromArgb(38, 42, 51));
+                g.FillPath(back, path);
+                using var rim = new Pen(Color.FromArgb(waiting ? 150 : 60, accent), 1f);
+                g.DrawPath(rim, path);
+            }
+            using (var bar = new SolidBrush(accent))
+                g.FillRectangle(bar, box.X + 1, box.Y + 3, 3, box.Height - 6);
+
+            var text = new Rectangle(box.X + 8, box.Y + 1, box.Width - 11, box.Height - 2);
+            string kind = OrchestraUsage.NeedKindLabel(item.Need.Kind).ToUpperInvariant();
+            string age = item.Age(now) is { } a ? (a.TotalMinutes < 1 ? "now" : OrchestraUsage.FormatAge(a)) : "";
+            string title = (waiting ? "" : item.Done ? "✓ " : "? ") + item.Need.Title;
+
+            using var format = new StringFormat
+            {
+                Trimming = StringTrimming.EllipsisCharacter,
+                FormatFlags = StringFormatFlags.NoWrap,
+                LineAlignment = StringAlignment.Center,
+            };
+            if (box.Height >= 30)
+            {
+                // Two lines: what kind and how long, then what.
+                int line = text.Height / 2;
+                using var small = Theme.Face(Math.Clamp(line * 0.42f, 6.2f, 9f), FontStyle.Bold);
+                using var big = Theme.Face(Math.Clamp(line * 0.5f, 7f, 10.5f), FontStyle.Bold);
+                using (var kindBrush = new SolidBrush(accent))
+                    g.DrawString(age.Length > 0 ? $"{kind} · {age}" : kind, small, kindBrush,
+                                 new RectangleF(text.X, text.Y + 1, text.Width, line), format);
+                using var titleBrush = new SolidBrush(waiting ? Theme.Text : Theme.Muted);
+                g.DrawString(title, big, titleBrush, new RectangleF(text.X, text.Y + line - 1, text.Width, text.Height - line), format);
+            }
+            else
+            {
+                using var font = Theme.Face(Math.Clamp(text.Height * 0.42f, 6.4f, 9f), FontStyle.Bold);
+                using var titleBrush = new SolidBrush(waiting ? Theme.Text : Theme.Muted);
+                g.DrawString(title, font, titleBrush, new RectangleF(text.X, text.Y, text.Width, text.Height), format);
+            }
+        }
+
+        if (more is { } m)
+        {
+            using (var path = Rounded(m, Math.Min(6, m.Height / 4)))
+            {
+                using var back = new SolidBrush(Color.FromArgb(38, 42, 51));
+                g.FillPath(back, path);
+            }
+            using var font = Theme.Face(Math.Clamp(m.Height * 0.3f, 7f, 10f), FontStyle.Bold);
+            using var brush = new SolidBrush(Theme.Muted);
+            using var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            g.DrawString($"+{items.Count - cards.Count}", font, brush, m, centred);
+        }
+
+        g.SmoothingMode = smoothing;
+    }
+
+    private static GraphicsPath Rounded(Rectangle r, int radius)
+    {
+        var path = new GraphicsPath();
+        int d = Math.Max(2, radius * 2);
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d - 1, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d - 1, r.Bottom - d - 1, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d - 1, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    /// <summary>A card's tooltip: everything the card has no room for.</summary>
+    public static string CardTip(OrchestraNeedItem item)
+    {
+        var need = item.Need;
+        var text = new StringBuilder($"{OrchestraUsage.NeedKindLabel(need.Kind)}{(need.Blocking ? " — blocking" : "")}: {need.Title}");
+        if (need.Where is { Length: > 0 } where) text.AppendLine().Append(where);
+        if (item.Age(Environment.TickCount64) is { } age) text.Append($" · waiting {OrchestraUsage.FormatAge(age)}");
+        if (need.Detail is { } detail) text.AppendLine().Append(detail);
+        if (item.Done) text.AppendLine().Append("Done — waiting for the orchestrator to confirm.");
+        else if (item.Feed.Stale) text.AppendLine().Append("The feed has stopped answering; this may already be dealt with.");
+        text.AppendLine().AppendLine().Append(NeedActions.GoesToPage(need) && item.Waiting
+            ? "Click to open it; right-click for the list."
+            : "Click to deal with it in the list.");
+        return text.ToString();
     }
 
     /// <summary>

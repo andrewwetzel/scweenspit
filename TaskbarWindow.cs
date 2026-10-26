@@ -104,6 +104,7 @@ public sealed class TaskbarWindow : Form
     private bool hoveredAntigravityChats;
     private string? hoveredRemoteChatId;
     private bool hoveredOrchestra;
+    private string? hoveredCard;
     private bool hoveredBambu;
     private bool hoveredMachine;
     private TrackerSection? hoveredDivider;
@@ -162,6 +163,9 @@ public sealed class TaskbarWindow : Form
     /// clicked and whether it was the list that was asked for (right-click) rather than the need.
     /// </summary>
     public event Action<Point, bool>? NeedsRequested;
+
+    /// <summary>A need's card on the orchestrator strip was clicked: the need, where, and whether it was a right-click.</summary>
+    public event Action<OrchestraNeedItem, Point, bool>? NeedCardClicked;
 
     /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
     public event Action? PinsChanged;
@@ -1163,6 +1167,7 @@ public sealed class TaskbarWindow : Form
                 hoveredAntigravityChats = false;
                 hoveredRemoteChatId = null;
                 hoveredOrchestra = false;
+                hoveredCard = OrchestraStrip.hoveredCard = null;
                 hoveredBambu = false;
                 hoveredMachine = false;
                 hoveredStart = false;
@@ -1191,6 +1196,16 @@ public sealed class TaskbarWindow : Form
                         : null;
         string? remoteChatCircleId = remoteChatCircle?.Id;
         bool orchestra = OrchestraVisible && OrchestraArea.Contains(e.Location);
+        var card = orchestra ? OrchestraStrip.CardAt(OrchestraArea, e.Location, out _) : null;
+        string? cardKey = card is null ? null : OrchestraStrip.CardKey(card);
+        if (cardKey != hoveredCard)
+        {
+            // Card to card within the strip changes nothing else, so it is handled before the early return.
+            hoveredCard = cardKey;
+            OrchestraStrip.hoveredCard = cardKey;
+            if (orchestra == hoveredOrchestra) tips.SetToolTip(this, card is not null ? OrchestraStrip.CardTip(card) : OrchestraStrip.Tip(OrchestraUsage.Current));
+            Invalidate(OrchestraArea);
+        }
         bool bambu = BambuVisible && BambuArea.Contains(e.Location);
         bool load = MachineVisible && MachineArea.Contains(e.Location);
         bool start = settings.ShowStartButton && StartSlot.Contains(e.Location);
@@ -1221,7 +1236,7 @@ public sealed class TaskbarWindow : Form
         tips.SetToolTip(this, start ? "Start"
                             : load ? MachineTip()
                             : bambu ? UsageStrip.BambuTip(BambuUsage.Current)
-                            : orchestra ? OrchestraStrip.Tip(OrchestraUsage.Current)
+                            : orchestra ? (card is not null ? OrchestraStrip.CardTip(card) : OrchestraStrip.Tip(OrchestraUsage.Current))
                             : remoteChatCircle is not null ? UsageStrip.RemoteChatItemTip(remoteChatCircle)
                             : claudeChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current, RemoteChatService.Claude)
                             : agChats ? UsageStrip.RemoteChatsTip(RemoteChatUsage.Current, RemoteChatService.Antigravity)
@@ -1314,6 +1329,7 @@ public sealed class TaskbarWindow : Form
         hoveredAntigravityChats = false;
         hoveredRemoteChatId = null;
         hoveredOrchestra = false;
+        hoveredCard = OrchestraStrip.hoveredCard = null;
         hoveredBambu = false;
         hoveredMachine = false;
         hoveredDivider = null;
@@ -1648,9 +1664,15 @@ public sealed class TaskbarWindow : Form
                 break;
 
             case TrackerSection.Orchestra:
+                if (OrchestraStrip.CardAt(OrchestraArea, e.Location, out bool moreCards) is { } clickedCard
+                    && NeedCardClicked is not null)
+                {
+                    NeedCardClicked(clickedCard, Cursor.Position, e.Button == MouseButtons.Right);
+                    break;
+                }
                 if (NeedsRequested is not null && OrchestraUsage.Current is { Needs.Count: > 0 })
                 {
-                    NeedsRequested(Cursor.Position, e.Button == MouseButtons.Right);
+                    NeedsRequested(Cursor.Position, moreCards || e.Button == MouseButtons.Right);
                     break;
                 }
                 OpenSettingsOrMenu("Orchestrator");

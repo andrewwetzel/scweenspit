@@ -639,10 +639,13 @@ Some things the orchestrator cannot do for itself: a passkey approval in the Rel
 to merge by hand, signing in again, a manual step, a question waiting in its own Claude session. The
 feed lists them under `needs`, and ScweenSpit makes sure you see them:
 
-- **The strip** gets a Needs row beneath its chunks — `! 2 need you`, amber, or red when any of them
-  is blocking a run — and stays on the bar while anything is listed, even with no run in flight. It
-  pulses when something new arrives. Right-click the strip for the list; the list links to the
-  settings.
+- **The strip** gets a small card per need, to the left of its repo chunks — what kind, how long it
+  has waited, and the title, edged in amber or in red when it is blocking a run. Each new one lines up
+  on the left of the last, so the row reads from what just arrived to what has waited longest; past
+  six, the rest are a `+N` card. Hovering a card shows the rest of it, clicking it deals with that
+  need (its page, or the list when it is answered or approved there), and right-clicking opens the
+  list. The strip stays on the bar while anything is listed, even with no run in flight, and pulses
+  when something new arrives. A vertical bar has no room for cards and shows the count instead.
 - **One click to the page.** With exactly one need outstanding and a page to open for it, clicking
   the strip, the pill or the taskbar button goes straight there — for an approval, that request's
   own page in the Release Console, `https://deploy.lionpower.app/#approval/<id>`. The next click
