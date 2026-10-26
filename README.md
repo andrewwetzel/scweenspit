@@ -661,6 +661,10 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
   there. A ScweenSpit bar drawing the strip counts as room. Re-decided whenever the displays, their
   scale or the settings change. **Settings ▸ Orchestrator ▸ Show what needs you** forces Taskbar,
   Floating or Off.
+- **A preview.** **Settings ▸ Orchestrator ▸ Preview** shows one made-up blocking approval for two
+  minutes, through the strip, the indicator and the notification, so you can see it all without the
+  orchestrator needing anything. Done on it is sent nowhere. The same page lists what ScweenSpit
+  believes is waiting and which indicator it chose, and why.
 - **A notification** for each new need, once — by id, not by poll — warning-styled when it is
   blocking. Clicking it opens the list. Off under the same settings page.
 

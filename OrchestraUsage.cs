@@ -423,6 +423,7 @@ public static class OrchestraUsage
         var feeds = settings is null
             ? []
             : Urls(settings).Select(u => byUrl.TryGetValue(u, out var f) ? f : Unanswered(u, null)).ToList();
+        if (preview is not null && settings is { Enabled: true }) feeds.Add(preview);
         current = new OrchestraReading(feeds);
 
         if (force || !Same(previous, current)) FireChanged();
@@ -451,6 +452,60 @@ public static class OrchestraUsage
                     return false;
         }
         return true;
+    }
+
+    // ---- preview -------------------------------------------------------------
+
+    /// <summary>Stands in for a feed URL; never asked, and Done for it is posted nowhere.</summary>
+    public const string PreviewFeedUrl = "preview:scweenspit";
+
+    private static OrchestraFeed? preview;
+    private static System.Threading.Timer? previewEnd;
+
+    public static bool Previewing => preview is not null;
+
+    /// <summary>
+    /// Shows one made-up approval for <paramref name="duration"/>, through everything a real one
+    /// goes through — the strip, the indicator, the notification — so it can be seen without an
+    /// orchestrator having to need anything. Nothing is sent anywhere.
+    /// </summary>
+    public static void Preview(TimeSpan duration)
+    {
+        lock (gate)
+        {
+            if (settings is not { Enabled: true }) return;
+            long tick = Environment.TickCount64;
+            var now = DateTimeOffset.UtcNow;
+            var need = new OrchestraNeed(
+                $"preview-{tick:x}", "approve", "Preview: approve merging MR !520 into release/v3.0.0",
+                "A made-up need, to show what one looks like. Nothing happens when you press Done.",
+                "https://deploy.lionpower.app/#approvals", null, "monopoly", "preview", null,
+                now.AddMinutes(-2), Blocking: true, DoneAt: null);
+            markedDone.RemoveWhere(k => k.StartsWith(PreviewFeedUrl + "\n", StringComparison.Ordinal));
+            preview = new OrchestraFeed(PreviewFeedUrl, "preview", Answered: true, Active: false, StartedAt: null,
+                                        GeneratedAt: now, ReceivedTick: tick, Children: [], Caps: [], Runs: [],
+                                        Needs: [need], Error: null, LastAnswerTick: long.MaxValue / 2);
+            announced.Add(Key(PreviewFeedUrl, need.Id));
+            Interlocked.Exchange(ref glowStartTick, tick);
+            RebuildLocked(force: true);
+            FireNeedsArrived([new OrchestraNeedItem(preview, need)]);
+
+            previewEnd?.Dispose();
+            previewEnd = new System.Threading.Timer(_ => EndPreview(), null, duration, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    public static void EndPreview()
+    {
+        lock (gate)
+        {
+            if (preview is null) return;
+            preview = null;
+            previewEnd?.Dispose();
+            previewEnd = null;
+            markedDone.RemoveWhere(k => k.StartsWith(PreviewFeedUrl + "\n", StringComparison.Ordinal));
+            RebuildLocked(force: true);
+        }
     }
 
     private static void FireNeedsArrived(IReadOnlyList<OrchestraNeedItem> items)
@@ -486,6 +541,17 @@ public static class OrchestraUsage
     /// </summary>
     public static async Task<string?> MarkDoneAsync(OrchestraNeedItem item)
     {
+        if (item.Feed.Url == PreviewFeedUrl)
+        {
+            // Nobody to tell: it is marked done here, and goes when the preview ends.
+            lock (gate)
+            {
+                markedDone.Add(Key(item.Feed.Url, item.Need.Id));
+                RebuildLocked(force: true);
+            }
+            return null;
+        }
+
         if (DoneUrl(item.Feed.Url, item.Need.Id) is not { } url) return "the feed URL is not absolute";
 
         string? error = null;

@@ -2387,6 +2387,15 @@ public sealed class SettingsForm : Form
         toast.CheckedChanged += (_, _) => { orchestra.NeedsToast = toast.Checked; Save(); };
         page.Controls.Add(toast);
 
+        var preview = Theme.Action("Preview: show a test need for 2 minutes");
+        preview.AutoSize = true;
+        preview.Click += (_, _) =>
+        {
+            OrchestraUsage.Preview(TimeSpan.FromMinutes(2));
+            Say("Showing a made-up approval for 2 minutes — look at the taskbar, or for the floating pill");
+        };
+        page.Controls.Add(preview);
+
         if (orchestra.NeedsPillX is not null)
         {
             var corner = Theme.Action("Put the floating pill back by the clock");
@@ -2464,7 +2473,18 @@ public sealed class SettingsForm : Form
             state.Text = feedsNow.Count == 0
                 ? "No feeds configured."
                 : string.Join(Environment.NewLine + Environment.NewLine,
-                              feedsNow.Select(f => $"{f.Url}{Environment.NewLine}{OrchestraStrip.Describe(f, now)}"));
+                              feedsNow.Where(f => f.Url != OrchestraUsage.PreviewFeedUrl)
+                                      .Select(f => $"{f.Url}{Environment.NewLine}{OrchestraStrip.Describe(f, now)}"));
+
+            // What ScweenSpit believes is waiting, so a missing indicator can be told from an empty list.
+            var needsNow = OrchestraUsage.Current?.Needs ?? [];
+            state.Text += Environment.NewLine + Environment.NewLine + (needsNow.Count == 0
+                ? "Needs you: nothing listed."
+                : "Needs you:" + string.Concat(needsNow.Select(i =>
+                    $"{Environment.NewLine}  {(i.Need.Blocking ? "⚠" : "•")} {OrchestraUsage.NeedKindLabel(i.Need.Kind)}: {i.Need.Title}" +
+                    (i.Done ? " (done, confirming)" : "") + $" [{i.Need.Id}]")));
+            if (NeedsIndicator.LastDecision is { Length: > 0 } why)
+                state.Text += $"{Environment.NewLine}Indicator: {why}.";
         }
         Report();
 
