@@ -808,11 +808,33 @@ internal sealed class NeedsPanel : Form
         row.Controls.Add(meta);
 
         if (need.Detail is { } detail)
-            row.Controls.Add(new Label
+        {
+            // Details can run to paragraphs. A line or two, and the rest only when asked for.
+            const int Short = 140;
+            bool longOne = detail.Length > Short;
+            var about = new Label
             {
-                Text = detail, AutoSize = true, MaximumSize = new Size(inner, 0), ForeColor = Theme.Muted,
-                Font = Px(12), Margin = new Padding(0, 0, 0, S(4)), UseMnemonic = false,
-            });
+                Text = longOne && !expanded.Contains(Key(item)) ? detail[..Short].TrimEnd() + "…" : detail,
+                AutoSize = true, MaximumSize = new Size(inner, 0), ForeColor = Theme.Muted,
+                Font = Px(12), Margin = new Padding(0, 0, 0, longOne ? 0 : S(4)), UseMnemonic = false,
+            };
+            row.Controls.Add(about);
+            if (longOne)
+            {
+                bool open = expanded.Contains(Key(item));
+                var toggle = new LinkLabel
+                {
+                    Text = open ? "Less" : "More", AutoSize = true, Font = Px(12), Margin = new Padding(0, 0, 0, S(4)),
+                    LinkColor = Theme.Accent, ActiveLinkColor = Theme.Text, LinkBehavior = LinkBehavior.HoverUnderline,
+                };
+                toggle.LinkClicked += (_, _) =>
+                {
+                    if (!expanded.Add(Key(item))) expanded.Remove(Key(item));
+                    BeginInvoke(() => Refill(force: true));
+                };
+                row.Controls.Add(toggle);
+            }
+        }
 
         if (need.Command is { } command)
             row.Controls.Add(new TextBox
@@ -979,6 +1001,9 @@ internal sealed class NeedsPanel : Form
 
     /// <summary>Typed answers and ticked choices, kept across rebuilds of the rows until sent.</summary>
     private readonly Dictionary<string, string> drafts = new(StringComparer.Ordinal);
+
+    /// <summary>Needs whose long detail has been opened out with More.</summary>
+    private readonly HashSet<string> expanded = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HashSet<string>> picks = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -1146,12 +1171,10 @@ internal sealed class NeedsPanel : Form
 internal sealed class NeedCard : Form
 {
     private readonly double scale;
-    private readonly ToolTip tip = new() { InitialDelay = 400 };
     private readonly System.Windows.Forms.Timer pulse = new() { Interval = 33 };
     private readonly Font kindFont, titleFont, detailFont;
     private long pulseStart;
     private bool hot;
-    private string tipText = "";
 
     public OrchestraNeedItem? Item { get; private set; }
     private int more;
@@ -1198,24 +1221,17 @@ internal sealed class NeedCard : Form
     private Font Px(float px, FontStyle style = FontStyle.Regular) =>
         new("Segoe UI", (float)(px * scale), style, GraphicsUnit.Pixel);
 
+    // No tooltip: details can run to paragraphs, and the popup a click opens shows them anyway.
     public void Set(OrchestraNeedItem item)
     {
         Item = item;
         more = 0;
-        var need = item.Need;
-        string text = $"{OrchestraUsage.NeedKindLabel(need.Kind)}{(need.Blocking ? " — blocking" : "")}: {need.Title}"
-                      + (need.Where is { Length: > 0 } where ? $"\n{where}" : "")
-                      + (need.Detail is { } detail ? $"\n{detail}" : "")
-                      + "\n\nClick for what you can do about it; right-click for everything waiting.";
-        if (text != tipText) tip.SetToolTip(this, tipText = text);
     }
 
     public void SetMore(int count)
     {
         Item = null;
         more = count;
-        string text = $"{count} more waiting — click for the whole list.";
-        if (text != tipText) tip.SetToolTip(this, tipText = text);
         Invalidate();
     }
 
@@ -1323,7 +1339,6 @@ internal sealed class NeedCard : Form
         if (disposing)
         {
             pulse.Dispose();
-            tip.Dispose();
             kindFont.Dispose();
             titleFont.Dispose();
             detailFont.Dispose();
