@@ -151,6 +151,7 @@ public static class RemoteChatUsage
 
     private static string? cachedClaudeEnvsBody;
     private static DateTimeOffset cachedClaudeEnvsUtc = DateTimeOffset.MinValue;
+    private static readonly HashSet<string> knownUnmappedClaudeEnvIds = new(StringComparer.Ordinal);
     private static DateTime cachedClaudeGlobalConfigWriteUtc = DateTime.MinValue;
 
     private static PollServiceResult? lastClaudePoll;
@@ -861,7 +862,7 @@ public static class RemoteChatUsage
         {
             if (envsReply is null)
             {
-                var envTask = Task.Run(() => GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid));
+                var envTask = Task.Run(() => GetAnthropicOAuth("/v1/environment_providers?limit=100", oauthToken, orgUuid));
                 var sessTask = Task.Run(() => GetAnthropicOAuth("/v1/code/sessions?limit=50", oauthToken, orgUuid));
                 Task.WhenAll(envTask, sessTask).GetAwaiter().GetResult();
                 envsReply = envTask.Result;
@@ -880,7 +881,7 @@ public static class RemoteChatUsage
                     oauthToken = refreshed;
                     orgUuid = ResolveClaudeOrgUuid(oauthToken) ?? orgUuid;
                     if (envsReply is not { Status: >= 200 and < 300 })
-                        envsReply = GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid);
+                        envsReply = GetAnthropicOAuth("/v1/environment_providers?limit=100", oauthToken, orgUuid);
                     if (sessionsReply is not { Status: >= 200 and < 300 })
                         sessionsReply = GetAnthropicOAuth("/v1/code/sessions?limit=50", oauthToken, orgUuid);
                 }
@@ -888,14 +889,14 @@ public static class RemoteChatUsage
 
             if (envsReply is not { Status: >= 200 and < 300 })
             {
-                var v1Envs = GetAnthropicOAuth("/v1/environments", oauthToken, orgUuid);
+                var v1Envs = GetAnthropicOAuth("/v1/environments?limit=100", oauthToken, orgUuid);
                 if (v1Envs is { Status: >= 200 and < 300 } || envsReply is null)
                     envsReply = v1Envs;
             }
 
             if (sessionsReply is not { Status: >= 200 and < 300 })
             {
-                var v1Sessions = GetAnthropicOAuth("/v1/sessions", oauthToken, orgUuid);
+                var v1Sessions = GetAnthropicOAuth("/v1/sessions?limit=50", oauthToken, orgUuid);
                 if (v1Sessions is { Status: >= 200 and < 300 } || sessionsReply is null)
                     sessionsReply = v1Sessions;
             }
@@ -910,10 +911,10 @@ public static class RemoteChatUsage
         {
             if (envsReply is not { Status: >= 200 and < 300 })
             {
-                var keyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers", orgUuid);
+                var keyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers?limit=100", orgUuid);
                 if (keyEnvs is not { Status: >= 200 and < 300 })
                 {
-                    var altKeyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environments", orgUuid);
+                    var altKeyEnvs = ClaudeUsage.GetWithStoredSessionKey("/v1/environments?limit=100", orgUuid);
                     if (altKeyEnvs is { Status: >= 200 and < 300 } || keyEnvs is null)
                         keyEnvs = altKeyEnvs;
                 }
@@ -926,7 +927,7 @@ public static class RemoteChatUsage
                 var keySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/code/sessions?limit=50", orgUuid);
                 if (keySessions is not { Status: >= 200 and < 300 })
                 {
-                    var altKeySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/sessions", orgUuid);
+                    var altKeySessions = ClaudeUsage.GetWithStoredSessionKey("/v1/sessions?limit=50", orgUuid);
                     if (altKeySessions is { Status: >= 200 and < 300 } || keySessions is null)
                         keySessions = altKeySessions;
                 }
@@ -950,6 +951,7 @@ public static class RemoteChatUsage
         {
             cachedClaudeEnvsBody = envsReply!.Value.Body;
             cachedClaudeEnvsUtc = DateTimeOffset.UtcNow;
+            knownUnmappedClaudeEnvIds.Clear();
         }
 
         if (!envsOk && !sessionsOk)
@@ -990,8 +992,8 @@ public static class RemoteChatUsage
             if (canUseCachedEnvs && HasUnmappedConnectedSessionEnv(sessionsReply!.Value.Body, envById))
             {
                 var freshEnvs = !string.IsNullOrWhiteSpace(oauthToken)
-                    ? GetAnthropicOAuth("/v1/environment_providers", oauthToken, orgUuid)
-                    : ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers", orgUuid);
+                    ? GetAnthropicOAuth("/v1/environment_providers?limit=100", oauthToken, orgUuid)
+                    : ClaudeUsage.GetWithStoredSessionKey("/v1/environment_providers?limit=100", orgUuid);
                 if (freshEnvs is { Status: >= 200 and < 300 })
                 {
                     cachedClaudeEnvsBody = freshEnvs.Value.Body;
@@ -1000,7 +1002,12 @@ public static class RemoteChatUsage
                     envByRepo.Clear();
                     buckets.Clear();
                     ParseClaudeEnvironments(freshEnvs.Value.Body, envById, envByRepo, buckets);
+                    RecordUnmappedConnectedSessionEnvs(sessionsReply!.Value.Body, envById);
                 }
+            }
+            else if (!canUseCachedEnvs && envsOk)
+            {
+                RecordUnmappedConnectedSessionEnvs(sessionsReply!.Value.Body, envById);
             }
 
             ParseClaudeSessions(sessionsReply!.Value.Body, envById, envByRepo, buckets, doneCutoff);
@@ -1035,12 +1042,33 @@ public static class RemoteChatUsage
                 var conn = Text(s, "connection_status");
                 if (!string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase)) continue;
                 var envId = Text(s, "environment_id");
-                if (!string.IsNullOrWhiteSpace(envId) && !envById.ContainsKey(envId))
+                if (!string.IsNullOrWhiteSpace(envId) && !envById.ContainsKey(envId) && !knownUnmappedClaudeEnvIds.Contains(envId))
                     return true;
             }
         }
         catch { }
         return false;
+    }
+
+    private static void RecordUnmappedConnectedSessionEnvs(string sessionsBody, Dictionary<string, ClaudeEnvInfo> envById)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(sessionsBody);
+            if (!doc.RootElement.TryGetProperty("data", out var list) || list.ValueKind != JsonValueKind.Array)
+                return;
+
+            foreach (var s in list.EnumerateArray())
+            {
+                if (s.ValueKind != JsonValueKind.Object) continue;
+                var conn = Text(s, "connection_status");
+                if (!string.Equals(conn, "connected", StringComparison.OrdinalIgnoreCase)) continue;
+                var envId = Text(s, "environment_id");
+                if (!string.IsNullOrWhiteSpace(envId) && !envById.ContainsKey(envId))
+                    knownUnmappedClaudeEnvIds.Add(envId);
+            }
+        }
+        catch { }
     }
 
     private static void ParseClaudeEnvironments(
@@ -1102,8 +1130,7 @@ public static class RemoteChatUsage
 
                 var envName = Text(env, "name");
                 bool isOrchEnv = IsOrchestratorWorktreePath(directory)
-                              || IsOrchestratorSessionTitle(envName)
-                              || (!string.IsNullOrWhiteSpace(envName) && envName.TrimEnd().EndsWith("(agent)", StringComparison.OrdinalIgnoreCase));
+                              || IsOrchestratorSessionTitle(envName);
 
                 if (string.IsNullOrWhiteSpace(machineName) && !string.IsNullOrWhiteSpace(envName))
                 {
