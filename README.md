@@ -639,12 +639,16 @@ Some things the orchestrator cannot do for itself: a passkey approval in the Rel
 to merge by hand, signing in again, a manual step, a question waiting in its own Claude session. The
 feed lists them under `needs`, and ScweenSpit makes sure you see them:
 
-- **A card per need**, floating above the taskbar by the clock: what kind, how long it has waited and
-  where, then the title and the detail, edged in amber, or red when it is blocking a run. Each new one
-  lines up on the left of the last and glows for a moment. A card is as wide as its words want; when
-  there are more than fit in about two-thirds of the screen's width, the widest are trimmed first,
-  then the oldest fold into a `+N` card. Clicking a card opens a small popup with just that need and
-  its buttons; right-clicking, or `+N`, opens the whole list. The cards never take the focus.
+- **A card per need**, floating above the taskbar by the clock, dealt with right there — no window
+  to open. Each card says, top to bottom: what kind it is, whether it is blocking, and how long it has
+  waited; the title, large; `repo/run`; a highlighted line saying in plain words what is wanted of
+  you ("Approve it in the Release Console", "Run the command below, then press Mark done", "Pick an
+  answer"); the command to copy, or the answers to pick from; and the buttons that do it — the one
+  that does what is wanted coloured, then **Mark done**. **Details ▾** opens the full detail inside
+  the card. Cards are edged in amber, or red when blocking, and glow for a moment when they arrive.
+  The first sits by the clock and each newer one lines up on its left; past about two-thirds of the
+  screen's width a row starts above, and past half its height the rest fold into a `+N` card that
+  opens the list. Clicking the strip or the taskbar button raises the cards and makes them glow.
 - **The strip** on a ScweenSpit bar gets a Needs row beneath its chunks — `! 2 need you`, red when
   anything is blocking — and stays on the bar while anything is listed, even with no run in flight.
 - **One click to the page.** With exactly one need outstanding and a page to open for it, clicking

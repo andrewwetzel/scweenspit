@@ -142,7 +142,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             if (!needsBalloon) return;
             if (balloonApproval is { } a && NeedActions.OpenLatest(a.Feed, a.Id)) return;
-            needs.OpenPanel(null);
+            needs.Activate(null);
         };
         tray.BalloonTipClosed += (_, _) => { needsBalloon = false; balloonApproval = null; };
         OrchestraUsage.NeedsArrived += OnNeedsArrived;
