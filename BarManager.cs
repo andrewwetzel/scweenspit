@@ -54,12 +54,9 @@ public sealed class BarManager : IDisposable
     /// <summary>Raised when a strip on the bar wants the settings window opened to a specific page.</summary>
     public event Action<string>? SettingsRequested;
 
-    /// <summary>Raised when a bar's orchestrator strip is clicked while something needs you.</summary>
-    public event Action<System.Drawing.Point, bool>? NeedsRequested;
-
     /// <summary>
-    /// Whether some bar on screen is drawing the orchestrator strip where it can — the place the
-    /// Needs row shows up without anything else being added to the screen.
+    /// Whether some bar on screen draws the orchestrator strip — a ScweenSpit bar that is taking the
+    /// place of the Windows taskbar, and so a taskbar with room for the needs button.
     /// </summary>
     public bool AnyShowsOrchestra => bars.Values.Any(b => b.ShowsOrchestra);
 
@@ -111,7 +108,6 @@ public sealed class BarManager : IDisposable
                 var bar = new TaskbarWindow(monitor, settings, zoneManager);
                 bar.MenuRequested += p => MenuRequested?.Invoke(p);
                 bar.SettingsRequested += page => SettingsRequested?.Invoke(page);
-                bar.NeedsRequested += (p, list) => NeedsRequested?.Invoke(p, list);
                 bar.PinsChanged += () => PinsChanged?.Invoke();
 
                 // Give it its rectangle before the handle exists, so it is created on the display it

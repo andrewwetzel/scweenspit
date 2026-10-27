@@ -12,10 +12,6 @@ namespace ScweenSpit;
 ///
 /// The timer is drawn from the local clock on every repaint, so it ticks with the bar's own
 /// one-second refresh rather than with the feed's poll.
-///
-/// Beneath the chunks, a "Needs you" row counts what the orchestrator is waiting on a person for —
-/// "! 2 need you", red when any of it is blocking a run — and is the strip's whole content while
-/// no run is in flight. Clicking the strip then opens the list itself.
 /// </summary>
 internal static class OrchestraStrip
 {
@@ -23,23 +19,10 @@ internal static class OrchestraStrip
     private static readonly Color AgyIdeColour = Color.FromArgb(232, 160, 232);
     private static readonly Color WaitingColour = Color.FromArgb(255, 158, 24);
     private static readonly Color CountColour = Color.FromArgb(214, 220, 232);
-    public static readonly Color BlockingColour = Color.FromArgb(255, 99, 99);
-    public static readonly Color NeedColour = WaitingColour;
 
-    /// <summary>
-    /// What the Needs row says, or null when nothing is listed. Needs already marked done but not
-    /// yet closed by the orchestrator are still counted, quietly, so the row does not vanish and
-    /// reappear while it checks.
-    /// </summary>
-    public static (string Text, Color Colour)? NeedsLine(OrchestraReading? reading)
-    {
-        var needs = reading?.Needs ?? [];
-        if (needs.Count == 0) return null;
-        int open = reading!.Outstanding, blocking = reading.OutstandingBlocking;
-        if (open == 0)
-            return needs.Any(i => !i.Done) ? ($"{needs.Count} unsure: feed quiet", Theme.Muted) : ($"✓ {needs.Count} confirming", Theme.Muted);
-        return ($"{open} need{(open == 1 ? "s" : "")} you", blocking > 0 ? BlockingColour : NeedColour);
-    }
+    /// <summary>The need cards' colours: amber for something waiting on you, red when it holds a run up.</summary>
+    public static readonly Color NeedColour = WaitingColour;
+    public static readonly Color BlockingColour = Color.FromArgb(255, 99, 99);
 
     private static Color KindColour(string tool) => tool.ToLowerInvariant() switch
     {
@@ -66,24 +49,21 @@ internal static class OrchestraStrip
         var feeds = reading?.Shown ?? [];
         long now = Environment.TickCount64;
         var chunks = OrchestraUsage.Chunks(feeds, now);
-        var needs = NeedsLine(reading);
         bool showTimer = OrchestraUsage.ShowTimer;
-        if (vertical)
-            return Math.Clamp(Math.Max(1, chunks.Count) * (showTimer ? 42 : 32) + (needs is null ? 0 : 30) + 8, 44, 290);
+        if (vertical) return Math.Clamp(Math.Max(1, chunks.Count) * (showTimer ? 42 : 32) + 8, 44, 260);
 
         double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
-        if (chunks.Count == 0 && needs is null)
+        if (chunks.Count == 0)
             return (int)Math.Round(72 * Math.Clamp(barBreadth / 50.0, 0.9, 1.85) * uScale);
 
-        // The Needs row's words change as a feed goes quiet, without the reading itself changing.
-        string timers = (showTimer ? string.Join("|", chunks.Select(c => Digitless(TimerText(c)))) : "") + "#" + needs?.Text;
+        string timers = showTimer ? string.Join("|", chunks.Select(c => Digitless(TimerText(c)))) : "";
 
         if (lastExtent is { } last && ReferenceEquals(last.Reading, reading) && last.Vertical == vertical
             && last.Rows == maxRowsPerColumn && last.Breadth == barBreadth && last.Scale == scalePercent
             && last.ShowTimer == showTimer && last.Timers == timers)
             return last.Extent;
 
-        int natural = Layout(measure, new Rectangle(0, 0, 4000, Math.Max(24, barBreadth)), chunks, needs, maxRowsPerColumn, showTimer, draw: false);
+        int natural = Layout(measure, new Rectangle(0, 0, 4000, Math.Max(24, barBreadth)), chunks, maxRowsPerColumn, showTimer, draw: false);
 
         // Scaled like the other strips, but never below what the words need: a timer cut off
         // mid-digit is worse than a strip a few pixels wider than its neighbours.
@@ -98,36 +78,32 @@ internal static class OrchestraStrip
     public static void Paint(Graphics g, Rectangle area, OrchestraReading? reading, int maxRowsPerColumn = 3)
     {
         var chunks = OrchestraUsage.Chunks(reading?.Shown ?? [], Environment.TickCount64);
-        var needs = NeedsLine(reading);
-        if (chunks.Count == 0 && needs is null) { PaintWaitingForFeed(g, area); return; }
+        if (chunks.Count == 0) { PaintWaitingForFeed(g, area); return; }
 
         float glow = OrchestraUsage.AttentionGlowIntensity;
         if (glow > 0.01f) UsageStrip.PaintRemoteChatsAttentionGlow(g, area, glow);
 
         bool showTimer = OrchestraUsage.ShowTimer;
         if (area.Height > area.Width)
-            PaintVertical(g, area, chunks, needs, showTimer);
+            PaintVertical(g, area, chunks, showTimer);
         else
-            Layout(g, area, chunks, needs, maxRowsPerColumn, showTimer, draw: true);
+            Layout(g, area, chunks, maxRowsPerColumn, showTimer, draw: true);
     }
 
     /// <summary>
     /// Measures, and optionally draws, the horizontal strip; returns the width it wants. One chunk
     /// with room to spare gets two rows — repo (and optional timer) above, child counts below. More
-    /// chunks, or a thin bar, get one row each, wrapping into columns past the row limit. The
-    /// Needs row, when there is one, goes beneath them all and takes one of the rows.
+    /// chunks, or a thin bar, get one row each, wrapping into columns past the row limit.
     /// </summary>
-    private static int Layout(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks,
-                              (string Text, Color Colour)? needs, int maxRowsPerColumn, bool showTimer, bool draw)
+    private static int Layout(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks, int maxRowsPerColumn, bool showTimer, bool draw)
     {
         int n = chunks.Count;
-        int needRows = needs is null ? 0 : 1;
         int maxRows = Math.Clamp(maxRowsPerColumn, 1, 6);
         int vPad = area.Height >= 56 ? 6 : 4;
-        bool twoRow = n > 0 && n * 2 + needRows <= maxRows && (area.Height - vPad) / (n * 2 + needRows) >= 11;
-        int perCol = n == 0 ? 1 : twoRow ? n : Math.Min(Math.Max(1, maxRows - needRows), n);
+        bool twoRow = n * 2 <= maxRows && (area.Height - vPad) / (n * 2) >= 11;
+        int perCol = twoRow ? n : Math.Min(maxRows, n);
         int cols = (int)Math.Ceiling(n / (double)perCol);
-        int totalRows = (n == 0 ? 0 : twoRow ? n * 2 : perCol) + needRows;
+        int totalRows = twoRow ? n * 2 : perCol;
 
         int rowH = Math.Clamp((area.Height - vPad) / totalRows, 8, 38);
         int top = area.Y + Math.Max(1, (area.Height - totalRows * rowH) / 2);
@@ -171,13 +147,11 @@ internal static class OrchestraStrip
             ? Math.Max(HeadWidth(c), CountsWidth(c))
             : HeadWidth(c) + (c.Active && c.Children.Count > 0 ? gap + CountsWidth(c) : 0f);
 
-        float NeedsWidth() => needs is { } line ? dot + 4 + Measure(line.Text, titleFont) : 0f;
-
         var colWidths = new int[cols];
         for (int i = 0; i < n; i++)
             colWidths[i / perCol] = Math.Max(colWidths[i / perCol], (int)Math.Ceiling(ChunkWidth(chunks[i])));
 
-        int natural = pad * 2 + Math.Max(colWidths.Sum() + colGap * Math.Max(0, cols - 1), (int)Math.Ceiling(NeedsWidth()));
+        int natural = pad * 2 + colWidths.Sum() + colGap * (cols - 1);
         if (!draw) return natural;
 
         // A strip given more room than it asked for — scaled, expanded or dragged wider — spreads
@@ -261,14 +235,6 @@ internal static class OrchestraStrip
             x0 += colWidths[c] + colGap;
         }
 
-        if (needs is { } need)
-        {
-            int y = top + (totalRows - 1) * rowH;
-            PaintNeedsMark(g, new RectangleF(area.X + pad, y + (rowH - dot) / 2f, dot, dot), need.Colour);
-            using var brush = new SolidBrush(need.Colour);
-            g.DrawString(need.Text, titleFont, brush, new RectangleF(area.X + pad + dot + 4, y, area.Width, rowH), format);
-        }
-
         g.Clip = clip;
         g.SmoothingMode = smoothing;
         return natural;
@@ -278,12 +244,10 @@ internal static class OrchestraStrip
     /// A vertical bar is about 50 pixels across, so each chunk stacks: repo, optional timer, then
     /// the counts side by side in their colours.
     /// </summary>
-    private static void PaintVertical(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks,
-                                      (string Text, Color Colour)? needs, bool showTimer)
+    private static void PaintVertical(Graphics g, Rectangle area, IReadOnlyList<OrchestraChunk> chunks, bool showTimer)
     {
         int minBlockH = showTimer ? 30 : 22;
-        int needsH = needs is null ? 0 : 28;
-        int blockH = chunks.Count == 0 ? 0 : Math.Max(minBlockH, (area.Height - 8 - needsH) / chunks.Count);
+        int blockH = Math.Max(minBlockH, (area.Height - 8) / chunks.Count);
         using Font titleFont = Theme.Face(6.8f, FontStyle.Bold);
         using Font timerFont = Theme.Face(7.4f, FontStyle.Bold);
         using Font countFont = Theme.Face(7f, FontStyle.Bold);
@@ -339,30 +303,6 @@ internal static class OrchestraStrip
                 x += widths[k] + space;
             }
         }
-
-        if (needs is { } need)
-        {
-            // Just the count under the mark: "2 need you" does not fit across fifty pixels.
-            int y = area.Y + 4 + chunks.Count * blockH;
-            var open = OrchestraUsage.Current?.Outstanding ?? 0;
-            const int dot = 9;
-            PaintNeedsMark(g, new RectangleF(area.X + (area.Width - dot) / 2f, y + 2, dot, dot), need.Colour);
-            using var brush = new SolidBrush(need.Colour);
-            g.DrawString(open > 0 ? open.ToString() : "✓", countFont, brush, new Rectangle(area.X, y + dot + 3, area.Width, needsH - dot - 3), centred);
-        }
-    }
-
-    /// <summary>A filled disc with an exclamation mark cut into it: the same sign wherever a need is counted.</summary>
-    public static void PaintNeedsMark(Graphics g, RectangleF box, Color colour)
-    {
-        var smoothing = g.SmoothingMode;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var fill = new SolidBrush(colour)) g.FillEllipse(fill, box);
-        using var ink = new SolidBrush(Theme.Panel);
-        float w = Math.Max(1.4f, box.Width / 6f), cx = box.X + box.Width / 2f;
-        g.FillRectangle(ink, cx - w / 2f, box.Y + box.Height * 0.2f, w, box.Height * 0.38f);
-        g.FillEllipse(ink, cx - w / 2f, box.Y + box.Height * 0.66f, w, w);
-        g.SmoothingMode = smoothing;
     }
 
     /// <summary>Only reached for a moment: the strip is hidden until some feed has answered.</summary>
@@ -392,25 +332,7 @@ internal static class OrchestraStrip
             if (text.Length > 0) text.AppendLine().AppendLine();
             text.Append(Describe(f, now));
         }
-
-        var needs = reading?.Needs ?? [];
-        if (needs.Count > 0)
-        {
-            text.AppendLine().AppendLine().Append("Needs you:");
-            foreach (var item in needs)
-            {
-                text.AppendLine().Append(item.Need.Blocking ? "  ⚠ " : "  • ")
-                    .Append($"{OrchestraUsage.NeedKindLabel(item.Need.Kind)}: {item.Need.Title}");
-                if (item.Done) text.Append(" (done, confirming)");
-            }
-            text.AppendLine().AppendLine().Append(OrchestraUsage.Current?.Outstanding == 1
-                ? "Click to go straight to it; right-click for the list."
-                : "Click or right-click for the list.");
-        }
-        else
-        {
-            text.AppendLine().AppendLine().Append("Click for orchestrator settings.");
-        }
+        text.AppendLine().AppendLine().Append("Click for orchestrator settings.");
         return text.ToString();
     }
 

@@ -621,7 +621,7 @@ The feed is `GET` → `application/json`:
 }
 ```
 
-- `active: false` (no unfinished run) hides the strip, unless `needs` lists something. `orchestrator.started_at` may be null
+- `active: false` (no unfinished run) hides the strip. What `needs` lists is on cards of its own. `orchestrator.started_at` may be null
   then; when it is missing on an active feed, the earliest run's start is used.
 - The elapsed time is `generated_at − started_at` on the server's clock plus the time since the
   answer arrived on ours, so the two machines' clocks need not agree.
@@ -648,11 +648,9 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
   the card. Cards are edged in amber, or red when blocking, and glow for a moment when they arrive.
   The first sits by the clock and each newer one lines up on its left; past about two-thirds of the
   screen's width a row starts above, and past half its height the rest fold into a `+N` card that
-  opens the list. Clicking the strip or the taskbar button raises the cards and makes them glow.
-- **The strip** on a ScweenSpit bar gets a Needs row beneath its chunks — `! 2 need you`, red when
-  anything is blocking — and stays on the bar while anything is listed, even with no run in flight.
-- **One click to the page.** With exactly one need outstanding and a page to open for it, clicking
-  the strip or the taskbar button goes straight there — for an approval, that request's
+  opens the list. Clicking the taskbar button raises the cards and makes them glow.
+- **One click to the page.** With the cards switched off (Taskbar only), exactly one need
+  outstanding and a page to open for it, clicking the taskbar button goes straight there — for an approval, that request's
   own page in the Release Console, `https://deploy.lionpower.app/#approval/<id>`. The next click
   opens the list instead. A notification about a single approval opens its page too. The URL is
   read from the latest poll at the moment of the click, never from when the row was drawn: an
@@ -667,8 +665,8 @@ feed lists them under `needs`, and ScweenSpit makes sure you see them:
   to do it alone. Re-decided whenever the displays, their scale or the settings change. **Settings ▸
   Orchestrator ▸ Show what needs you** can choose Cards, Taskbar or Off instead.
 - **A preview.** **Settings ▸ Orchestrator ▸ Preview** shows a made-up blocking approval and a
-  made-up question with choices for two minutes, through the cards, the strip, the taskbar button and
-  the notification, so you can see it all without the
+  made-up question with choices for two minutes, through the cards, the taskbar button and the
+  notification, so you can see it all without the
   orchestrator needing anything. Done on it is sent nowhere. The same page lists what ScweenSpit
   believes is waiting and which indicator it chose, and why.
 - **A notification** for each new need, once — by id, not by poll — warning-styled when it is

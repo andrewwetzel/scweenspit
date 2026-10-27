@@ -137,7 +137,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         needs = new NeedsIndicator(config, () => bars.AnyShowsOrchestra, page => OpenSettings(page),
                                    action => { try { marshaller.BeginInvoke(action); } catch { } });
-        bars.NeedsRequested += (at, list) => { if (list) needs.OpenPanel(at); else needs.Activate(at); };
         tray.BalloonTipClicked += (_, _) =>
         {
             if (!needsBalloon) return;
