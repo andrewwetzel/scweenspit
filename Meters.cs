@@ -9,7 +9,8 @@ internal readonly record struct Meter(string Label, int Percent, string Detail,
                                       string? Subtext = null, Color? BarColour = null,
                                       string? FigureText = null, Color? SubtextColour = null,
                                       int? SecondPercent = null, string? SecondFigureText = null,
-                                      Color? SecondBarColour = null, string? SecondLabel = null);
+                                      Color? SecondBarColour = null, string? SecondLabel = null,
+                                      string? SecondSubtext = null);
 
 /// <summary>
 /// A stack of thin labelled bars inside the status cluster.
@@ -64,7 +65,7 @@ internal static class MeterStrip
         int cols = ColumnsFor(false, itemCount, maxRowsPerColumn);
         double hScale = Math.Clamp(barBreadth / 50.0, 0.9, 1.85);
         double uScale = Math.Clamp(scalePercent, 80, 300) / 100.0;
-        int colW = (int)Math.Round(192 * hScale * uScale);
+        int colW = (int)Math.Round(256 * hScale * uScale);
         return cols * colW - (cols - 1) * 8;
     }
 
@@ -121,7 +122,7 @@ internal static class MeterStrip
         if (meters.Count == 0) return;
 
         bool vertical = area.Height > area.Width;
-        bool hasSubtext = meters.Any(m => !string.IsNullOrEmpty(m.Subtext));
+        bool hasSubtext = meters.Any(m => !string.IsNullOrEmpty(m.Subtext) || !string.IsNullOrEmpty(m.SecondSubtext));
 
         int maxRows = vertical ? meters.Count : Math.Clamp(maxRowsPerColumn, 1, 8);
         int cols = vertical ? 1 : ColumnsFor(false, meters.Count, maxRows);
@@ -210,7 +211,10 @@ internal static class MeterStrip
             // and short labels (like "A1M" or "CPU") donate their spare width to the progress bar.
             bool colHasSubtext = false;
             bool colHasPaired = false;
+            bool colHasPairSubtext = false;
             float maxLblW = 0f, maxFigW = 0f, maxSubW = 0f;
+            float maxPairFig1W = 0f, maxPairSub1W = 0f;
+            float maxPairFig2W = 0f, maxPairSub2W = 0f;
             for (int j = 0; j < countInCol; j++)
             {
                 var m = meters[startIdx + j];
@@ -224,12 +228,27 @@ internal static class MeterStrip
                 if (m.SecondPercent is { } p2)
                 {
                     colHasPaired = true;
+                    if (fw > maxPairFig1W) maxPairFig1W = fw;
+
                     string ft2 = m.SecondFigureText ?? $"{p2}%";
                     float fw2 = g.MeasureString(ft2, figureFont).Width;
                     if (fw2 > maxFigW) maxFigW = fw2;
-                }
+                    if (fw2 > maxPairFig2W) maxPairFig2W = fw2;
 
-                if (!string.IsNullOrEmpty(m.Subtext))
+                    if (!string.IsNullOrEmpty(m.Subtext))
+                    {
+                        colHasPairSubtext = true;
+                        float sw1 = g.MeasureString(m.Subtext, subFont).Width;
+                        if (sw1 > maxPairSub1W) maxPairSub1W = sw1;
+                    }
+                    if (!string.IsNullOrEmpty(m.SecondSubtext))
+                    {
+                        colHasPairSubtext = true;
+                        float sw2 = g.MeasureString(m.SecondSubtext, subFont).Width;
+                        if (sw2 > maxPairSub2W) maxPairSub2W = sw2;
+                    }
+                }
+                else if (!string.IsNullOrEmpty(m.Subtext))
                 {
                     colHasSubtext = true;
                     float sw = g.MeasureString(m.Subtext, subFont).Width;
@@ -241,7 +260,7 @@ internal static class MeterStrip
             int naturalFigW = (int)Math.Ceiling(maxFigW) + 2;
             int naturalSubW = (int)Math.Ceiling(maxSubW) + 3;
 
-            bool showSubInCol = colHasSubtext && !colHasPaired
+            bool showSubInCol = colHasSubtext
                 && colWidth >= naturalLblW + naturalFigW + naturalSubW + 20
                 && colWidth >= 112;
 
@@ -314,7 +333,13 @@ internal static class MeterStrip
                         }
 
                         using var b1 = new SolidBrush(secondPct > meter.Percent ? c2 : c1);
-                        g.DrawString($"{meter.Percent}·{secondPct}%", figureFont, b1, figRect, figures);
+                        string vText = (!string.IsNullOrEmpty(meter.Subtext) || !string.IsNullOrEmpty(meter.SecondSubtext))
+                            ? $"{meter.Percent}% {meter.Subtext?.Replace(" ", "")} · {secondPct}% {meter.SecondSubtext?.Replace(" ", "")}".Trim()
+                            : $"{meter.Percent}·{secondPct}%";
+                        if (g.MeasureString(vText, subFont).Width <= figRect.Width + 2)
+                            g.DrawString(vText, subFont, b1, figRect, figures);
+                        else
+                            g.DrawString($"{meter.Percent}·{secondPct}%", figureFont, b1, figRect, figures);
                     }
                     else
                     {
@@ -333,26 +358,53 @@ internal static class MeterStrip
                         int remW = Math.Max(16, row.Right - remX);
                         int pairGap = Math.Clamp((int)Math.Round(6 * scale), 4, 10);
 
+                        int pFig1W = Math.Max(16, (int)Math.Ceiling(maxPairFig1W) + 2);
+                        int pFig2W = Math.Max(16, (int)Math.Ceiling(maxPairFig2W) + 2);
+                        int pSub1W = maxPairSub1W > 0 ? (int)Math.Ceiling(maxPairSub1W) + 2 : 0;
+                        int pSub2W = maxPairSub2W > 0 ? (int)Math.Ceiling(maxPairSub2W) + 2 : 0;
+
                         int secondLblW = 0;
                         if (!string.IsNullOrEmpty(meter.SecondLabel))
                         {
                             float lw2 = g.MeasureString(meter.SecondLabel, meter.BoldLabel ? boldNameFont : nameFont).Width;
                             int candW = (int)Math.Ceiling(lw2) + 2;
-                            if (remW >= candW + figW * 2 + pairGap + trackGap + 32)
+                            int minNeededForLbl = colHasPairSubtext
+                                ? candW + trackGap + pairGap + pFig1W + pSub1W + pFig2W + pSub2W + 24
+                                : candW + trackGap + pairGap + pFig1W + pFig2W + 28;
+                            if (remW >= minNeededForLbl)
                                 secondLblW = candW;
                         }
 
                         int slotsAvailW = secondLblW > 0
                             ? remW - pairGap - secondLblW - trackGap
                             : remW - pairGap;
-                        int slotW = Math.Max(8, slotsAvailW / 2);
-                        int pairFigW = Math.Min(figW, Math.Max(16, slotW * 60 / 100));
+
+                        bool showPairSub = colHasPairSubtext
+                            && slotsAvailW >= pFig1W + pSub1W + pFig2W + pSub2W + 16;
+
+                        int t1 = pFig1W + (showPairSub && pSub1W > 0 ? pSub1W + 1 : 0);
+                        int t2 = pFig2W + (showPairSub && pSub2W > 0 ? pSub2W + 1 : 0);
+                        int spareTrackW = Math.Max(0, slotsAvailW - t1 - t2);
+                        int slot1W = showPairSub
+                            ? Math.Clamp(t1 + spareTrackW / 2, 8, Math.Max(8, slotsAvailW - 8))
+                            : Math.Max(8, slotsAvailW / 2);
 
                         int x1 = remX;
-                        var fig1 = new Rectangle(x1 + slotW - pairFigW, row.Y, pairFigW, rowHeight);
-                        var track1 = new Rectangle(x1, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig1.X - x1 - 2), barThick);
+                        Rectangle fig1, sub1 = Rectangle.Empty, track1;
+                        if (showPairSub && pSub1W > 0)
+                        {
+                            sub1 = new Rectangle(x1 + slot1W - pSub1W, row.Y, pSub1W, rowHeight);
+                            fig1 = new Rectangle(sub1.X - pFig1W - 1, row.Y, pFig1W, rowHeight);
+                            track1 = new Rectangle(x1, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig1.X - x1 - 2), barThick);
+                        }
+                        else
+                        {
+                            int pairFig1W = Math.Min(pFig1W, Math.Max(16, slot1W * 60 / 100));
+                            fig1 = new Rectangle(x1 + slot1W - pairFig1W, row.Y, pairFig1W, rowHeight);
+                            track1 = new Rectangle(x1, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig1.X - x1 - 2), barThick);
+                        }
 
-                        int x2 = x1 + slotW + pairGap;
+                        int x2 = x1 + slot1W + pairGap;
                         if (secondLblW > 0)
                         {
                             var name2Rect = new Rectangle(x2, row.Y, secondLblW, rowHeight);
@@ -368,8 +420,20 @@ internal static class MeterStrip
                             x2 += secondLblW + trackGap;
                         }
 
-                        var fig2 = new Rectangle(row.Right - pairFigW, row.Y, pairFigW, rowHeight);
-                        var track2 = new Rectangle(x2, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig2.X - x2 - 2), barThick);
+                        int slot2W = Math.Max(8, row.Right - x2);
+                        Rectangle fig2, sub2 = Rectangle.Empty, track2;
+                        if (showPairSub && pSub2W > 0)
+                        {
+                            sub2 = new Rectangle(row.Right - pSub2W, row.Y, pSub2W, rowHeight);
+                            fig2 = new Rectangle(sub2.X - pFig2W - 1, row.Y, pFig2W, rowHeight);
+                            track2 = new Rectangle(x2, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig2.X - x2 - 2), barThick);
+                        }
+                        else
+                        {
+                            int pairFig2W = Math.Min(pFig2W, Math.Max(16, slot2W * 60 / 100));
+                            fig2 = new Rectangle(row.Right - pairFig2W, row.Y, pairFig2W, rowHeight);
+                            track2 = new Rectangle(x2, row.Y + (rowHeight - barThick) / 2, Math.Max(0, fig2.X - x2 - 2), barThick);
+                        }
 
                         var c1 = meter.BarColour ?? Fill(meter.Percent, lowColour);
                         var c2 = meter.SecondBarColour ?? Fill(secondPct, lowColour);
@@ -382,6 +446,14 @@ internal static class MeterStrip
                         string ft2 = meter.SecondFigureText ?? $"{secondPct}%";
                         g.DrawString(ft1, figureFont, b1, fig1, figures);
                         g.DrawString(ft2, figureFont, b2, fig2, figures);
+
+                        if (showPairSub)
+                        {
+                            if (!string.IsNullOrEmpty(meter.Subtext) && sub1.Width > 0)
+                                g.DrawString(meter.Subtext, subFont, subBrush, sub1, figures);
+                            if (!string.IsNullOrEmpty(meter.SecondSubtext) && sub2.Width > 0)
+                                g.DrawString(meter.SecondSubtext, subFont, subBrush, sub2, figures);
+                        }
                     }
                     continue;
                 }

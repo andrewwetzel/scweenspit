@@ -185,10 +185,12 @@ internal static class UsageStrip
                 p1Tag,
                 p1.Percent,
                 detail,
+                Subtext: ClaudeUsage.ShortCountdown(p1.ResetsAt),
                 FigureText: $"{p1.Percent}%",
                 SecondPercent: p2?.Percent,
                 SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null,
-                SecondLabel: p2 is not null ? "7d" : null));
+                SecondLabel: p2 is not null ? "7d" : null,
+                SecondSubtext: p2 is not null ? ClaudeUsage.ShortCountdown(p2.ResetsAt) : null));
         }
 
         foreach (var l in extras)
@@ -268,9 +270,11 @@ internal static class UsageStrip
                     "IDE",
                     p1.Percent,
                     $"IDE: {p1.Percent}% 5h" + (p2 is not null ? $" · {p2.Percent}% 7d" : ""),
+                    Subtext: ClaudeUsage.ShortCountdown(p1.ResetsAt),
                     FigureText: $"{p1.Percent}%",
                     SecondPercent: p2?.Percent,
-                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null));
+                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null,
+                    SecondSubtext: p2 is not null ? ClaudeUsage.ShortCountdown(p2.ResetsAt) : null));
             }
             if (cli5h is not null || cli7d is not null)
             {
@@ -280,9 +284,11 @@ internal static class UsageStrip
                     "CLI",
                     p1.Percent,
                     $"CLI: {p1.Percent}% 5h" + (p2 is not null ? $" · {p2.Percent}% 7d" : ""),
+                    Subtext: ClaudeUsage.ShortCountdown(p1.ResetsAt),
                     FigureText: $"{p1.Percent}%",
                     SecondPercent: p2?.Percent,
-                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null));
+                    SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null,
+                    SecondSubtext: p2 is not null ? ClaudeUsage.ShortCountdown(p2.ResetsAt) : null));
             }
             return paired;
         }
@@ -314,7 +320,8 @@ internal static class UsageStrip
                 l.Percent,
                 detail,
                 LabelColour: highlightFirst ? AntigravityTitleColour : null,
-                BoldLabel: highlightFirst));
+                BoldLabel: highlightFirst,
+                Subtext: ClaudeUsage.ShortCountdown(l.ResetsAt)));
         }
         return meters;
     }
