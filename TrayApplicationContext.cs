@@ -150,6 +150,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             TrackForeground();
 
+            // Keep our bars and cards behind any active screen-capture overlay before refreshing
+            // taskbar-covering windows, and let them reclaim topmost in order once it closes.
+            TaskbarWindow.SyncAllZOrder();
+            needs.SyncZOrder();
+
             // A taskbar-covering window is only held above everything while it is in front, so this
             // has to follow the foreground rather than being decided once when it was placed.
             hook.RefreshTopmost();
@@ -157,8 +162,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         foregroundWatch.Start();
 
         // Re-assert only the hide. Re-applying auto-hide here would make Explorer re-lay-out every
-        // two seconds, which is itself what puts the taskbar back.
-        taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.Hide(true); };
+        // two seconds, which is itself what puts the taskbar back. Skipped while a screen-capture
+        // overlay is up so poking Shell_TrayWnd does not disturb the shell's z-order mid-snip.
+        taskbarWatch.Tick += (_, _) =>
+        {
+            if (config.HideWindowsTaskbar && WinEventHookService.ScreenCaptureOverlay() == IntPtr.Zero)
+                Taskbar.Hide(true);
+        };
         reflow.Tick += (_, _) => { reflow.Stop(); ReflowAroundBars(); };
 
         // Touching Handle rather than CreateControl(): that one returns without doing anything for a
@@ -807,6 +817,8 @@ public sealed class TrayApplicationContext : ApplicationContext
                 hook.ArrangeOverlapping(strip);
         }
 
+        TaskbarWindow.SyncAllZOrder();
+        needs.SyncZOrder();
         hook.RefreshTopmost(reassert: true);
     }
 
@@ -972,6 +984,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             {
                 needs.Announce();
                 if (!config.Orchestra.NeedsToast || arrived.Count == 0) return;
+                if (WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero) return;
 
                 bool blocking = arrived.Any(i => i.Need.Blocking);
                 var first = arrived.FirstOrDefault(i => i.Need.Blocking) ?? arrived[0];

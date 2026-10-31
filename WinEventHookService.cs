@@ -19,6 +19,46 @@ public sealed class WinEventHookService : IDisposable
         "Button", "ForegroundStaging", "MultitaskingViewFrame", "XamlExplorerHostIslandWindow",
     };
 
+    /// <summary>
+    /// Processes whose full-screen or topmost overlay windows are screen-capture surfaces. Kept in
+    /// one place so Windows' built-in snippers (ScreenClippingHost on Windows 10/11, SnippingTool
+    /// and ScreenSketch) and common third-party capture tools are recognised together.
+    /// </summary>
+    private static readonly HashSet<string> ScreenCaptureProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ScreenClippingHost", "SnippingTool", "ScreenSketch",
+        "ShareX", "Greenshot", "flameshot", "Lightshot",
+        "Snagit32", "SnagitCapture", "PicPick",
+        "PowerToys.CropAndLock", "PowerToys.MeasureToolUI",
+    };
+
+    /// <summary>Window classes used specifically by Windows' screen-snipping overlays and toolbars.</summary>
+    private static readonly HashSet<string> ScreenCaptureClasses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Microsoft-Windows-SnipperCaptureForm",
+        "Microsoft-Windows-SnipperToolbar",
+        "ScreenClippingWindow",
+    };
+
+    /// <summary>Window titles used by Windows' screen-snipping overlays.</summary>
+    private static readonly HashSet<string> ScreenCaptureTitles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Screen Snipping",
+        "Snipping Tool Overlay",
+    };
+
+    /// <summary>
+    /// Shell and background hosts that may keep a full-screen topmost window without being a
+    /// screen-capture overlay.
+    /// </summary>
+    private static readonly HashSet<string> NonCaptureOverlayProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "explorer", "TextInputHost", "SearchHost", "SearchApp",
+        "StartMenuExperienceHost", "ShellExperienceHost", "LockApp",
+    };
+
+    private const int OverlaySlack = 8;
+
     private const long PruneIntervalMs = 5_000;
 
     /// <summary>Never evict a stamp that the debounce still needs — otherwise raising DebounceMs
@@ -34,7 +74,7 @@ public sealed class WinEventHookService : IDisposable
 
     // Owning process per window. Resolving a pid to a name is comparatively expensive and the answer
     // never changes for a given hwnd, so it is worth remembering.
-    private readonly ConcurrentDictionary<IntPtr, string> owners = new();
+    private static readonly ConcurrentDictionary<IntPtr, string> owners = new();
 
     // ---- drag-to-zone session ----------------------------------------------
     private readonly System.Windows.Forms.Timer dragTick = new() { Interval = 40 };
@@ -68,7 +108,8 @@ public sealed class WinEventHookService : IDisposable
     private IntPtr hookLocation, hookMoveEnd, hookShow;
 
     // Windows we raised above the taskbar for a cover-taskbar zone; restored when they leave one.
-    private readonly ConcurrentDictionary<IntPtr, byte> madeTopmost = new();
+    private static readonly ConcurrentDictionary<IntPtr, byte> madeTopmost = new();
+    private bool hadCaptureOverlay;
 
     // Windows currently placed in a zone that covers the taskbar. Kept apart from madeTopmost
     // because being in such a zone and being raised above everything are no longer the same thing.
@@ -178,6 +219,15 @@ public sealed class WinEventHookService : IDisposable
         {
             if (eventType == EVENT_SYSTEM_MOVESIZESTART) { DragBegin(hWnd); return; }
             if (eventType == EVENT_SYSTEM_MOVESIZEEND)   { DragEnd(hWnd); return; }
+
+            if (IsScreenCaptureOverlay(hWnd))
+            {
+                TaskbarWindow.SyncAllZOrder();
+                NeedsIndicator.SyncAllZOrder();
+                RefreshTopmost();
+                return;
+            }
+
             if (eventType == EVENT_OBJECT_SHOW)          { QueueShow(hWnd); return; }
 
             if (!IsClampTarget(hWnd)) return;
@@ -836,6 +886,10 @@ public sealed class WinEventHookService : IDisposable
     {
         try
         {
+            if (ExecutablePath(hWnd) is { Length: > 0 } path &&
+                Path.GetFileNameWithoutExtension(path) is { Length: > 0 } name)
+                return name;
+
             GetWindowThreadProcessId(hWnd, out uint pid);
             if (pid == 0) return "?";
             using var proc = System.Diagnostics.Process.GetProcessById((int)pid);
@@ -844,7 +898,15 @@ public sealed class WinEventHookService : IDisposable
         catch { return "?"; }
     }
 
-    private string OwnerProcess(IntPtr hWnd) => owners.GetOrAdd(hWnd, OwnerProcessOf);
+    private static string OwnerProcess(IntPtr hWnd)
+    {
+        if (owners.Count > 512)
+        {
+            foreach (var key in owners.Keys)
+                if (!IsWindow(key)) owners.TryRemove(key, out _);
+        }
+        return owners.GetOrAdd(hWnd, OwnerProcessOf);
+    }
 
     /// <summary>
     /// Drops any scheduled follow-up work.
@@ -893,9 +955,28 @@ public sealed class WinEventHookService : IDisposable
     /// <summary>
     /// Keeps a taskbar-covering window above the taskbar unless another active window overlapping
     /// its zone is in front. Also covers ScweenSpit's own taskbar when the Windows taskbar is hidden.
+    /// Steps back while a screen-capture overlay is up so nothing is raised in front of the snip.
     /// </summary>
     public void RefreshTopmost(bool reassert = false)
     {
+        var overlay = ScreenCaptureOverlay();
+        if (overlay != IntPtr.Zero)
+        {
+            hadCaptureOverlay = true;
+            foreach (var hWnd in madeTopmost.Keys)
+            {
+                if (!IsWindow(hWnd)) madeTopmost.TryRemove(hWnd, out _);
+                else PlaceBelowOverlay(hWnd, overlay);
+            }
+            return;
+        }
+
+        if (hadCaptureOverlay)
+        {
+            hadCaptureOverlay = false;
+            reassert = true;
+        }
+
         if (coversTaskbar.IsEmpty && madeTopmost.IsEmpty) return;
 
         var foreground = GetForegroundWindow();
@@ -973,6 +1054,195 @@ public sealed class WinEventHookService : IDisposable
         return recent.TryGetValue(hWnd, out long stamp) && now - stamp < zones.Config.DebounceMs;
     }
 
+    // ---- screen-capture overlays -------------------------------------------
+
+    /// <summary>
+    /// Returns the window handle of an active screen-capture overlay (such as Win+Shift+S), or
+    /// <see cref="IntPtr.Zero"/> when none is on screen. When an overlay consists of several windows
+    /// (for example Snipping Tool's floating toolbar and its full-screen capture surface), returns
+    /// the lowest topmost one in z-order so placing a bar after it puts the bar underneath them all.
+    /// </summary>
+    public static IntPtr ScreenCaptureOverlay()
+    {
+        var fg = GetForegroundWindow();
+        List<MonitorGeometry>? monitors = null;
+
+        IntPtr lowestTopmost = IntPtr.Zero;
+        IntPtr lowestAny = IntPtr.Zero;
+        bool hasFullSurface = false;
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsScreenCaptureOverlay(hWnd, fg, ref monitors, out bool fullSurface, out bool topmost))
+                return true;
+
+            if (fullSurface) hasFullSurface = true;
+            if (topmost) lowestTopmost = hWnd;
+            lowestAny = hWnd;
+            return true;
+        }, IntPtr.Zero);
+
+        // A small floating capture bar on its own (such as Snipping Tool's video-recording pill once
+        // the region has been chosen) does not dim the desktop unless a capture surface is also up
+        // or the capture host itself holds the foreground.
+        if (!hasFullSurface && lowestAny != IntPtr.Zero && lowestAny != fg)
+        {
+            GetWindowThreadProcessId(fg, out uint fgPid);
+            GetWindowThreadProcessId(lowestAny, out uint overlayPid);
+            if (fgPid == 0 || fgPid != overlayPid) return IntPtr.Zero;
+        }
+
+        return lowestTopmost != IntPtr.Zero ? lowestTopmost : lowestAny;
+    }
+
+    /// <summary>True when <paramref name="hWnd"/> is an active screen-capture overlay window.</summary>
+    public static bool IsScreenCaptureOverlay(IntPtr hWnd)
+    {
+        List<MonitorGeometry>? monitors = null;
+        return IsScreenCaptureOverlay(hWnd, GetForegroundWindow(), ref monitors, out _, out _);
+    }
+
+    private static bool IsScreenCaptureOverlay(IntPtr hWnd, IntPtr foreground,
+                                               ref List<MonitorGeometry>? monitors,
+                                               out bool fullSurface, out bool topmost)
+    {
+        fullSurface = false;
+        topmost = false;
+
+        if (hWnd == IntPtr.Zero || !IsWindow(hWnd) || !IsWindowVisible(hWnd) || IsIconic(hWnd)) return false;
+        if (GetAncestor(hWnd, GA_ROOT) != hWnd) return false;
+
+        long style = GetWindowLongPtr(hWnd, GWL_STYLE);
+        if ((style & WS_CHILD) != 0) return false;
+
+        long exStyle = GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+        // Click-through surfaces (HUDs, colour filters, our own display overlay) never capture mouse drags.
+        if ((exStyle & WS_EX_TRANSPARENT) != 0) return false;
+
+        topmost = (exStyle & WS_EX_TOPMOST) != 0;
+        bool borderless = (style & WS_CAPTION) != WS_CAPTION;
+        if (!topmost && !borderless) return false;
+
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        if (pid == 0 || pid == Environment.ProcessId) return false;
+        if (madeTopmost.ContainsKey(hWnd)) return false;
+
+        if (!GetWindowRect(hWnd, out var rect) || rect.Width < 80 || rect.Height < 24) return false;
+        if (IsCloaked(hWnd)) return false;
+
+        string cls = ClassNameOf(hWnd);
+        if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd"
+                or "TaskListThumbnailWnd" or "tooltips_class32" or "Button"
+                or "ForegroundStaging" or "MultitaskingViewFrame" or "XamlExplorerHostIslandWindow")
+            return false;
+
+        monitors ??= ZoneManager.AllMonitors();
+        bool coversMonitor = CoversAnyMonitor(rect, monitors);
+
+        if (ScreenCaptureClasses.Contains(cls))
+        {
+            fullSurface = coversMonitor || !cls.Equals("Microsoft-Windows-SnipperToolbar", StringComparison.OrdinalIgnoreCase);
+            return true;
+        }
+
+        string title = WindowTitle(hWnd);
+        if (title.Length > 0 && ScreenCaptureTitles.Contains(title))
+        {
+            fullSurface = coversMonitor || rect.Width >= 200 && rect.Height >= 200;
+            return true;
+        }
+
+        if (!topmost && !coversMonitor) return false;
+
+        string proc = OwnerProcess(hWnd);
+        if (ScreenCaptureProcesses.Contains(proc))
+        {
+            // ScreenClippingHost has no normal application window — only the snip overlay.
+            if (proc.Equals("ScreenClippingHost", StringComparison.OrdinalIgnoreCase))
+            {
+                fullSurface = coversMonitor || rect.Width >= 200 && rect.Height >= 200;
+                return true;
+            }
+
+            // SnippingTool and third-party tools also have an ordinary editor window; only their
+            // full-monitor capture canvas or topmost borderless bar is part of the snip overlay.
+            if (coversMonitor || (topmost && borderless))
+            {
+                fullSurface = coversMonitor;
+                return true;
+            }
+        }
+
+        // General rule: another process's topmost borderless full-monitor overlay that currently
+        // holds the foreground, and is not a shell host or an ordinary application window.
+        if (topmost && borderless && coversMonitor && !NonCaptureOverlayProcesses.Contains(proc))
+        {
+            bool toolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
+            bool coreWindow = cls.Equals("Windows.UI.Core.CoreWindow", StringComparison.OrdinalIgnoreCase);
+            bool multiMonitor = CoversMultipleMonitors(rect, monitors);
+            if (hWnd == foreground && (toolWindow || coreWindow || multiMonitor))
+            {
+                fullSurface = true;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool CoversMonitor(RECT rect, RECT bounds) =>
+        rect.Left   <= bounds.Left   + OverlaySlack &&
+        rect.Top    <= bounds.Top    + OverlaySlack &&
+        rect.Right  >= bounds.Right  - OverlaySlack &&
+        rect.Bottom >= bounds.Bottom - OverlaySlack;
+
+    private static bool CoversAnyMonitor(RECT rect, List<MonitorGeometry> monitors)
+    {
+        foreach (var m in monitors)
+            if (CoversMonitor(rect, m.Bounds)) return true;
+        return false;
+    }
+
+    private static bool CoversMultipleMonitors(RECT rect, List<MonitorGeometry> monitors)
+    {
+        if (monitors.Count < 2) return false;
+        int covered = 0;
+        foreach (var m in monitors)
+            if (CoversMonitor(rect, m.Bounds) && ++covered >= 2) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="hWnd"/> sits in front of <paramref name="anchor"/> in the z-order.
+    /// Walks upwards from <paramref name="anchor"/> towards the front of the screen, which is only a
+    /// few steps for a topmost overlay.
+    /// </summary>
+    public static bool IsAbove(IntPtr hWnd, IntPtr anchor)
+    {
+        if (hWnd == IntPtr.Zero || anchor == IntPtr.Zero || hWnd == anchor) return false;
+
+        int steps = 0;
+        for (var w = GetWindow(anchor, GW_HWNDPREV); w != IntPtr.Zero && steps < 1024; w = GetWindow(w, GW_HWNDPREV), steps++)
+            if (w == hWnd) return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// Places <paramref name="hWnd"/> immediately behind <paramref name="overlay"/> without
+    /// activating either window or dropping always-on-top. No-op when <paramref name="hWnd"/> is
+    /// already behind <paramref name="overlay"/>.
+    /// </summary>
+    public static bool PlaceBelowOverlay(IntPtr hWnd, IntPtr overlay)
+    {
+        if (hWnd == IntPtr.Zero || overlay == IntPtr.Zero || !IsWindow(hWnd) || !IsWindow(overlay))
+            return false;
+        if (!IsAbove(hWnd, overlay))
+            return false;
+
+        return SetWindowPos(hWnd, overlay, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
     // ---- filtering ---------------------------------------------------------
 
     public static bool IsClampTarget(IntPtr hWnd)
@@ -993,6 +1263,7 @@ public sealed class WinEventHookService : IDisposable
 
         if (IgnoredClasses.Contains(ClassNameOf(hWnd))) return false;
         if (IsCloaked(hWnd)) return false;                          // phantom UWP windows
+        if (IsScreenCaptureOverlay(hWnd)) return false;
 
         return true;
     }

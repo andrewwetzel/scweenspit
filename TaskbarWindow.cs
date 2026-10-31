@@ -160,6 +160,9 @@ public sealed class TaskbarWindow : Form
     /// <summary>Raised when the pinned list changes, so it can be written to the config file.</summary>
     public event Action? PinsChanged;
 
+    private static readonly List<TaskbarWindow> openBars = [];
+    private bool belowOverlay;
+
     public TaskbarWindow(MonitorGeometry monitor, BarSettings settings, ZoneManager zones)
     {
         this.monitor = monitor;
@@ -175,8 +178,14 @@ public sealed class TaskbarWindow : Form
         BackColor = Theme.Panel;
         DoubleBuffered = true;
 
+        openBars.Add(this);
         appBar = new AppBar(this);
         appBar.PositionChanged += Reposition;
+        appBar.FullScreenChanged += opening =>
+        {
+            SyncAllZOrder(reassert: !opening);
+            NeedsIndicator.SyncAllZOrder(reassert: !opening);
+        };
 
         // Only a full-display bar can be an appbar; a zone-scoped one places itself.
         Load += (_, _) =>
@@ -269,8 +278,11 @@ public sealed class TaskbarWindow : Form
             // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
             // part of an edge cannot be expressed that way. The zone is shortened for it instead.
             var placed = BarGeometry.Deflate(strip, Edge, open, ends, edgeGap);
-            SetWindowPos(Handle, HWND_TOPMOST, placed.Left, placed.Top, placed.Width, placed.Height,
+            var insertAfter = WinEventHookService.ScreenCaptureOverlay() is var overlay && overlay != IntPtr.Zero
+                ? overlay : HWND_TOPMOST;
+            SetWindowPos(Handle, insertAfter, placed.Left, placed.Top, placed.Width, placed.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            belowOverlay = insertAfter != HWND_TOPMOST;
             Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {placed}");
             return;
         }
@@ -279,6 +291,41 @@ public sealed class TaskbarWindow : Form
         // to the thickness asked for. The gap at the ends runs the other way and costs nothing.
         appBar.Register();
         appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + open + edgeGap, open, ends, edgeGap);
+        belowOverlay = WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Keeps every running bar behind an active screen-capture overlay, and restores always-on-top
+    /// once the overlay closes.
+    /// </summary>
+    public static void SyncAllZOrder(bool reassert = false)
+    {
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
+        foreach (var bar in openBars.ToList())
+            bar.SyncZOrder(overlay, reassert);
+    }
+
+    private void SyncZOrder(IntPtr overlay, bool reassert = false)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+
+        if (overlay != IntPtr.Zero)
+        {
+            hoverDelay.Stop();
+            pending = -1;
+            if (preview.Visible) preview.Dismiss();
+
+            if (WinEventHookService.PlaceBelowOverlay(Handle, overlay))
+                Log.Write($"bar on {monitor.Device} stepped behind capture overlay 0x{overlay:X}");
+            belowOverlay = true;
+            return;
+        }
+
+        bool lostTopmost = (GetWindowLongPtr(Handle, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0;
+        if (!belowOverlay && !reassert && !lostTopmost) return;
+
+        belowOverlay = false;
+        SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     protected override CreateParams CreateParams
@@ -417,6 +464,7 @@ public sealed class TaskbarWindow : Form
             machine = MachineLoad.Read();
         }
 
+        SyncZOrder(WinEventHookService.ScreenCaptureOverlay());
         Invalidate();
     }
 
@@ -1257,7 +1305,7 @@ public sealed class TaskbarWindow : Form
 
     private void ShowPreview(int slot)
     {
-        if (!Previewable(slot)) return;
+        if (!Previewable(slot) || WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero) return;
 
         preview.Open(buttons[slot].Windows, RectangleToScreen(SlotAt(slot + Leading)), Bounds, Edge,
                      monitor.Bounds, settings.Floating ? Math.Max(4, settings.FloatMargin) : 4);
@@ -2157,6 +2205,7 @@ public sealed class TaskbarWindow : Form
     {
         if (disposing)
         {
+            openBars.Remove(this);
             RemoteChatUsage.Changed -= OnRemoteChatsChanged;
             OrchestraUsage.Changed -= OnOrchestraChanged;
             remoteGlowTimer.Dispose();
