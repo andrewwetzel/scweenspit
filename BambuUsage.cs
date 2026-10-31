@@ -131,6 +131,7 @@ public static class BambuUsage
     private static CancellationTokenSource? life;
     private static CancellationTokenSource? mqttReconnect;
     private static volatile bool reconnectWanted;
+    private static volatile bool sessionEstablished;
     private static bool wokeBackoffThisOutage;
     private static volatile BambuReading? current;
     private static volatile TaskCompletionSource? nudge;
@@ -1074,8 +1075,9 @@ public static class BambuUsage
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
         var discovered = new List<(string Id, string Name, string? Model, bool Online, string PrintStatus)>();
+        bool hasDevicesArray = root.TryGetProperty("devices", out var devicesEl) && devicesEl.ValueKind == JsonValueKind.Array;
 
-        if (root.TryGetProperty("devices", out var devicesEl) && devicesEl.ValueKind == JsonValueKind.Array)
+        if (hasDevicesArray)
         {
             foreach (var dev in devicesEl.EnumerateArray())
             {
@@ -1103,11 +1105,15 @@ public static class BambuUsage
             if (settings is null) return (false, 0, "Not configured");
 
             var now = DateTimeOffset.UtcNow;
-            boundSerials.Clear();
+            if (hasDevicesArray)
+            {
+                boundSerials.Clear();
+                foreach (var d in discovered) boundSerials.Add(d.Id);
+                hasKnownBoundList = true;
+            }
 
             foreach (var d in discovered)
             {
-                boundSerials.Add(d.Id);
                 var existingCfg = settings.Printers.FirstOrDefault(
                     p => string.Equals(p.Id, d.Id, StringComparison.OrdinalIgnoreCase));
 
@@ -1151,7 +1157,6 @@ public static class BambuUsage
                     live.JobName = taskTitle;
             }
 
-            hasKnownBoundList = true;
             if (configChanged) save = persist;
             if (!subscribedSerials.SetEquals(GetTargetSerialsLocked()))
             {
@@ -1248,6 +1253,7 @@ public static class BambuUsage
 
             using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             long startedAt = Environment.TickCount64;
+            sessionEstablished = false;
 
             try
             {
@@ -1266,7 +1272,7 @@ public static class BambuUsage
             }
             catch (Exception ex)
             {
-                Log.Write($"bambu mqtt disconnected: {ex.Message}");
+                Log.WriteOnce("bambu-mqtt", $"bambu mqtt disconnected: {ex.Message}");
             }
             finally
             {
@@ -1279,7 +1285,7 @@ public static class BambuUsage
                 }
             }
 
-            bool wasEstablished = Environment.TickCount64 - startedAt > 30_000;
+            bool wasEstablished = sessionEstablished || Environment.TickCount64 - startedAt > 90_000;
             if (wasEstablished)
                 backoffSeconds = 2;
 
@@ -1465,6 +1471,7 @@ public static class BambuUsage
         try
         {
             // 5. Read incoming MQTT packets continuously with a 45 s read timeout
+            bool hasSubAck = false;
             while (!sessionToken.IsCancellationRequested)
             {
                 var (packetType, flags, payload) = await ReadMqttPacketAsync(ssl, MqttReadTimeoutSeconds, sessionToken);
@@ -1493,14 +1500,21 @@ public static class BambuUsage
                         Log.WriteOnce($"bambu-sub-{subSerial ?? ackId.ToString()}",
                             $"bambu mqtt subscription rejected (0x80) for {subSerial ?? $"packet {ackId}"}");
                     }
-                    else if (shouldSendPushAll && subSerial is not null)
+                    else
                     {
-                        await TrySendPushAllAsync(ssl, writeLock, subSerial, sessionToken);
+                        hasSubAck = true;
+                        if (shouldSendPushAll && subSerial is not null)
+                            await TrySendPushAllAsync(ssl, writeLock, subSerial, sessionToken);
                     }
                 }
                 else if (packetType == 3) // PUBLISH
                 {
+                    if (hasSubAck) sessionEstablished = true;
                     await HandleMqttPublishAsync(ssl, writeLock, flags, payload, sessionToken);
+                }
+                else if (packetType == 13 && hasSubAck) // PINGRESP
+                {
+                    sessionEstablished = true;
                 }
             }
         }
