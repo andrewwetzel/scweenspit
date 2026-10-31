@@ -49,6 +49,8 @@ public sealed class NeedsIndicator : IDisposable
     private readonly Dictionary<string, NeedCard> cards = new(StringComparer.Ordinal);
     private NeedCard? moreCard;
     private double cardScale;
+    private bool belowOverlay;
+    private static NeedsIndicator? current;
 
     /// <summary>Needs given a card before, so only ones that really are new announce themselves.</summary>
     private readonly HashSet<string> carded = new(StringComparer.Ordinal);
@@ -64,6 +66,7 @@ public sealed class NeedsIndicator : IDisposable
         this.barShowsOrchestra = barShowsOrchestra;
         this.openSettings = openSettings;
         this.post = post;
+        current = this;
 
         recheck.Tick += (_, _) => Update();
         OrchestraUsage.Changed += OnChanged;
@@ -249,6 +252,7 @@ public sealed class NeedsIndicator : IDisposable
         int perRow = Math.Max(1, ((int)(work.Width * CardShare) + gap) / (cardWidth + gap));
         int lowest = work.Top + (int)(work.Height * 0.5);
 
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
         var ordered = order.Where(cards.ContainsKey).Select(k => cards[k]).ToList();
         int bottom = work.Bottom - margin;
         int placed = 0;
@@ -264,7 +268,7 @@ public sealed class NeedsIndicator : IDisposable
             {
                 x -= card.Width;
                 card.Location = new Point(x, bottom - card.Height);
-                if (!card.Visible) card.Show();
+                if (!card.Visible) ShowCard(card, overlay);
                 x -= gap;
             }
             placed += row.Count;
@@ -282,13 +286,28 @@ public sealed class NeedsIndicator : IDisposable
             moreCard.SetMore(ordered.Count - placed);
             // Above the top row, at the clock end.
             moreCard.Location = new Point(work.Right - margin - moreCard.Width, bottom - moreCard.Height);
-            if (!moreCard.Visible) moreCard.Show();
+            if (!moreCard.Visible) ShowCard(moreCard, overlay);
         }
         else
         {
             moreCard?.Dispose();
             moreCard = null;
         }
+
+        SyncZOrder(overlay);
+    }
+
+    private static void ShowCard(NeedCard card, IntPtr overlay)
+    {
+        if (overlay != IntPtr.Zero)
+        {
+            card.CreateControl();
+            Native.SetWindowPos(card.Handle, overlay, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+        card.Show();
+        if (overlay != IntPtr.Zero)
+            WinEventHookService.PlaceBelowOverlay(card.Handle, overlay);
     }
 
     private void ClearCards()
@@ -305,11 +324,32 @@ public sealed class NeedsIndicator : IDisposable
     /// <summary>Raises the cards over anything that has crept over them, and makes them glow.</summary>
     private void PointAtCards()
     {
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
         foreach (var card in cards.Values.Where(c => c.Visible))
         {
-            card.BringToFront();
+            if (overlay == IntPtr.Zero) card.BringToFront();
             card.Pulse();
         }
+        if (overlay != IntPtr.Zero) SyncZOrder(overlay);
+    }
+
+    public static void SyncAllZOrder(IntPtr overlay, bool reassert = false) => current?.SyncZOrder(overlay, reassert);
+
+    /// <summary>Keeps visible need cards and the open list behind an active capture overlay.</summary>
+    public void SyncZOrder(IntPtr overlay, bool reassert = false)
+    {
+        if (overlay == IntPtr.Zero && !belowOverlay && !reassert) return;
+        belowOverlay = overlay != IntPtr.Zero;
+
+        void Step(IntPtr hWnd) =>
+            _ = overlay != IntPtr.Zero
+                ? WinEventHookService.PlaceBelowOverlay(hWnd, overlay)
+                : Native.SetWindowPos(hWnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+
+        foreach (var card in cards.Values.Where(c => c.Visible && c.IsHandleCreated)) Step(card.Handle);
+        if (moreCard is { Visible: true, IsHandleCreated: true }) Step(moreCard.Handle);
+        if (panel is { IsOpen: true, IsHandleCreated: true }) Step(panel.Handle);
     }
 
     /// <summary>Where the indicator should be, and a sentence saying why.</summary>
@@ -374,6 +414,7 @@ public sealed class NeedsIndicator : IDisposable
 
     public void Dispose()
     {
+        if (ReferenceEquals(current, this)) current = null;
         OrchestraUsage.Changed -= OnChanged;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         recheck.Dispose();
