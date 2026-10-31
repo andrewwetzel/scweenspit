@@ -72,10 +72,9 @@ public static class BambuUsage
     private const int MqttReadTimeoutSeconds = 45;
     private const int MqttWriteTimeoutSeconds = 15;
 
-    // Online Bambu printers push periodic status/temperature heartbeats every few seconds.
-    // Starting at 90 s (and doubling up to 10 min if a reconnected stream goes silent again
-    // before steady messages flow) recovers dead cloud subscriptions without looping on a
-    // genuinely quiet idle printer.
+    // Printing/preparing Bambu printers push status deltas every few seconds. Starting at 90 s
+    // (and doubling up to 10 min after each stale reconnect until a session stays up longer than
+    // its current threshold) recovers dead cloud subscriptions without disturbing idle printers.
     private const int MqttBaseStaleSeconds = 90;
     private const int MqttMaxStaleSeconds = 600;
 
@@ -83,6 +82,11 @@ public static class BambuUsage
     // once initial state is known.
     private const long PushAllMinIntervalMs = 5 * 60 * 1000;
     private const long TokenRefreshMinIntervalMs = 2 * 60 * 1000;
+
+    private sealed class StaleStreamException(int thresholdSeconds, string message) : Exception(message)
+    {
+        public int ThresholdSeconds { get; } = thresholdSeconds;
+    }
 
     // Print error code sent transiently by Bambu firmware when a user manually cancels a job.
     private const long UserCancelledPrintError = 50348044;
@@ -124,11 +128,14 @@ public static class BambuUsage
     private static readonly object gate = new();
     private static readonly Dictionary<string, PrinterLiveState> liveBySerial = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, long> lastPushAllBySerial = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> owedPushAllSerials = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> boundSerials = new(StringComparer.OrdinalIgnoreCase);
 
     private static BambuSettings? settings;
     private static Action? persist;
     private static CancellationTokenSource? life;
     private static CancellationTokenSource? mqttReconnect;
+    private static volatile bool reconnectWanted;
     private static bool wokeBackoffThisOutage;
     private static volatile BambuReading? current;
     private static volatile TaskCompletionSource? nudge;
@@ -250,6 +257,8 @@ public static class BambuUsage
         lock (gate)
         {
             RebuildCurrentReadingLocked();
+            reconnectWanted = true;
+            mqttReconnect?.Cancel();
         }
     }
 
@@ -413,14 +422,14 @@ public static class BambuUsage
 
     private static void OnNetworkChanged(object? sender, EventArgs e)
     {
-        lock (gate) mqttReconnect?.Cancel();
+        lock (gate) { reconnectWanted = true; mqttReconnect?.Cancel(); }
         Refresh();
     }
 
     private static void OnPowerChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
     {
         if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
-        lock (gate) mqttReconnect?.Cancel();
+        lock (gate) { reconnectWanted = true; mqttReconnect?.Cancel(); }
         Refresh();
     }
 
@@ -756,6 +765,7 @@ public static class BambuUsage
         lock (gate)
         {
             lastTokenRefreshTick = -TokenRefreshMinIntervalMs;
+            reconnectWanted = true;
             mqttReconnect?.Cancel();
         }
         Refresh();
@@ -782,6 +792,8 @@ public static class BambuUsage
             }
             liveBySerial.Clear();
             lastPushAllBySerial.Clear();
+            owedPushAllSerials.Clear();
+            boundSerials.Clear();
             mqttConnected = false;
             lastMqttMessageAt = null;
             lastError = "Sign in to Bambu Cloud";
@@ -1082,9 +1094,13 @@ public static class BambuUsage
             if (settings is null) return (false, 0, "Not configured");
 
             var now = DateTimeOffset.UtcNow;
+            if (hasCompletedInitialSync && discovered.Any(d => !boundSerials.Contains(d.Id)))
+                newPrinterDiscovered = true;
+            boundSerials.Clear();
 
             foreach (var d in discovered)
             {
+                boundSerials.Add(d.Id);
                 var existingCfg = settings.Printers.FirstOrDefault(
                     p => string.Equals(p.Id, d.Id, StringComparison.OrdinalIgnoreCase));
 
@@ -1130,7 +1146,11 @@ public static class BambuUsage
             }
 
             if (configChanged) save = persist;
-            if (newPrinterDiscovered) mqttReconnect?.Cancel();
+            if (newPrinterDiscovered)
+            {
+                reconnectWanted = true;
+                mqttReconnect?.Cancel();
+            }
 
             lastError = null;
             lastNeedsAuth = false;
@@ -1188,10 +1208,14 @@ public static class BambuUsage
 
             lock (gate)
             {
+                reconnectWanted = false;
                 accessToken = Secret.Unprotect(settings?.AccessToken);
                 mqttUser = settings?.MqttUsername;
                 region = settings?.Region ?? "Global";
-                serials = settings?.Printers.Select(p => p.Id).Where(id => !string.IsNullOrWhiteSpace(id)).ToList() ?? [];
+                serials = settings?.Printers
+                    .Where(p => p.Enabled && !string.IsNullOrWhiteSpace(p.Id) && (!hasCompletedInitialSync || boundSerials.Contains(p.Id)))
+                    .Select(p => p.Id)
+                    .ToList() ?? [];
             }
 
             if (!string.IsNullOrWhiteSpace(accessToken) && string.IsNullOrWhiteSpace(mqttUser))
@@ -1219,12 +1243,11 @@ public static class BambuUsage
 
             using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             long startedAt = Environment.TickCount64;
-            bool staleTriggered = false;
-            bool steadyFlowed = false;
+            bool endedStale = false;
 
             try
             {
-                (staleTriggered, steadyFlowed) = await RunMqttSessionAsync(
+                await RunMqttSessionAsync(
                     MqttHost(region), mqttUser, accessToken, serials, staleSeconds, sessionCts);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1233,9 +1256,17 @@ public static class BambuUsage
             }
             catch (Exception) when (sessionCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
-                // Intentional reconnect (credentials updated, power resume, etc.)
+                // Intentional reconnect (credentials updated, power resume, newly bound printer, etc.)
+                if (Environment.TickCount64 - startedAt > staleSeconds * 1000L)
+                    staleSeconds = MqttBaseStaleSeconds;
                 backoffSeconds = 2;
                 continue;
+            }
+            catch (StaleStreamException ex)
+            {
+                endedStale = true;
+                staleSeconds = Math.Min(MqttMaxStaleSeconds, ex.ThresholdSeconds * 2);
+                Log.Write($"bambu mqtt disconnected: {ex.Message}");
             }
             catch (Exception ex)
             {
@@ -1252,17 +1283,24 @@ public static class BambuUsage
                 }
             }
 
-            if (steadyFlowed)
+            long sessionDurationMs = Environment.TickCount64 - startedAt;
+            if (!endedStale && sessionDurationMs > staleSeconds * 1000L)
                 staleSeconds = MqttBaseStaleSeconds;
-            if (staleTriggered)
-                staleSeconds = Math.Min(MqttMaxStaleSeconds, staleSeconds * 2);
 
-            bool wasEstablished = Environment.TickCount64 - startedAt > 30_000;
+            bool wasEstablished = sessionDurationMs > 30_000;
             if (wasEstablished)
                 backoffSeconds = 2;
 
             using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            lock (gate) mqttReconnect = delayCts;
+            lock (gate)
+            {
+                mqttReconnect = delayCts;
+                if (reconnectWanted)
+                {
+                    reconnectWanted = false;
+                    delayCts.Cancel();
+                }
+            }
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(wasEstablished ? 1 : backoffSeconds), delayCts.Token);
@@ -1288,7 +1326,7 @@ public static class BambuUsage
         }
     }
 
-    private static async Task<(bool StaleTriggered, bool SteadyFlowed)> RunMqttSessionAsync(
+    private static async Task RunMqttSessionAsync(
         string host, string username, string password, IReadOnlyList<string> serials,
         int initialStaleSeconds, CancellationTokenSource sessionCts)
     {
@@ -1336,12 +1374,15 @@ public static class BambuUsage
         long connectedAtTick = Environment.TickCount64;
         long lastPublishTick = connectedAtTick;
         int currentStaleSeconds = initialStaleSeconds;
-        bool staleTriggered = false;
-        bool steadyFlowed = false;
 
         lock (gate)
         {
             mqttReconnect = sessionCts;
+            if (reconnectWanted)
+            {
+                reconnectWanted = false;
+                sessionCts.Cancel();
+            }
             wokeBackoffThisOutage = false;
             mqttConnected = true;
             lastError = null;
@@ -1349,9 +1390,10 @@ public static class BambuUsage
             RebuildCurrentReadingLocked();
         }
 
-        // 3. Subscribe to `device/{serial}/report` for each bound printer; `pushall` is sent once
-        //    SUBACK confirms the subscription so the state dump cannot race ahead of the broker.
+        // 3. Subscribe to `device/{serial}/report` for each enabled bound printer; `pushall` is sent
+        //    once SUBACK confirms the subscription so the state dump cannot race ahead of the broker.
         var pendingSubAcks = new Dictionary<ushort, string>();
+        var activeSerials = new HashSet<string>(serials, StringComparer.OrdinalIgnoreCase);
         ushort packetId = 1;
         foreach (var serial in serials)
         {
@@ -1361,7 +1403,7 @@ public static class BambuUsage
             await WritePacketAsync(ssl, writeLock, subPacket, ct);
         }
 
-        // 4. Start background keep-alive PINGREQ & stale-stream watchdog task
+        // 4. Start background keep-alive PINGREQ, owed-pushall retry & active-print watchdog task
         using var pingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var sessionToken = pingCts.Token;
         Exception? pingError = null;
@@ -1393,18 +1435,36 @@ public static class BambuUsage
                     await Task.Delay(TimeSpan.FromSeconds(nextDelay), sessionToken);
                     nextDelay = MqttPingIntervalSeconds;
 
-                    bool anyOnline;
+                    long nowTick = Environment.TickCount64;
+                    bool anyPrintingOrPreparing = false;
+                    List<string>? readyPushAlls = null;
                     lock (gate)
                     {
-                        anyOnline = settings?.Printers.Any(p =>
-                            p.Enabled && liveBySerial.TryGetValue(p.Id, out var l) && l.Online) ?? false;
+                        foreach (var s in activeSerials)
+                        {
+                            if (liveBySerial.TryGetValue(s, out var l) && l.Online
+                                && l.GcodeState is "PREPARE" or "RUNNING" or "ACTIVE" or "PRINTING")
+                            {
+                                anyPrintingOrPreparing = true;
+                            }
+                            if (owedPushAllSerials.Contains(s)
+                                && (!lastPushAllBySerial.TryGetValue(s, out long lastTick) || nowTick - lastTick >= PushAllMinIntervalMs))
+                            {
+                                (readyPushAlls ??= []).Add(s);
+                            }
+                        }
                     }
 
-                    long silenceMs = Environment.TickCount64 - Interlocked.Read(ref lastPublishTick);
-                    if (anyOnline && silenceMs >= Volatile.Read(ref currentStaleSeconds) * 1000L)
+                    long silenceMs = nowTick - Interlocked.Read(ref lastPublishTick);
+                    if (anyPrintingOrPreparing && silenceMs >= currentStaleSeconds * 1000L)
+                        throw new StaleStreamException(currentStaleSeconds, $"MQTT stream silent for {silenceMs / 1000}s while a print is active.");
+                    if (nowTick - connectedAtTick > currentStaleSeconds * 1000L)
+                        currentStaleSeconds = MqttBaseStaleSeconds;
+
+                    if (readyPushAlls is not null)
                     {
-                        staleTriggered = true;
-                        throw new TimeoutException($"MQTT stream silent for {silenceMs / 1000}s while printers are online.");
+                        foreach (var s in readyPushAlls)
+                            await TrySendPushAllAsync(ssl, writeLock, s, sessionToken);
                     }
 
                     await WritePacketAsync(ssl, writeLock, pingReq, sessionToken);
@@ -1432,19 +1492,26 @@ public static class BambuUsage
                     string? subSerial;
                     lock (pendingSubAcks) pendingSubAcks.Remove(ackId, out subSerial);
                     if (payload[2] == 0x80)
-                        throw new IOException($"MQTT broker rejected subscription for {subSerial ?? $"packet {ackId}"} (0x80).");
-                    if (subSerial is not null)
+                    {
+                        if (subSerial is not null)
+                        {
+                            lock (gate)
+                            {
+                                activeSerials.Remove(subSerial);
+                                owedPushAllSerials.Remove(subSerial);
+                            }
+                        }
+                        Log.WriteOnce($"bambu-sub-{subSerial ?? ackId.ToString()}",
+                            $"bambu mqtt subscription rejected (0x80) for {subSerial ?? $"packet {ackId}"}");
+                    }
+                    else if (subSerial is not null)
+                    {
                         await TrySendPushAllAsync(ssl, writeLock, subSerial, sessionToken);
+                    }
                 }
                 else if (packetType == 3) // PUBLISH
                 {
-                    long pktTick = Environment.TickCount64;
-                    Interlocked.Exchange(ref lastPublishTick, pktTick);
-                    if (pktTick - connectedAtTick >= 10_000)
-                    {
-                        steadyFlowed = true;
-                        Volatile.Write(ref currentStaleSeconds, MqttBaseStaleSeconds);
-                    }
+                    Interlocked.Exchange(ref lastPublishTick, Environment.TickCount64);
                     await HandleMqttPublishAsync(ssl, writeLock, flags, payload, sessionToken);
                 }
             }
@@ -1456,8 +1523,6 @@ public static class BambuUsage
             if (pingError is not null && !ct.IsCancellationRequested)
                 throw pingError;
         }
-
-        return (staleTriggered, steadyFlowed);
     }
 
     private static async Task TrySendPushAllAsync(
@@ -1469,7 +1534,11 @@ public static class BambuUsage
             long nowTick = Environment.TickCount64;
             bool hasMqttState = liveBySerial.TryGetValue(serial, out var live) && !string.IsNullOrWhiteSpace(live.GcodeState);
             if (hasMqttState && lastPushAllBySerial.TryGetValue(serial, out long lastTick) && nowTick - lastTick < PushAllMinIntervalMs)
+            {
+                owedPushAllSerials.Add(serial);
                 return;
+            }
+            owedPushAllSerials.Remove(serial);
             lastPushAllBySerial[serial] = nowTick;
             seq = ++pushSequenceId;
         }
