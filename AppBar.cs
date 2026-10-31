@@ -26,6 +26,9 @@ public sealed class AppBar : IDisposable
     /// <summary>Raised when Windows tells us the reserved rectangle has to change.</summary>
     public event Action? PositionChanged;
 
+    /// <summary>Raised when a full-screen surface opens (<c>true</c>) or closes (<c>false</c>) on this display.</summary>
+    public event Action<bool>? FullScreenChanged;
+
     public AppBar(Form owner) => this.owner = owner;
 
     public bool Register()
@@ -45,7 +48,7 @@ public sealed class AppBar : IDisposable
     /// out of the way of other appbars, so the answer to ABM_QUERYPOS is authoritative, not our
     /// request — and the window has to be placed where the answer says.
     /// </summary>
-    public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0)
+    public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0, IntPtr overlay = default)
     {
         Monitor = monitor;
         Edge = edge;
@@ -65,9 +68,11 @@ public sealed class AppBar : IDisposable
         }
 
         // Windows keeps the whole strip reserved; only the visible bar moves inside it, which is
-        // what makes a floating bar float without applications creeping under it.
+        // what makes a floating bar float without applications creeping under it. While a
+        // screen-capture overlay is up, stay behind the overlay rather than jumping over it.
         var r = BarGeometry.Deflate(rc, edge, open, ends, edgeGap);
-        SetWindowPos(owner.Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
+        var insertAfter = overlay != IntPtr.Zero ? overlay : HWND_TOPMOST;
+        SetWindowPos(owner.Handle, insertAfter, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
         if (registered)
@@ -110,8 +115,14 @@ public sealed class AppBar : IDisposable
         switch (m.WParam.ToInt32())
         {
             case ABN_POSCHANGED:
-            case ABN_FULLSCREENAPP:
                 PositionChanged?.Invoke();
+                break;
+            case ABN_FULLSCREENAPP:
+                // A full-screen capture overlay (Win+Shift+S) triggers ABN_FULLSCREENAPP as it
+                // opens. Re-running Reserve() here would re-assert HWND_TOPMOST and put the bar
+                // straight back in front of the overlay; instead let the bar step behind it, and
+                // reclaim topmost once it closes.
+                FullScreenChanged?.Invoke(m.LParam != IntPtr.Zero);
                 break;
         }
         return true;

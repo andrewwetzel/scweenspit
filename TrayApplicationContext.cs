@@ -150,9 +150,15 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             TrackForeground();
 
+            // Keep our bars and cards behind any active screen-capture overlay before refreshing
+            // taskbar-covering windows, and let them reclaim topmost in order once it closes.
+            var overlay = WinEventHookService.ScreenCaptureOverlay();
+            TaskbarWindow.SyncAllZOrder(overlay);
+            needs.SyncZOrder(overlay);
+
             // A taskbar-covering window is only held above everything while it is in front, so this
             // has to follow the foreground rather than being decided once when it was placed.
-            hook.RefreshTopmost();
+            hook.RefreshTopmost(overlay: overlay);
         };
         foregroundWatch.Start();
 
@@ -807,7 +813,10 @@ public sealed class TrayApplicationContext : ApplicationContext
                 hook.ArrangeOverlapping(strip);
         }
 
-        hook.RefreshTopmost(reassert: true);
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
+        TaskbarWindow.SyncAllZOrder(overlay);
+        needs.SyncZOrder(overlay);
+        hook.RefreshTopmost(reassert: true, overlay: overlay);
     }
 
     /// <summary>Same bookkeeping as the snap and taskbar settings: remember, change, put back.</summary>
