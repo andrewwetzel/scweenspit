@@ -299,9 +299,15 @@ public sealed class NeedsIndicator : IDisposable
 
     private static void ShowCard(NeedCard card, IntPtr overlay)
     {
-        if (overlay == IntPtr.Zero) { card.Show(); return; }
-        Native.SetWindowPos(card.Handle, overlay, card.Left, card.Top, card.Width, card.Height,
-            Native.SWP_SHOWWINDOW | Native.SWP_NOACTIVATE);
+        if (overlay != IntPtr.Zero)
+        {
+            card.CreateControl();
+            Native.SetWindowPos(card.Handle, overlay, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+        card.Show();
+        if (overlay != IntPtr.Zero)
+            WinEventHookService.PlaceBelowOverlay(card.Handle, overlay);
     }
 
     private void ClearCards()

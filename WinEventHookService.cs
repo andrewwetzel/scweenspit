@@ -104,6 +104,7 @@ public sealed class WinEventHookService : IDisposable
     public WinEventHookService(ZoneManager zones)
     {
         this.zones = zones;
+        isManagedTopmost = hWnd => madeTopmost.ContainsKey(hWnd) || coversTaskbar.ContainsKey(hWnd);
         verify.Tick += (_, _) => DrainVerify();
         dragTick.Tick += (_, _) => DragUpdate();
         postDrag.Tick += (_, _) => { postDrag.Stop(); ReconcileAfterDrag(); };
@@ -999,6 +1000,7 @@ public sealed class WinEventHookService : IDisposable
 
     // ---- screen-capture overlays -------------------------------------------
 
+    private static Func<IntPtr, bool>? isManagedTopmost;
     private static IntPtr cachedOverlay;
     private static long cachedOverlayAt = -1_000;
 
@@ -1021,13 +1023,15 @@ public sealed class WinEventHookService : IDisposable
         {
             if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return true;
             if ((GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) return true;
+            if (isManagedTopmost?.Invoke(hWnd) == true) return true;
             if (!GetWindowRect(hWnd, out var rect) || rect.Width < 200 || rect.Height < 200) return true;
             if (IsCloaked(hWnd)) return true;
 
             string proc = OwnerProcess(hWnd);
             if (!ScreenCaptureProcesses.Contains(proc)) return true;
             if (proc.Equals("SnippingTool", StringComparison.OrdinalIgnoreCase) &&
-                !CoversAnyMonitor(rect, monitors ??= ZoneManager.AllMonitors()))
+                ((GetWindowLongPtr(hWnd, GWL_STYLE) & (WS_CAPTION | WS_THICKFRAME)) != 0 ||
+                 !CoversAnyMonitor(rect, monitors ??= ZoneManager.AllMonitors())))
                 return true;
 
             found = hWnd;
