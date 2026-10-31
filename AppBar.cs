@@ -48,7 +48,7 @@ public sealed class AppBar : IDisposable
     /// out of the way of other appbars, so the answer to ABM_QUERYPOS is authoritative, not our
     /// request — and the window has to be placed where the answer says.
     /// </summary>
-    public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0)
+    public void Reserve(RECT monitor, BarEdge edge, int thickness, int open = 0, int ends = 0, int edgeGap = 0, IntPtr overlay = default)
     {
         Monitor = monitor;
         Edge = edge;
@@ -71,8 +71,7 @@ public sealed class AppBar : IDisposable
         // what makes a floating bar float without applications creeping under it. While a
         // screen-capture overlay is up, stay behind the overlay rather than jumping over it.
         var r = BarGeometry.Deflate(rc, edge, open, ends, edgeGap);
-        var insertAfter = WinEventHookService.ScreenCaptureOverlay() is var overlay && overlay != IntPtr.Zero
-            ? overlay : HWND_TOPMOST;
+        var insertAfter = overlay != IntPtr.Zero ? overlay : HWND_TOPMOST;
         SetWindowPos(owner.Handle, insertAfter, r.Left, r.Top, r.Width, r.Height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
 

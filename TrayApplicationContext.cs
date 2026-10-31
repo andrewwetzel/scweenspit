@@ -152,23 +152,19 @@ public sealed class TrayApplicationContext : ApplicationContext
 
             // Keep our bars and cards behind any active screen-capture overlay before refreshing
             // taskbar-covering windows, and let them reclaim topmost in order once it closes.
-            TaskbarWindow.SyncAllZOrder();
-            needs.SyncZOrder();
+            var overlay = WinEventHookService.ScreenCaptureOverlay();
+            TaskbarWindow.SyncAllZOrder(overlay);
+            needs.SyncZOrder(overlay);
 
             // A taskbar-covering window is only held above everything while it is in front, so this
             // has to follow the foreground rather than being decided once when it was placed.
-            hook.RefreshTopmost();
+            hook.RefreshTopmost(overlay: overlay);
         };
         foregroundWatch.Start();
 
         // Re-assert only the hide. Re-applying auto-hide here would make Explorer re-lay-out every
-        // two seconds, which is itself what puts the taskbar back. Skipped while a screen-capture
-        // overlay is up so poking Shell_TrayWnd does not disturb the shell's z-order mid-snip.
-        taskbarWatch.Tick += (_, _) =>
-        {
-            if (config.HideWindowsTaskbar && WinEventHookService.ScreenCaptureOverlay() == IntPtr.Zero)
-                Taskbar.Hide(true);
-        };
+        // two seconds, which is itself what puts the taskbar back.
+        taskbarWatch.Tick += (_, _) => { if (config.HideWindowsTaskbar) Taskbar.Hide(true); };
         reflow.Tick += (_, _) => { reflow.Stop(); ReflowAroundBars(); };
 
         // Touching Handle rather than CreateControl(): that one returns without doing anything for a
@@ -817,9 +813,10 @@ public sealed class TrayApplicationContext : ApplicationContext
                 hook.ArrangeOverlapping(strip);
         }
 
-        TaskbarWindow.SyncAllZOrder();
-        needs.SyncZOrder();
-        hook.RefreshTopmost(reassert: true);
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
+        TaskbarWindow.SyncAllZOrder(overlay);
+        needs.SyncZOrder(overlay);
+        hook.RefreshTopmost(reassert: true, overlay: overlay);
     }
 
     /// <summary>Same bookkeeping as the snap and taskbar settings: remember, change, put back.</summary>
@@ -984,7 +981,6 @@ public sealed class TrayApplicationContext : ApplicationContext
             {
                 needs.Announce();
                 if (!config.Orchestra.NeedsToast || arrived.Count == 0) return;
-                if (WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero) return;
 
                 bool blocking = arrived.Any(i => i.Need.Blocking);
                 var first = arrived.FirstOrDefault(i => i.Need.Blocking) ?? arrived[0];

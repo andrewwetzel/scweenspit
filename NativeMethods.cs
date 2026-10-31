@@ -86,7 +86,7 @@ public static class Native
     public const int  ICON_SMALL2 = 2, ICON_SMALL = 0, ICON_BIG = 1;
     public const int  GCLP_HICON = -14, GCLP_HICONSM = -34;
     public const uint GA_ROOTOWNER = 3;
-    public const uint GW_HWNDNEXT = 2, GW_HWNDPREV = 3, GW_OWNER = 4;
+    public const uint GW_HWNDPREV = 3, GW_OWNER = 4;
     public const int  SW_MINIMIZE = 6, SW_SHOWNA = 8;
 
     public const int  VK_LBUTTON = 0x01;

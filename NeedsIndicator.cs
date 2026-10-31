@@ -252,6 +252,7 @@ public sealed class NeedsIndicator : IDisposable
         int perRow = Math.Max(1, ((int)(work.Width * CardShare) + gap) / (cardWidth + gap));
         int lowest = work.Top + (int)(work.Height * 0.5);
 
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
         var ordered = order.Where(cards.ContainsKey).Select(k => cards[k]).ToList();
         int bottom = work.Bottom - margin;
         int placed = 0;
@@ -267,7 +268,7 @@ public sealed class NeedsIndicator : IDisposable
             {
                 x -= card.Width;
                 card.Location = new Point(x, bottom - card.Height);
-                if (!card.Visible) card.Show();
+                if (!card.Visible) ShowCard(card, overlay);
                 x -= gap;
             }
             placed += row.Count;
@@ -285,7 +286,7 @@ public sealed class NeedsIndicator : IDisposable
             moreCard.SetMore(ordered.Count - placed);
             // Above the top row, at the clock end.
             moreCard.Location = new Point(work.Right - margin - moreCard.Width, bottom - moreCard.Height);
-            if (!moreCard.Visible) moreCard.Show();
+            if (!moreCard.Visible) ShowCard(moreCard, overlay);
         }
         else
         {
@@ -293,7 +294,14 @@ public sealed class NeedsIndicator : IDisposable
             moreCard = null;
         }
 
-        SyncZOrder();
+        SyncZOrder(overlay);
+    }
+
+    private static void ShowCard(NeedCard card, IntPtr overlay)
+    {
+        if (overlay == IntPtr.Zero) { card.Show(); return; }
+        Native.SetWindowPos(card.Handle, overlay, card.Left, card.Top, card.Width, card.Height,
+            Native.SWP_SHOWWINDOW | Native.SWP_NOACTIVATE);
     }
 
     private void ClearCards()
@@ -310,50 +318,32 @@ public sealed class NeedsIndicator : IDisposable
     /// <summary>Raises the cards over anything that has crept over them, and makes them glow.</summary>
     private void PointAtCards()
     {
-        bool overlayUp = WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero;
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
         foreach (var card in cards.Values.Where(c => c.Visible))
         {
-            if (!overlayUp) card.BringToFront();
+            if (overlay == IntPtr.Zero) card.BringToFront();
             card.Pulse();
         }
-        if (overlayUp) SyncZOrder();
+        if (overlay != IntPtr.Zero) SyncZOrder(overlay);
     }
 
-    public static void SyncAllZOrder(bool reassert = false) => current?.SyncZOrder(reassert);
+    public static void SyncAllZOrder(IntPtr overlay, bool reassert = false) => current?.SyncZOrder(overlay, reassert);
 
-    /// <summary>
-    /// Steps any visible need cards and open list behind an active screen-capture overlay, and
-    /// restores their topmost state once the overlay closes.
-    /// </summary>
-    public void SyncZOrder(bool reassert = false)
+    /// <summary>Keeps visible need cards and the open list behind an active capture overlay.</summary>
+    public void SyncZOrder(IntPtr overlay, bool reassert = false)
     {
-        var overlay = WinEventHookService.ScreenCaptureOverlay();
-        if (overlay != IntPtr.Zero)
-        {
-            foreach (var card in cards.Values)
-                if (card.Visible && card.IsHandleCreated)
-                    WinEventHookService.PlaceBelowOverlay(card.Handle, overlay);
-            if (moreCard is { Visible: true, IsHandleCreated: true })
-                WinEventHookService.PlaceBelowOverlay(moreCard.Handle, overlay);
-            if (panel is { IsOpen: true, IsHandleCreated: true })
-                WinEventHookService.PlaceBelowOverlay(panel.Handle, overlay);
-            belowOverlay = true;
-            return;
-        }
+        if (overlay == IntPtr.Zero && !belowOverlay && !reassert) return;
+        belowOverlay = overlay != IntPtr.Zero;
 
-        if (!belowOverlay && !reassert) return;
-        belowOverlay = false;
-
-        foreach (var card in cards.Values)
-            if (card.Visible && card.IsHandleCreated)
-                Native.SetWindowPos(card.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+        void Step(IntPtr hWnd) =>
+            _ = overlay != IntPtr.Zero
+                ? WinEventHookService.PlaceBelowOverlay(hWnd, overlay)
+                : Native.SetWindowPos(hWnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
                     Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        if (moreCard is { Visible: true, IsHandleCreated: true })
-            Native.SetWindowPos(moreCard.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
-                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        if (panel is { IsOpen: true, IsHandleCreated: true })
-            Native.SetWindowPos(panel.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
-                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+
+        foreach (var card in cards.Values.Where(c => c.Visible && c.IsHandleCreated)) Step(card.Handle);
+        if (moreCard is { Visible: true, IsHandleCreated: true }) Step(moreCard.Handle);
+        if (panel is { IsOpen: true, IsHandleCreated: true }) Step(panel.Handle);
     }
 
     /// <summary>Where the indicator should be, and a sentence saying why.</summary>

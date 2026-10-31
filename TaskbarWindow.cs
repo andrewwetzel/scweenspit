@@ -183,8 +183,9 @@ public sealed class TaskbarWindow : Form
         appBar.PositionChanged += Reposition;
         appBar.FullScreenChanged += opening =>
         {
-            SyncAllZOrder(reassert: !opening);
-            NeedsIndicator.SyncAllZOrder(reassert: !opening);
+            var overlay = WinEventHookService.ScreenCaptureOverlay();
+            SyncAllZOrder(overlay, reassert: !opening);
+            NeedsIndicator.SyncAllZOrder(overlay, reassert: !opening);
         };
 
         // Only a full-display bar can be an appbar; a zone-scoped one places itself.
@@ -272,17 +273,17 @@ public sealed class TaskbarWindow : Form
         int open = settings.Floating ? settings.FloatMargin : 0;
         int ends = settings.Floating ? settings.SideGap : 0;
         int edgeGap = settings.Floating ? settings.EdgeGap : 0;
+        var overlay = WinEventHookService.ScreenCaptureOverlay();
 
         if (zones.BarStrip(monitor, settings) is { } strip)
         {
             // Not an appbar: Windows reserves space as one rectangle per monitor, so a bar across
             // part of an edge cannot be expressed that way. The zone is shortened for it instead.
             var placed = BarGeometry.Deflate(strip, Edge, open, ends, edgeGap);
-            var insertAfter = WinEventHookService.ScreenCaptureOverlay() is var overlay && overlay != IntPtr.Zero
-                ? overlay : HWND_TOPMOST;
+            var insertAfter = overlay != IntPtr.Zero ? overlay : HWND_TOPMOST;
             SetWindowPos(Handle, insertAfter, placed.Left, placed.Top, placed.Width, placed.Height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            belowOverlay = insertAfter != HWND_TOPMOST;
+            belowOverlay = overlay != IntPtr.Zero;
             Log.Write($"bar on {monitor.Device} zone {settings.Zone}: {placed}");
             return;
         }
@@ -290,40 +291,30 @@ public sealed class TaskbarWindow : Form
         // Reserve the bar plus the two gaps along the docking axis; the window is then inset back
         // to the thickness asked for. The gap at the ends runs the other way and costs nothing.
         appBar.Register();
-        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + open + edgeGap, open, ends, edgeGap);
-        belowOverlay = WinEventHookService.ScreenCaptureOverlay() != IntPtr.Zero;
+        appBar.Reserve(monitor.Bounds, Edge, settings.Thickness + open + edgeGap, open, ends, edgeGap, overlay);
+        belowOverlay = overlay != IntPtr.Zero;
     }
 
-    /// <summary>
-    /// Keeps every running bar behind an active screen-capture overlay, and restores always-on-top
-    /// once the overlay closes.
-    /// </summary>
-    public static void SyncAllZOrder(bool reassert = false)
+    /// <summary>Keeps every bar behind an active capture overlay, and restores topmost once it closes.</summary>
+    public static void SyncAllZOrder(IntPtr overlay, bool reassert = false)
     {
-        var overlay = WinEventHookService.ScreenCaptureOverlay();
-        foreach (var bar in openBars.ToList())
-            bar.SyncZOrder(overlay, reassert);
+        foreach (var bar in openBars.ToList()) bar.SyncZOrder(overlay, reassert);
     }
 
     private void SyncZOrder(IntPtr overlay, bool reassert = false)
     {
         if (IsDisposed || !IsHandleCreated) return;
-
         if (overlay != IntPtr.Zero)
         {
             hoverDelay.Stop();
             pending = -1;
             if (preview.Visible) preview.Dismiss();
-
-            if (WinEventHookService.PlaceBelowOverlay(Handle, overlay))
-                Log.Write($"bar on {monitor.Device} stepped behind capture overlay 0x{overlay:X}");
+            WinEventHookService.PlaceBelowOverlay(Handle, overlay);
             belowOverlay = true;
             return;
         }
 
-        bool lostTopmost = (GetWindowLongPtr(Handle, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0;
-        if (!belowOverlay && !reassert && !lostTopmost) return;
-
+        if (!belowOverlay && !reassert && (GetWindowLongPtr(Handle, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return;
         belowOverlay = false;
         SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
