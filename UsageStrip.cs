@@ -74,7 +74,9 @@ internal static class UsageStrip
             return (int)Math.Round(96 * hScale * uScale);
         }
 
-        return MeterStrip.BambuExtent(vertical, activeCount, maxRowsPerColumn, barBreadth, scalePercent);
+        // Once anything is busy the strip lists every enabled printer, not just the busy ones: a
+        // printer that finished or sat idle while two others print must not vanish from the bar.
+        return MeterStrip.BambuExtent(vertical, printers!.Count, maxRowsPerColumn, barBreadth, scalePercent);
     }
 
     /// <summary>Room a remote server chats strip needs along the bar, sized tightly to the live chat count.</summary>
@@ -218,7 +220,7 @@ internal static class UsageStrip
         string? hoveredChatId = null)
     {
         var limits = reading?.Limits ?? [];
-        if (limits.Count == 0) { PaintState(g, area, reading, isAntigravity: true); return; }
+        if (limits.Count == 0) { PaintAntigravityPlaceholder(g, area, reading, maxRowsPerColumn); return; }
 
         if (showRemoteChats && RemoteChatUsage.Enabled)
         {
@@ -240,13 +242,98 @@ internal static class UsageStrip
             g, area, meters,
             lowColour: MeterStrip.VioletLow,
             headerTitle: hdrTitle,
-            headerTag: null,
+            headerTag: AntigravityHeaderTag(limits),
             headerColour: hasWaiting ? Color.FromArgb(255, 210, 115) : AntigravityTitleColour,
             sparkleGlyph: true,
             maxRowsPerColumn: maxRowsPerColumn,
             paintHeaderRight: stripChats.Count > 0
                 ? (hg, rightBox, hdrScale) => PaintOrHitTestHeaderCapsule(hg, rightBox, stripChats, hoveredChatId, null, hdrScale, out _)
                 : null);
+    }
+
+    /// <summary>A limit with nothing left: nothing on that quota runs until it resets.</summary>
+    private static bool IsSpent(UsageLimit? l) => l is { Percent: >= 100 };
+
+    /// <summary>
+    /// When the account comes back, in the user's own clock: "21:07" later today, "Fri 21:07" on
+    /// another day. A countdown ("3d 6h") makes the reader do arithmetic to learn the one thing
+    /// they want from an empty quota.
+    /// </summary>
+    internal static string ResetClock(DateTimeOffset when)
+    {
+        var local = when.ToLocalTime();
+        string time = local.ToString("H:mm", System.Globalization.CultureInfo.InvariantCulture);
+        return local.Date == DateTime.Today ? time
+            : local.ToString("ddd ", System.Globalization.CultureInfo.InvariantCulture) + time;
+    }
+
+    /// <summary>
+    /// One full red row that reads "out" and when it comes back, in place of the 5h/7d pair, when
+    /// either of the pair is spent. Null when neither is. The later reset wins: with the weekly
+    /// spent, the 5-hour window opening again changes nothing.
+    /// </summary>
+    private static Meter? SpentMeter(string label, UsageLimit? session, UsageLimit? weekly)
+    {
+        var spent = new[] { session, weekly }.Where(IsSpent).ToList();
+        if (spent.Count == 0) return null;
+
+        var back = spent.Select(l => l!.ResetsAt).Where(r => r is not null).Max();
+        string until = back is { } b ? ResetClock(b) : "";
+        string which = spent.Any(l => ReferenceEquals(l, weekly) || l!.Label.EndsWith("7d", StringComparison.OrdinalIgnoreCase)
+                                       || l!.Label.Equals("Weekly", StringComparison.OrdinalIgnoreCase))
+            ? "weekly" : "5-hour";
+
+        return new Meter(
+            label,
+            100,
+            $"{label}: out until {(until.Length > 0 ? until : "reset")} ({which} limit spent)",
+            Subtext: until.Length > 0 ? until : null,
+            BarColour: MeterStrip.High,
+            FigureText: "out",
+            SubtextColour: Color.FromArgb(255, 150, 150));
+    }
+
+    /// <summary>"out" on the header when every Gemini row is spent, so it reads at a glance.</summary>
+    private static string? AntigravityHeaderTag(IReadOnlyList<UsageLimit> limits)
+    {
+        var groups = limits.GroupBy(l => l.Label.StartsWith("IDE", StringComparison.OrdinalIgnoreCase) ? "IDE"
+                                       : l.Label.StartsWith("CLI", StringComparison.OrdinalIgnoreCase) ? "CLI"
+                                       : l.Label).ToList();
+        return groups.Count > 0 && groups.All(g => g.Any(IsSpent)) ? "out" : null;
+    }
+
+    /// <summary>
+    /// Antigravity with nothing to plot yet (starting, standby, not signed in, error) still gets
+    /// the same header and row as a working strip, with the state on the row, instead of one small
+    /// centred word that reads as an empty gap on the bar.
+    /// </summary>
+    private static void PaintAntigravityPlaceholder(Graphics g, Rectangle area, UsageReading? reading, int maxRowsPerColumn)
+    {
+        if (area.Height > area.Width)
+        {
+            PaintState(g, area, reading, isAntigravity: true);
+            return;
+        }
+
+        string figure =
+            !AntigravityUsage.Enabled ? "set up"
+            : reading is { Standby: true } ? "sign in"
+            : reading is { Error: not null, Settled: true } ? "error"
+            : "···";
+
+        var meters = new List<Meter>
+        {
+            new Meter("Gemini", 0, AntigravityTip(reading), BarColour: Theme.Muted, FigureText: figure),
+        };
+
+        MeterStrip.Paint(
+            g, area, meters,
+            lowColour: MeterStrip.VioletLow,
+            headerTitle: area.Width < 120 ? "AG" : "Antigravity",
+            headerTag: null,
+            headerColour: AntigravityTitleColour,
+            sparkleGlyph: true,
+            maxRowsPerColumn: Math.Max(2, maxRowsPerColumn));
     }
 
     private static string GetAntigravityHeaderTitle(int stripWidth, int chatCount) =>
@@ -262,7 +349,9 @@ internal static class UsageStrip
         if (ide5h is not null || ide7d is not null || cli5h is not null || cli7d is not null)
         {
             var paired = new List<Meter>(2);
-            if (ide5h is not null || ide7d is not null)
+            if (SpentMeter("IDE", ide5h, ide7d) is { } ideOut)
+                paired.Add(ideOut);
+            else if (ide5h is not null || ide7d is not null)
             {
                 var p1 = ide5h ?? ide7d!;
                 var p2 = ide5h is not null ? ide7d : null;
@@ -276,7 +365,9 @@ internal static class UsageStrip
                     SecondFigureText: p2 is not null ? $"{p2.Percent}%" : null,
                     SecondSubtext: p2 is not null ? ClaudeUsage.ShortCountdown(p2.ResetsAt) : null));
             }
-            if (cli5h is not null || cli7d is not null)
+            if (SpentMeter("CLI", cli5h, cli7d) is { } cliOut)
+                paired.Add(cliOut);
+            else if (cli5h is not null || cli7d is not null)
             {
                 var p1 = cli5h ?? cli7d!;
                 var p2 = cli5h is not null ? cli7d : null;
@@ -311,6 +402,11 @@ internal static class UsageStrip
                  : l.Label);
 
             bool highlightFirst = !vertical && !useHeaderRow && i == 0;
+            if (SpentMeter(displayLabel, l, null) is { } spent)
+            {
+                meters.Add(spent with { LabelColour = highlightFirst ? AntigravityTitleColour : null, BoldLabel = highlightFirst });
+                continue;
+            }
             string detail = ClaudeUsage.Countdown(l.ResetsAt) is { Length: > 0 } left
                 ? $"{l.Label}: {l.Percent}%  ({left})"
                 : $"{l.Label}: {l.Percent}%";
@@ -338,8 +434,8 @@ internal static class UsageStrip
             return;
         }
 
-        var meters = new List<Meter>(activePrinters.Count);
-        foreach (var p in activePrinters)
+        var meters = new List<Meter>(printers.Count);
+        foreach (var p in printers)
         {
             string rem = BambuUsage.FormatRemaining(p.RemainingMinutes);
             string detail = $"{p.Label}: {BambuUsage.DescribePrinterState(p)}";
@@ -373,7 +469,7 @@ internal static class UsageStrip
                     "ERR",
                     (Color?)Color.FromArgb(255, 120, 120)),
 
-                _ => (
+                BambuPrinterState.Paused => (
                     Math.Clamp(p.Percent, 8, 100),
                     MeterStrip.Mid,
                     (Color?)Color.FromArgb(250, 205, 110),
@@ -381,6 +477,33 @@ internal static class UsageStrip
                     $"{p.Percent}%",
                     "Pause",
                     (Color?)MeterStrip.Mid),
+
+                BambuPrinterState.Finished => (
+                    100,
+                    MeterStrip.BambuDone,
+                    (Color?)Color.FromArgb(145, 220, 195),
+                    false,
+                    "100%",
+                    "Done",
+                    (Color?)Color.FromArgb(130, 220, 190)),
+
+                BambuPrinterState.Offline => (
+                    0,
+                    Theme.Muted,
+                    (Color?)null,
+                    false,
+                    "—",
+                    "Off",
+                    (Color?)Theme.Muted),
+
+                _ => (
+                    0,
+                    Theme.Muted,
+                    (Color?)null,
+                    false,
+                    "—",
+                    "Idle",
+                    (Color?)Theme.Muted),
             };
 
             meters.Add(new Meter(
@@ -1534,7 +1657,13 @@ internal static class UsageStrip
                 "Weekly" => "Weekly (7d)",
                 _ => limit.Label,
             };
-            text.Append($"{friendlyLabel}: {limit.Percent}%");
+            if (IsSpent(limit))
+            {
+                text.Append($"{friendlyLabel}: out");
+                if (limit.ResetsAt is { } back) text.Append($" until {ResetClock(back)}");
+            }
+            else
+                text.Append($"{friendlyLabel}: {limit.Percent}%");
 
             var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
             if (countdown.Length > 0) text.Append($"  ({countdown})");
@@ -1573,7 +1702,13 @@ internal static class UsageStrip
                 "CLI 7d" => "CLI / Remote Weekly (7d)",
                 _ => limit.Label,
             };
-            text.Append($"{friendlyLabel}: {limit.Percent}%");
+            if (IsSpent(limit))
+            {
+                text.Append($"{friendlyLabel}: out");
+                if (limit.ResetsAt is { } back) text.Append($" until {ResetClock(back)}");
+            }
+            else
+                text.Append($"{friendlyLabel}: {limit.Percent}%");
 
             var countdown = ClaudeUsage.Countdown(limit.ResetsAt);
             if (countdown.Length > 0) text.Append($"  ({countdown})");

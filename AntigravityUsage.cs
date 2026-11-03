@@ -1408,6 +1408,13 @@ public static class AntigravityUsage
                     if (!isGeminiGroup && !bucketId.StartsWith("gemini", StringComparison.OrdinalIgnoreCase))
                         continue;
 
+                    // With the weekly limit spent Google marks the 5-hour bucket "disabled" and
+                    // reports it full (remainingFraction 1). Reading that as 0% used paints a
+                    // healthy bar over an account that cannot run anything, so it is dropped and
+                    // the weekly row says when the account comes back.
+                    if (bucket.TryGetProperty("disabled", out var disabledEl) && disabledEl.ValueKind == JsonValueKind.True)
+                        continue;
+
                     int usedPercent = ReadRemainingAsUsedPercent(bucket);
                     var resetsAt = Moment(Text(bucket, "resetTime"));
 
@@ -1426,7 +1433,9 @@ public static class AntigravityUsage
 
             var limits = new List<UsageLimit>();
             if (session is not null) limits.Add(session);
-            if (showWeekly && weekly is not null) limits.Add(weekly);
+            // A spent weekly limit is shown even with weekly rows switched off: it is the only thing
+            // that explains why nothing runs, and it carries the time the account comes back.
+            if (weekly is not null && (showWeekly || weekly.Percent >= 100 || session is null)) limits.Add(weekly);
 
             return new UsageReading(limits, null, false);
         }
