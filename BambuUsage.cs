@@ -1443,6 +1443,15 @@ public static class BambuUsage
                             {
                                 owedPushAllSerials.Add(s);
                             }
+                            // A printer holding an error gets a full status every pushall interval, so a
+                            // clear that its deltas never sent still turns the row back from red.
+                            if (liveBySerial.TryGetValue(s, out var e) && e.Online
+                                && (e.GcodeState is "PAUSE" or "PAUSED" or "FAILED"
+                                    || (e.PrintError != 0 && e.PrintError != UserCancelledPrintError)
+                                    || !string.IsNullOrWhiteSpace(e.HmsErrorSummary)))
+                            {
+                                owedPushAllSerials.Add(s);
+                            }
                             if (owedPushAllSerials.Contains(s)
                                 && (!lastPushAllBySerial.TryGetValue(s, out long lastTick) || nowTick - lastTick >= PushAllMinIntervalMs))
                             {
@@ -1641,6 +1650,16 @@ public static class BambuUsage
                 live.CurrentLayer = 0;
                 live.TotalLayers = 0;
             }
+            // Leaving a paused or failed state means the printer is running again (or reset), so any
+            // error it was holding is resolved. Some firmware (H2D seen) never resends print_error=0 or
+            // an empty hms list in its deltas, which would otherwise keep the old error forever.
+            // A still-active error in this same packet is re-read below.
+            if (next != live.GcodeState && live.GcodeState is "PAUSE" or "PAUSED" or "FAILED"
+                && next is not ("PAUSE" or "PAUSED" or "FAILED"))
+            {
+                live.PrintError = 0;
+                live.HmsErrorSummary = null;
+            }
             live.GcodeState = next;
         }
 
@@ -1747,7 +1766,10 @@ public static class BambuUsage
                 ? live.CloudPrintStatus.ToUpperInvariant()
                 : live.GcodeState.ToUpperInvariant());
 
-        bool hasPrintError = live.PrintError != 0 && live.PrintError != UserCancelledPrintError;
+        // print_error is sticky in the merged state, so it only marks an error while the printer is
+        // actually stopped. A printer that is printing, finished or idle is not in error.
+        bool stopped = rawState is "PAUSE" or "PAUSED" or "FAILED";
+        bool hasPrintError = stopped && live.PrintError != 0 && live.PrintError != UserCancelledPrintError;
         bool hasSeriousHms = !string.IsNullOrWhiteSpace(live.HmsErrorSummary);
 
         BambuPrinterState state;
