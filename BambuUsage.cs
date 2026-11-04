@@ -117,7 +117,13 @@ public static class BambuUsage
         public int Stage { get; set; } = -1;
         public string? HmsErrorSummary { get; set; }
         public DateTimeOffset LastUpdated { get; set; } = DateTimeOffset.MinValue;
+        public DateTimeOffset GcodeStateChangedAt { get; set; } = DateTimeOffset.MinValue;
+        public DateTimeOffset CloudStatusChangedAt { get; set; } = DateTimeOffset.MinValue;
     }
+
+    private static bool IsActiveState(string state) => state is "PREPARE" or "RUNNING" or "ACTIVE" or "PRINTING";
+
+    private static bool IsDoneState(string state) => state is "FINISH" or "SUCCESS" or "IDLE" or "FAILED";
 
     private static readonly object gate = new();
     private static readonly Dictionary<string, PrinterLiveState> liveBySerial = new(StringComparer.OrdinalIgnoreCase);
@@ -1151,7 +1157,11 @@ public static class BambuUsage
                 live.Name = d.Name;
                 live.Model = d.Model;
                 live.Online = d.Online || (mqttConnected && (now - live.LastUpdated) < TimeSpan.FromSeconds(60));
+                string prevCloud = live.CloudPrintStatus;
                 live.CloudPrintStatus = d.PrintStatus;
+                if (!string.Equals(prevCloud, d.PrintStatus, StringComparison.OrdinalIgnoreCase))
+                    live.CloudStatusChangedAt = now;
+                ReconcileCloudStartLocked(live, prevCloud, now);
 
                 if (latestTasks.TryGetValue(d.Id, out var taskTitle) && string.IsNullOrWhiteSpace(live.JobName))
                     live.JobName = taskTitle;
@@ -1637,6 +1647,37 @@ public static class BambuUsage
         }
     }
 
+    /// <summary>
+    /// Bambu Cloud says the printer is printing while MQTT still holds a finished, idle or failed
+    /// state: a new job started and its MQTT deltas never reached us (seen on H2D after a restart
+    /// on the same printer). Ask for a full status, and if the cloud changed after MQTT last did
+    /// and MQTT has gone quiet, show the new job as Preparing until telemetry arrives.
+    /// </summary>
+    private static void ReconcileCloudStartLocked(PrinterLiveState live, string prevCloud, DateTimeOffset now)
+    {
+        string cloud = live.CloudPrintStatus.ToUpperInvariant();
+        if (!live.Online || !IsActiveState(cloud) || !IsDoneState(live.GcodeState))
+            return;
+
+        owedPushAllSerials.Add(live.Id);
+
+        bool cloudMovedAfterMqtt = !string.IsNullOrWhiteSpace(prevCloud)
+            && live.CloudStatusChangedAt > live.GcodeStateChangedAt;
+        bool mqttQuiet = (now - live.LastUpdated) >= TimeSpan.FromSeconds(60);
+        if (cloudMovedAfterMqtt && mqttQuiet)
+        {
+            live.GcodeState = "PREPARE";
+            live.GcodeStateChangedAt = now;
+            live.Percent = 0;
+            live.RemainingMinutes = 0;
+            live.CurrentLayer = 0;
+            live.TotalLayers = 0;
+            live.PrintError = 0;
+            live.HmsErrorSummary = null;
+            Log.Write($"bambu {live.Id}: cloud reports {cloud} while MQTT held a finished state; showing Preparing");
+        }
+    }
+
     private static void MergePrintTelemetry(PrinterLiveState live, JsonElement print)
     {
         if (Text(print, "gcode_state") is { Length: > 0 } state)
@@ -1660,6 +1701,8 @@ public static class BambuUsage
                 live.PrintError = 0;
                 live.HmsErrorSummary = null;
             }
+            if (next != live.GcodeState)
+                live.GcodeStateChangedAt = DateTimeOffset.UtcNow;
             live.GcodeState = next;
         }
 
